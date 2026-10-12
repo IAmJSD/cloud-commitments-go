@@ -81,12 +81,13 @@ func NewClient(cfg Config, hc *http.Client) (*Client, error) {
 }
 
 func newClient(baseURL string, cfg Config, hc *http.Client) (*Client, error) {
-	if strings.TrimSpace(cfg.APIKey.Reveal()) == "" {
+	key := cfg.APIKey.Reveal()
+	if strings.TrimSpace(key) == "" {
 		return nil, errors.New("archera API key is not configured")
 	}
 	// The key is sent and redacted verbatim, so surrounding whitespace would
 	// make the header and the redaction disagree.
-	if cfg.APIKey != strings.TrimSpace(cfg.APIKey) {
+	if key != strings.TrimSpace(key) {
 		return nil, errors.New("archera API key has leading or trailing whitespace")
 	}
 	if !isUUID(cfg.OrgID) {
@@ -97,7 +98,6 @@ func newClient(baseURL string, cfg Config, hc *http.Client) (*Client, error) {
 	}
 	noRedirect := *hc
 	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	key := cfg.APIKey.Reveal()
 	return &Client{
 		baseURL: baseURL,
 		orgID:   cfg.OrgID,

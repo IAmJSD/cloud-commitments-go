@@ -546,7 +546,7 @@ func TestClient_ErrorMessageRedactsBeforeTruncating(t *testing.T) {
 
 func TestNewClient_RejectsPaddedKey(t *testing.T) {
 	for _, k := range []string{testKey + " ", " " + testKey, testKey + "\n"} {
-		_, err := newClient("http://127.0.0.1:1", Config{APIKey: k, OrgID: testOrg}, nil)
+		_, err := newClient("http://127.0.0.1:1", Config{APIKey: NewSecret(k), OrgID: testOrg}, nil)
 		require.Error(t, err, "%q", k)
 		assert.NotContains(t, err.Error(), "sekret")
 	}
