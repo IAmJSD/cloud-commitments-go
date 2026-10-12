@@ -78,7 +78,7 @@
 # (no quotes, no "=", digits only in a "H2:" style tag), which cannot spell an
 # AKIA key or a password assignment.
 ^(SECURITY\.md|\.github/workflows/README\.md|providers/aws/services/AUDIT\.md):[0-9]+:\|[-:| ]+\|$
-^[^:]+\.(go|sh):[0-9]+:[[:space:]]*(//|#)[[:space:]]*((-|─)+)([[:space:]]+(HTTP|[A-Z]{1,3}|([A-Z]?[a-z]+|ID)+|[A-Z][0-9]:|[a-z]+-[a-z]+)([ /()]+(HTTP|[A-Z]{1,3}|([A-Z]?[a-z]+|ID)+|[A-Z][0-9]:|[a-z]+-[a-z]+))*\)?[[:space:]]+((-|─)+))?$
+^[^:]+\.(go|sh):[0-9]+:[[:space:]]*(//|#)[[:space:]]*((-|─)+)([[:space:]]+(HTTP|[A-Z]{1,3}|([A-Z]?[a-z]+|ID)+|[A-Z][0-9]:|[A-Za-z][a-z]*-[a-z]+)([ /()]+(HTTP|[A-Z]{1,3}|([A-Z]?[a-z]+|ID)+|[A-Z][0-9]:|[A-Za-z][a-z]*-[a-z]+))*\)?[[:space:]]+((-|─)+))?$
 # gofmt column alignment in struct fields and map literals (all whitespace runs).
 ^providers/aws/recommendations/client\.go:[0-9]+:[[:space:]]+(spRecs|spErr)[[:space:]]+(\[\]common\.Recommendation|error)$
 ^providers/azure/services/compute/inventory_scope_sdk_test\.go:[0-9]+:[[:space:]]+quantity[[:space:]]+int$
