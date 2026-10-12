@@ -32,6 +32,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **`recommendations.ApplyFamilyNUSizingRDSWithExpiry`:** family-NU sizing
+  that deducts RDS RIs expiring inside the rebuy window from family coverage
+  in normalized units (`min(covered, active - expiring)`), and reports
+  expiring RIs it could not use (`FamilyExpiryReport.Unusable`). Additive;
+  `ApplyFamilyNUSizingRDS` is unchanged. Consumers that pass a rebuy window
+  will see higher RDS counts and costs for families with expiring RIs
+  (LeanerCloud/cloud-commitments-cli#2132).
 - **`insurance.ContractTerms()`:** returns the documented Archera
   `contract_term` values that `Comparison` accepts and the decoder returns, as a
   new sorted slice on every call (#316). The order is lexicographic, not by
