@@ -75,6 +75,18 @@ func TestApplyFamilyNUSizingRDSWithExpiry(t *testing.T) {
 		assert.Equal(t, 16.0, rep.ExpiringNU)
 	})
 
+	t.Run("partial inventory: missing accounts' RIs never remove more than expires", func(t *testing.T) {
+		// Coverage is org-wide (64 NU covered) but only account A's expiring
+		// 16 NU is supplied; account B's 48 NU long-lived RIs are not (cli#2131).
+		// Covered must drop by exactly the expiring 16 NU (60%), not to 0.
+		cov, recs, _ := expiryTestScenario()
+		commits := []common.Commitment{expiryTestRI("db.r6g.large", "a", 4, 15)}
+		sized, _, _, _ := ApplyFamilyNUSizingRDSWithExpiry(recs, cov, 80, commits, 30)
+		require.Len(t, sized, 1)
+		assert.InDelta(t, 60.0, sized[0].ExistingCoveragePct, 1e-9)
+		assert.Equal(t, 2, sized[0].Count, "uncapped deduction would size 8")
+	})
+
 	t.Run("RIs exceeding usage do not inflate the gap", func(t *testing.T) {
 		// covered 40 NU of 80; active 10 x xlarge = 80 NU, 2 expiring (16).
 		// min(40, 64) = 40: unchanged 50%. Naive subtraction would give 24 NU.

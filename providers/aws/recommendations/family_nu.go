@@ -390,10 +390,14 @@ type FamilyExpiryReport struct {
 // running, so the deduction is made per family (region, family, engine,
 // deployment), not per size pool. For each family with expiring active RIs:
 //
-//	post-expiry covered NU = min(CoveredNU, activeNU - expiringNU), floored at 0
+//	post-expiry covered NU = max(CoveredNU - expiringNU, min(CoveredNU, activeNU - expiringNU)), floored at 0
 //
-// activeNU sums count x NU over every active RI in the family. The min() keeps
-// underutilized RIs (more RI units than usage) from overstating the gap.
+// activeNU sums count x NU over every active RI in the family the caller
+// supplied. The min() keeps underutilized RIs (more RI units than usage) from
+// overstating the gap. activeNU may be a subset of the org-wide coverage
+// (the CLI inventory is single-account, cli#2131), so the outer max() caps the
+// deduction at expiringNU: missing RIs must never remove more coverage than
+// actually expires.
 // windowDays <= 0 or no commitments leaves coverage unchanged. A family
 // with several size rows or linked-account rows is deducted once.
 func ApplyFamilyNUSizingRDSWithExpiry(
@@ -422,8 +426,8 @@ func adjustFamilyCoverageForExpiry(familyCov map[string]FamilyCoverage, commitme
 	cutoff := now.Add(time.Duration(windowDays) * 24 * time.Hour)
 	activeNU := make(map[string]float64)
 	expiringNU := make(map[string]float64)
-	for _, c := range commitments {
-		fk, units, expiring, ok := rdsCommitmentFamilyUnits(c, cutoff)
+	for i := range commitments {
+		fk, units, expiring, ok := rdsCommitmentFamilyUnits(&commitments[i], cutoff)
 		if !ok {
 			if expiring {
 				report.Unusable++
@@ -442,7 +446,7 @@ func adjustFamilyCoverageForExpiry(familyCov map[string]FamilyCoverage, commitme
 	}
 	for fk, exp := range expiringNU {
 		fc := familyCov[fk]
-		fc.CoveredNU = math.Min(fc.CoveredNU, math.Max(0, activeNU[fk]-exp))
+		fc.CoveredNU = math.Max(0, math.Max(fc.CoveredNU-exp, math.Min(fc.CoveredNU, activeNU[fk]-exp)))
 		familyCov[fk] = fc
 		report.ExpiringNU += exp
 	}
@@ -453,8 +457,8 @@ func adjustFamilyCoverageForExpiry(familyCov map[string]FamilyCoverage, commitme
 // normalized units. ok is false when the commitment is not an active RDS RI
 // (expiring is then false) or its class cannot be parsed (expiring is then
 // true when it ends inside the window, so the caller can report it).
-func rdsCommitmentFamilyUnits(c common.Commitment, cutoff time.Time) (fk string, units float64, expiring, ok bool) {
-	if (c.Service != common.ServiceRDS && c.Service != common.ServiceRelationalDB) || !commitmentIsActive(c) {
+func rdsCommitmentFamilyUnits(c *common.Commitment, cutoff time.Time) (fk string, units float64, expiring, ok bool) {
+	if (c.Service != common.ServiceRDS && c.Service != common.ServiceRelationalDB) || !commitmentIsActive(*c) {
 		return "", 0, false, false
 	}
 	expiring = !c.EndDate.IsZero() && !c.EndDate.After(cutoff)

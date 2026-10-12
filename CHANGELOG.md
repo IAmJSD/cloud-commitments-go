@@ -34,7 +34,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **`recommendations.ApplyFamilyNUSizingRDSWithExpiry`:** family-NU sizing
   that deducts RDS RIs expiring inside the rebuy window from family coverage
-  in normalized units (`min(covered, active - expiring)`), and reports
+  in normalized units (`max(covered - expiring, min(covered, active - expiring))`,
+  so a partial RI inventory never removes more than expires), and reports
   expiring RIs it could not use (`FamilyExpiryReport.Unusable`). Additive;
   `ApplyFamilyNUSizingRDS` is unchanged. Consumers that pass a rebuy window
   will see higher RDS counts and costs for families with expiring RIs
