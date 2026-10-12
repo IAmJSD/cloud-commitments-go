@@ -27,12 +27,15 @@ import (
 // across engines via the DATABASE_ENGINE filter and pull DEPLOYMENT_OPTION
 // into the GroupBy alongside INSTANCE_TYPE.
 var coverageServiceFilters = []string{
-	"Amazon Elastic Compute Cloud - Compute", // EC2
-	"Amazon ElastiCache",                     // ElastiCache
-	"Amazon OpenSearch Service",              // OpenSearch
-	"Amazon Redshift",                        // Redshift
-	"Amazon MemoryDB",                        // MemoryDB
+	ec2CoverageService,          // EC2
+	"Amazon ElastiCache",        // ElastiCache
+	"Amazon OpenSearch Service", // OpenSearch
+	"Amazon Redshift",           // Redshift
+	"Amazon MemoryDB",           // MemoryDB
 }
+
+// ec2CoverageService is CE's SERVICE dimension value for EC2.
+const ec2CoverageService = "Amazon Elastic Compute Cloud - Compute"
 
 // rdsCoverageEngines enumerates CE's DATABASE_ENGINE dimension values for
 // RDS recommendations. CUDly's parser normalises engine names to lowercase
@@ -177,14 +180,7 @@ func normaliseDeployment(deployment string) string {
 // --target-coverage sizing drops (target-coverage-unknown) rather than
 // treating them as 0% covered.
 func (c *Client) GetRICoverageMap(ctx context.Context, lookbackDays int, regions []string) (PoolCoverageMap, error) {
-	if lookbackDays <= 0 {
-		lookbackDays = 30
-	}
-	end := time.Now().UTC()
-	start := end.AddDate(0, 0, -lookbackDays)
-	startStr := start.Format("2006-01-02")
-	endStr := end.Format("2006-01-02")
-	windowHours := float64(lookbackDays * 24)
+	startStr, endStr, windowHours := coverageWindow(lookbackDays)
 
 	out := make(PoolCoverageMap)
 	// Cost: one CE call per (service, region) for non-RDS; one CE call per
@@ -204,6 +200,33 @@ func (c *Client) GetRICoverageMap(ctx context.Context, lookbackDays int, regions
 		}
 	}
 	return out, nil
+}
+
+// GetEC2RICoverageMap is GetRICoverageMap restricted to EC2: one CE call per
+// region. Non-EC2 services (ElastiCache, OpenSearch, Redshift, MemoryDB)
+// share the "region:instance_type" key shape, so a caller that must report
+// EC2-only coverage cannot recover it from the all-services map by key.
+func (c *Client) GetEC2RICoverageMap(ctx context.Context, lookbackDays int, regions []string) (PoolCoverageMap, error) {
+	startStr, endStr, windowHours := coverageWindow(lookbackDays)
+
+	out := make(PoolCoverageMap)
+	for _, region := range regions {
+		if err := c.fetchCoverageForServiceRegion(ctx, startStr, endStr, windowHours, ec2CoverageService, region, out); err != nil {
+			return nil, fmt.Errorf("fetching EC2 coverage for region %q: %w", region, err)
+		}
+	}
+	return out, nil
+}
+
+// coverageWindow resolves the CE date range and window length in hours for
+// lookbackDays, defaulting a non-positive value to 30.
+func coverageWindow(lookbackDays int) (startStr, endStr string, windowHours float64) {
+	if lookbackDays <= 0 {
+		lookbackDays = 30
+	}
+	end := time.Now().UTC()
+	start := end.AddDate(0, 0, -lookbackDays)
+	return start.Format("2006-01-02"), end.Format("2006-01-02"), float64(lookbackDays * 24)
 }
 
 // fetchCoverageForRDSEngineRegion fetches coverage for one (RDS engine,

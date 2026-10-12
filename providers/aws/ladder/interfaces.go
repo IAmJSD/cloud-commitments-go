@@ -68,13 +68,14 @@ type spLister interface {
 }
 
 // riCoverageSource is the narrow interface for RI coverage data, consumed by
-// GetLayerStates. GetRICoverageMap returns the per-pool org-wide RI coverage
-// map (keyed by "region:instance_type" for EC2) for the given lookback window
+// GetLayerStates. GetEC2RICoverageMap returns the per-pool org-wide EC2 RI
+// coverage map (keyed by "region:instance_type", EC2 pools only) for the
+// given lookback window
 // and regions. Kept single-method (interface segregation) so implementations
 // that only provide coverage need not stub the on-demand series and vice versa;
 // one concrete adapter may still implement both.
 type riCoverageSource interface {
-	GetRICoverageMap(ctx context.Context, lookbackDays int, regions []string) (recommendations.PoolCoverageMap, error)
+	GetEC2RICoverageMap(ctx context.Context, lookbackDays int, regions []string) (recommendations.PoolCoverageMap, error)
 }
 
 // DailyPoint is a single calendar-day entry in the on-demand cost series.

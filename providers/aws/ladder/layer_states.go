@@ -49,7 +49,7 @@ func (a *AWSLadder) GetLayerStates(ctx context.Context, scope ladder.Scope) (map
 		return nil, fmt.Errorf("GetLayerStates: SP listing failed: %w", err)
 	}
 
-	coverageMap, covErr := a.riCoverage.GetRICoverageMap(ctx, a.cfg.lookbackDays(), []string{a.cfg.Region})
+	coverageMap, covErr := a.riCoverage.GetEC2RICoverageMap(ctx, a.cfg.lookbackDays(), []string{a.cfg.Region})
 	// covErr is checked per-layer below; a coverage failure does not fail the
 	// whole snapshot — it degrades CoveragePct to nil.
 
@@ -89,7 +89,7 @@ func (a *AWSLadder) riLayerState(
 		// CoveragePct stays nil (unmeasured). Log so a persistently failing CE
 		// call is visible — silent degradation would quietly disable reshape
 		// triggering downstream.
-		log.Printf("WARNING: AWSLadder GetLayerStates: RI coverage degraded to nil (layer=%s, source=GetRICoverageMap, region=%s): %v",
+		log.Printf("WARNING: AWSLadder GetLayerStates: RI coverage degraded to nil (layer=%s, source=GetEC2RICoverageMap, region=%s): %v",
 			ladder.LayerConvertibleRI, a.cfg.Region, covErr)
 	case len(coverageMap) > 0:
 		state.CoveragePct = computeEC2CoveragePct(coverageMap, a.cfg.Region)
@@ -267,8 +267,9 @@ func sumExpiringSPHourlyCost(sps []ActiveSP, planType string, horizon time.Time)
 }
 
 // computeEC2CoveragePct derives an aggregate EC2 RI coverage percentage from
-// the PoolCoverageMap for the given region. Only EC2 pools (keys matching
-// "region:*" with a non-zero AvgInstancesPerHour or Pct) are considered.
+// the PoolCoverageMap for the given region. The map must come from
+// GetEC2RICoverageMap: other services share the "region:instance_type" key
+// shape and cannot be told apart from EC2 by key.
 //
 // Weighting: when any pool has a non-zero AvgInstancesPerHour, coverage is
 // a weighted average (weight = AvgInstancesPerHour). When all pools have

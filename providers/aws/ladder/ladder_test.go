@@ -52,7 +52,7 @@ type fakeCoverageSource struct {
 	onDemandPoints []DailyPoint
 }
 
-func (f *fakeCoverageSource) GetRICoverageMap(_ context.Context, _ int, _ []string) (recommendations.PoolCoverageMap, error) {
+func (f *fakeCoverageSource) GetEC2RICoverageMap(_ context.Context, _ int, _ []string) (recommendations.PoolCoverageMap, error) {
 	return f.coverageMap, f.coverageErr
 }
 
