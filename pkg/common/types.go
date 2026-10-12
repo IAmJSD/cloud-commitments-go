@@ -673,7 +673,11 @@ func (d NoSQLDetails) GetDetailDescription() string {
 type SavingsPlanDetails struct {
 	PlanType         string  `json:"plan_type"` // Compute, EC2Instance, SageMaker
 	HourlyCommitment float64 `json:"hourly_commitment"`
-	Coverage         string  `json:"coverage,omitempty"`
+	// Currency is the ISO 4217 code HourlyCommitment is denominated in. Azure
+	// requires it to match the billing account currency and fails closed when
+	// it is empty or malformed; empty is never treated as USD.
+	Currency string `json:"currency,omitempty"`
+	Coverage string `json:"coverage,omitempty"`
 	// InstanceFamily is the EC2 instance family recommended by Cost Explorer
 	// (e.g. "m5"). Only populated for EC2Instance Savings Plans; empty for
 	// Compute, SageMaker and Database plans which are family-agnostic. Used at
