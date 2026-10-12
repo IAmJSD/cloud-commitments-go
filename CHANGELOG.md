@@ -32,6 +32,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **`common.SavingsPlanDetails.Currency`:** the ISO 4217 code the hourly
+  commitment is denominated in. Additive and unused until the Azure Savings Plan
+  client starts requiring it (#46).
+
 - **`recommendations.ApplyFamilyNUSizingRDSWithExpiry`:** family-NU sizing
   that deducts RDS RIs expiring inside the rebuy window from family coverage
   in normalized units (`max(covered - expiring, min(covered, active - expiring))`,
