@@ -75,6 +75,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- **Breaking (source):** `insurance.Config.APIKey` is now an opaque
+  `insurance.Secret` (build it with `insurance.NewSecret(key)`) instead of a
+  `string`. The key lives in a closure, so a `Config` held in an unexported
+  struct field no longer prints it under any fmt verb, json, xml, yaml or slog.
+  `Config.Format` is removed (`%v` of a `Config` now prints
+  `{[redacted] <org>}`), and two copies of one `Config` are no longer
+  `reflect.DeepEqual` (#330)
 - **Breaking (source):** `common.PurchaseResult` gained an `ExistingCommitment`
   field. Downstream code that builds it with unkeyed composite literals no
   longer compiles; keyed literals are unaffected. The field is true when a

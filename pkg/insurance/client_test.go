@@ -1,22 +1,28 @@
 package insurance
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/iotest"
+	"text/template"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/httpclient"
 )
@@ -32,7 +38,7 @@ func testClient(t *testing.T, h http.Handler) *Client {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	c, err := newClient(srv.URL, Config{APIKey: testKey, OrgID: testOrg}, srv.Client())
+	c, err := newClient(srv.URL, Config{APIKey: NewSecret(testKey), OrgID: testOrg}, srv.Client())
 	require.NoError(t, err)
 	return c
 }
@@ -40,9 +46,9 @@ func testClient(t *testing.T, h http.Handler) *Client {
 func TestNewClient_ValidatesConfig(t *testing.T) {
 	_, err := NewClient(Config{OrgID: testOrg}, nil)
 	assert.Error(t, err)
-	_, err = NewClient(Config{APIKey: testKey, OrgID: "../x"}, nil)
+	_, err = NewClient(Config{APIKey: NewSecret(testKey), OrgID: "../x"}, nil)
 	assert.Error(t, err)
-	c, err := NewClient(Config{APIKey: testKey, OrgID: testOrg}, nil)
+	c, err := NewClient(Config{APIKey: NewSecret(testKey), OrgID: testOrg}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "https://api.archera.ai", c.baseURL)
 }
@@ -156,7 +162,7 @@ func TestClient_DoesNotMutateCallerHTTPClient(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(srv.Close)
 	hc := srv.Client()
-	_, err := newClient(srv.URL, Config{APIKey: testKey, OrgID: testOrg}, hc)
+	_, err := newClient(srv.URL, Config{APIKey: NewSecret(testKey), OrgID: testOrg}, hc)
 	require.NoError(t, err)
 	assert.Nil(t, hc.CheckRedirect)
 }
@@ -314,7 +320,7 @@ type holder struct {
 }
 
 func TestConfigAndClient_NeverFormatTheKey(t *testing.T) {
-	cfg := Config{APIKey: testKey, OrgID: testOrg}
+	cfg := Config{APIKey: NewSecret(testKey), OrgID: testOrg}
 	c, err := newClient("http://127.0.0.1:1", cfg, nil)
 	require.NoError(t, err)
 	values := []any{cfg, &cfg, c, *c, holder{cfg, c, cfg, []Config{cfg}, map[string]Config{"k": cfg}},
@@ -334,14 +340,78 @@ func TestConfigAndClient_NeverFormatTheKey(t *testing.T) {
 	b, err := json.Marshal(holder{Cfg: cfg})
 	require.NoError(t, err)
 	assert.NotContains(t, string(b), testKey)
+	assert.Contains(t, string(b), `"APIKey":"[redacted]"`)
 	var buf strings.Builder
 	slog.New(slog.NewTextHandler(&buf, nil)).Info("x", "cfg", cfg, "client", c)
 	slog.New(slog.NewJSONHandler(&buf, nil)).Info("x", "cfg", cfg, "client", c)
 	assert.NotContains(t, buf.String(), testKey)
 }
 
+type secretBox struct{ K Secret }
+
+type unexportedSecretHolders struct {
+	cfg  Config
+	pcfg *Config
+	sec  Secret
+	list []Config
+}
+
+// The exported-field paths must print the exact redaction text; the
+// unexported-field paths (where fmt cannot call methods) must not reach the
+// key at all.
+func TestSecret_NeverRevealedByAnyPrinter(t *testing.T) {
+	sec := NewSecret(testKey)
+	cfg := Config{APIKey: sec, OrgID: testOrg}
+	require.Equal(t, testKey, sec.Reveal())
+	assert.Equal(t, "", Secret{}.Reveal())
+
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%d"} {
+		assert.Equal(t, "[redacted]", fmt.Sprintf(verb, sec), verb)
+		assert.Equal(t, "[redacted]", fmt.Sprintf(verb, &sec), verb)
+	}
+	assert.NotContains(t, fmt.Sprintf("%p", &sec), testKey)
+
+	un := unexportedSecretHolders{cfg, &cfg, sec, []Config{cfg}}
+	forbidden := []string{testKey, fmt.Sprintf("%x", testKey), fmt.Sprintf("%q", testKey)}
+	for _, v := range []any{un, &un, []any{un}, map[string]any{"k": un}, fmt.Errorf("w: %w", fmt.Errorf("%v", un))} {
+		for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%d", "%p"} {
+			out := fmt.Sprintf(verb, v)
+			for _, bad := range forbidden {
+				assert.NotContains(t, out, bad, "%s of %T", verb, v)
+			}
+		}
+	}
+
+	xmlOut, err := xml.Marshal(secretBox{sec})
+	require.NoError(t, err)
+	assert.Equal(t, "<secretBox><K>[redacted]</K></secretBox>", string(xmlOut))
+	yamlOut, err := yaml.Marshal(struct{ K Secret }{sec})
+	require.NoError(t, err)
+	assert.Equal(t, "k: '[redacted]'\n", string(yamlOut))
+	jsonOut, err := json.Marshal(struct{ K Secret }{sec})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"K":"[redacted]"}`, string(jsonOut))
+
+	var tpl strings.Builder
+	require.NoError(t, template.Must(template.New("t").Parse("{{.}} {{printf \"%v\" .}}")).Execute(&tpl, cfg))
+	assert.NotContains(t, tpl.String(), testKey)
+
+	var gobBuf bytes.Buffer
+	_ = gob.NewEncoder(&gobBuf).Encode(cfg) // no exported fields on Secret: encodes nothing reachable
+	assert.NotContains(t, gobBuf.String(), testKey)
+
+	var logBuf strings.Builder
+	slog.New(slog.NewTextHandler(&logBuf, nil)).Info("x", "sec", sec, "cfg", cfg)
+	slog.New(slog.NewJSONHandler(&logBuf, nil)).Info("x", "sec", sec, "cfg", cfg)
+	assert.NotContains(t, logBuf.String(), testKey)
+	assert.Contains(t, logBuf.String(), "[redacted]")
+
+	// The key is reachable only through a closure: a copy compares unequal.
+	assert.False(t, reflect.DeepEqual(cfg, Config{APIKey: NewSecret(testKey), OrgID: testOrg}))
+}
+
 func TestNewClient_DefaultHTTPClientIsHardened(t *testing.T) {
-	c, err := NewClient(Config{APIKey: testKey, OrgID: testOrg}, nil)
+	c, err := NewClient(Config{APIKey: NewSecret(testKey), OrgID: testOrg}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, httpclient.New().Timeout, c.hc.Timeout)
 	assert.Equal(t, 30*time.Second, c.hc.Timeout)
@@ -350,7 +420,7 @@ func TestNewClient_DefaultHTTPClientIsHardened(t *testing.T) {
 }
 
 func TestNewClient_RejectsBlankKey(t *testing.T) {
-	_, err := NewClient(Config{APIKey: "   \t", OrgID: testOrg}, nil)
+	_, err := NewClient(Config{APIKey: NewSecret("   \t"), OrgID: testOrg}, nil)
 	assert.Error(t, err)
 }
 
