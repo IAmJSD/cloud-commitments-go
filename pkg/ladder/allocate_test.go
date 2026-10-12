@@ -1883,3 +1883,24 @@ func TestAllocateResult_IsNoOp(t *testing.T) {
 		})
 	}
 }
+
+// TestAllocate_NilInFlightRejected pins the fail-loud contract: a nil
+// InFlightUSDPerHour is an error, never an implicit zero. A caller that forgot
+// to fetch in-flight commitment would otherwise re-plan already-scheduled
+// commitment.
+func TestAllocate_NilInFlightRejected(t *testing.T) {
+	t.Parallel()
+	layers := awsLayers()
+	in := &AllocationInput{
+		Config: validConfigAWS(), Layers: layers, LayerStates: zeroStates(layers),
+		Baseline: UsageBaseline{LowWaterUSDPerHour: ptr(10.0), StableUSDPerHour: ptr(8.0)},
+		Now:      nowFixed(),
+	}
+	res, err := Allocate(in)
+	if err == nil {
+		t.Fatalf("Allocate() = %+v, nil error; want error for nil InFlightUSDPerHour", res)
+	}
+	if !strings.Contains(err.Error(), "InFlightUSDPerHour must not be nil") {
+		t.Errorf("error %q does not name InFlightUSDPerHour", err)
+	}
+}

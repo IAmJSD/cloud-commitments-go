@@ -150,6 +150,10 @@ type Tranche struct {
 	// FiredAt is nil until the tranche actually fires.
 	FiredAt *time.Time
 	// AmountUSDPerHour is the hourly commitment delta for this tranche step.
+	// Unit: the same unit as Allocation.GapUSDPerHour, which is on-demand-
+	// equivalent USD/hr until the OD-to-commitment conversion lands in
+	// Allocate (go#349); after that it is commitment USD/hr, and tranches
+	// persisted before it are in the old unit.
 	// Validation requires any string that big.Rat.SetString parses as a
 	// positive rational (e.g. "3/2", "1.5"); producers should emit the
 	// canonical big.Rat.RatString() form, which is lossless and round-trips

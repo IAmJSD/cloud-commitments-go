@@ -95,14 +95,11 @@ func baseInput(cfg *LadderConfig, allocs []Allocation, now time.Time) *TrancheIn
 	}
 }
 
-// totalAmount sums all amounts across BuyNow actions and Tranches. Panics if
+// totalAmount sums all amounts across Tranches. Panics if
 // a tranche AmountUSDPerHour fails to parse (the test has already verified
 // Validate passes, so this indicates a bug in the test helper).
 func totalAmount(result *TrancheResult) *big.Rat {
 	total := new(big.Rat)
-	for _, a := range result.BuyNow {
-		total.Add(total, a.AmountUSDPerHour)
-	}
 	for _, tr := range result.Tranches {
 		r := new(big.Rat)
 		if _, ok := r.SetString(tr.AmountUSDPerHour); !ok {
@@ -113,15 +110,31 @@ func totalAmount(result *TrancheResult) *big.Rat {
 	return total
 }
 
+// immediate returns the tranches that fire at now (the AfterDays == 0 step),
+// in production order.
+func immediate(result *TrancheResult, now time.Time) []Tranche {
+	var out []Tranche
+	for _, tr := range result.Tranches {
+		if tr.FireAfter.Equal(now) {
+			out = append(out, tr)
+		}
+	}
+	return out
+}
+
+// trancheAmount parses a tranche amount, panicking on a malformed value.
+func trancheAmount(tr Tranche) *big.Rat {
+	r, ok := new(big.Rat).SetString(tr.AmountUSDPerHour)
+	if !ok {
+		panic(fmt.Sprintf("trancheAmount: cannot parse %q", tr.AmountUSDPerHour))
+	}
+	return r
+}
+
 // assertAllValid calls Validate on every produced action and tranche, reporting
 // failures with t.Errorf.
 func assertAllValid(t *testing.T, result *TrancheResult) {
 	t.Helper()
-	for i, a := range result.BuyNow {
-		if err := a.Validate(); err != nil {
-			t.Errorf("BuyNow[%d].Validate() = %v", i, err)
-		}
-	}
 	for i, tr := range result.Tranches {
 		if err := tr.Validate(); err != nil {
 			t.Errorf("Tranches[%d].Validate() = %v", i, err)
@@ -158,25 +171,20 @@ func TestBuildTranches_ThreeStepRamp(t *testing.T) {
 	// We assert the total instead of the exact step value because 0.4 is not
 	// exactly representable in float64; the amount is gap * SetFloat64(0.4),
 	// which is close but not equal to the rational 2/5.
-	if len(result.BuyNow) != 1 {
-		t.Fatalf("BuyNow count = %d, want 1", len(result.BuyNow))
+	if len(result.Tranches) != 3 {
+		t.Fatalf("Tranches count = %d, want 3 (immediate + days 30 and 60)", len(result.Tranches))
 	}
-	if result.BuyNow[0].AmountUSDPerHour.Sign() <= 0 {
-		t.Errorf("BuyNow[0].AmountUSDPerHour must be positive, got %s",
-			result.BuyNow[0].AmountUSDPerHour.RatString())
+	if trancheAmount(result.Tranches[0]).Sign() <= 0 {
+		t.Errorf("Tranches[0].AmountUSDPerHour must be positive, got %s", result.Tranches[0].AmountUSDPerHour)
 	}
-
-	// Two future tranches for days 30 and 60.
-	if len(result.Tranches) != 2 {
-		t.Fatalf("Tranches count = %d, want 2", len(result.Tranches))
-	}
-	wantDay30 := now.AddDate(0, 0, 30)
-	if !result.Tranches[0].FireAfter.Equal(wantDay30) {
-		t.Errorf("Tranches[0].FireAfter = %v, want %v", result.Tranches[0].FireAfter, wantDay30)
-	}
-	wantDay60 := now.AddDate(0, 0, 60)
-	if !result.Tranches[1].FireAfter.Equal(wantDay60) {
-		t.Errorf("Tranches[1].FireAfter = %v, want %v", result.Tranches[1].FireAfter, wantDay60)
+	for i, days := range []int{0, 30, 60} {
+		want := now.AddDate(0, 0, days)
+		if !result.Tranches[i].FireAfter.Equal(want) {
+			t.Errorf("Tranches[%d].FireAfter = %v, want %v", i, result.Tranches[i].FireAfter, want)
+		}
+		if result.Tranches[i].StepIndex != i {
+			t.Errorf("Tranches[%d].StepIndex = %d, want %d", i, result.Tranches[i].StepIndex, i)
+		}
 	}
 
 	// Grand total must reconstruct the gap exactly.
@@ -220,8 +228,8 @@ func TestBuildTranches_FullyDelayedRamp(t *testing.T) {
 		t.Fatalf("BuildTranches() error = %v", err)
 	}
 
-	if len(result.BuyNow) != 0 {
-		t.Errorf("BuyNow count = %d, want 0 (fully delayed ramp)", len(result.BuyNow))
+	if n := len(immediate(result, now)); n != 0 {
+		t.Errorf("immediate tranche count = %d, want 0 (fully delayed ramp)", n)
 	}
 	if len(result.Tranches) != 2 {
 		t.Fatalf("Tranches count = %d, want 2", len(result.Tranches))
@@ -236,7 +244,7 @@ func TestBuildTranches_FullyDelayedRamp(t *testing.T) {
 }
 
 // TestBuildTranches_SingleStep verifies a single-step ramp (fraction 1.0,
-// AfterDays 0): everything becomes a buy-now action with no tranches.
+// AfterDays 0): everything becomes one tranche that fires at Now.
 func TestBuildTranches_SingleStep(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
@@ -256,15 +264,14 @@ func TestBuildTranches_SingleStep(t *testing.T) {
 		t.Fatalf("BuildTranches() error = %v", err)
 	}
 
-	if len(result.BuyNow) != 1 {
-		t.Fatalf("BuyNow count = %d, want 1", len(result.BuyNow))
+	if len(result.Tranches) != 1 {
+		t.Fatalf("Tranches count = %d, want 1", len(result.Tranches))
 	}
-	if len(result.Tranches) != 0 {
-		t.Errorf("Tranches count = %d, want 0", len(result.Tranches))
+	if !result.Tranches[0].FireAfter.Equal(now) {
+		t.Errorf("Tranches[0].FireAfter = %v, want Now %v", result.Tranches[0].FireAfter, now)
 	}
-	if result.BuyNow[0].AmountUSDPerHour.Cmp(gap) != 0 {
-		t.Errorf("BuyNow[0].Amount = %s, want %s",
-			result.BuyNow[0].AmountUSDPerHour.RatString(), gap.RatString())
+	if got := trancheAmount(result.Tranches[0]); got.Cmp(gap) != 0 {
+		t.Errorf("Tranches[0].Amount = %s, want %s", got.RatString(), gap.RatString())
 	}
 	assertAllValid(t, result)
 }
@@ -304,30 +311,19 @@ func TestBuildTranches_MultipleAllocations(t *testing.T) {
 	first := buildOnce()
 	second := buildOnce()
 
-	// Three allocations x one buy-now step = three buy-now actions.
-	if len(first.BuyNow) != 3 {
-		t.Errorf("BuyNow count = %d, want 3", len(first.BuyNow))
+	// Three allocations x three steps = nine tranches, three of them immediate.
+	if len(first.Tranches) != 9 {
+		t.Errorf("Tranches count = %d, want 9", len(first.Tranches))
 	}
-	// Three allocations x two future steps = six tranches.
-	if len(first.Tranches) != 6 {
-		t.Errorf("Tranches count = %d, want 6", len(first.Tranches))
+	if n := len(immediate(first, now)); n != 3 {
+		t.Errorf("immediate tranche count = %d, want 3", n)
 	}
 
 	// Determinism: lengths must match first (a shorter second run must fail
 	// loudly, not pass silently on the shared prefix), then per-element
 	// amounts must match between runs.
-	if len(first.BuyNow) != len(second.BuyNow) {
-		t.Fatalf("BuyNow lengths differ between runs: %d vs %d", len(first.BuyNow), len(second.BuyNow))
-	}
 	if len(first.Tranches) != len(second.Tranches) {
 		t.Fatalf("Tranches lengths differ between runs: %d vs %d", len(first.Tranches), len(second.Tranches))
-	}
-	for i := range first.BuyNow {
-		a1 := first.BuyNow[i].AmountUSDPerHour
-		a2 := second.BuyNow[i].AmountUSDPerHour
-		if a1.Cmp(a2) != 0 {
-			t.Errorf("BuyNow[%d] amounts differ between runs: %s vs %s", i, a1.RatString(), a2.RatString())
-		}
 	}
 	for i := range first.Tranches {
 		if first.Tranches[i].AmountUSDPerHour != second.Tranches[i].AmountUSDPerHour {
@@ -340,8 +336,7 @@ func TestBuildTranches_MultipleAllocations(t *testing.T) {
 	// Output ordering: processAllocation iterates allocations in slice order;
 	// within each allocation steps run in schedule order. So for 3 allocs and
 	// 3 steps (day0/day30/day60):
-	//   BuyNow: [alloc0-step0, alloc1-step0, alloc2-step0]
-	//   Tranches: [alloc0-step1, alloc0-step2, alloc1-step1, alloc1-step2, alloc2-step1, alloc2-step2]
+	//   Tranches: [alloc0-step0..2, alloc1-step0..2, alloc2-step0..2]
 	wantGaps := []*big.Rat{
 		new(big.Rat).SetFrac64(3, 1),
 		new(big.Rat).SetFrac64(5, 1),
@@ -353,15 +348,12 @@ func TestBuildTranches_MultipleAllocations(t *testing.T) {
 		t.Errorf("total amount = %s, want %s", got.RatString(), wantTotal.RatString())
 	}
 
-	// Per-allocation totals: alloc[i] occupies BuyNow[i] and Tranches[i*2], Tranches[i*2+1].
+	// Per-allocation totals: alloc[i] occupies Tranches[i*3 : i*3+3].
 	for i, wantGap := range wantGaps {
-		buyNowAmt := first.BuyNow[i].AmountUSDPerHour
-		tr1Rat := new(big.Rat)
-		tr2Rat := new(big.Rat)
-		// errcheck excluded for _test.go; Validate already confirmed these parse.
-		tr1Rat.SetString(first.Tranches[i*2].AmountUSDPerHour)
-		tr2Rat.SetString(first.Tranches[i*2+1].AmountUSDPerHour)
-		layerTotal := new(big.Rat).Add(buyNowAmt, new(big.Rat).Add(tr1Rat, tr2Rat))
+		layerTotal := new(big.Rat)
+		for _, tr := range first.Tranches[i*3 : i*3+3] {
+			layerTotal.Add(layerTotal, trancheAmount(tr))
+		}
 		if layerTotal.Cmp(wantGap) != 0 {
 			t.Errorf("allocation[%d] total = %s, want %s (gap not reconstructed)",
 				i, layerTotal.RatString(), wantGap.RatString())
@@ -394,12 +386,12 @@ func TestBuildTranches_InexactFractionRemainder(t *testing.T) {
 		t.Fatalf("BuildTranches() error = %v", err)
 	}
 
-	// 1 buy-now (step 0, AfterDays==0) + 2 tranches (steps 1 and 2).
-	if len(result.BuyNow) != 1 {
-		t.Errorf("BuyNow count = %d, want 1", len(result.BuyNow))
+	// 3 steps = 3 tranches, the first immediate.
+	if len(result.Tranches) != 3 {
+		t.Errorf("Tranches count = %d, want 3", len(result.Tranches))
 	}
-	if len(result.Tranches) != 2 {
-		t.Errorf("Tranches count = %d, want 2", len(result.Tranches))
+	if n := len(immediate(result, now)); n != 1 {
+		t.Errorf("immediate tranche count = %d, want 1", n)
 	}
 
 	// Grand total must be exactly $5 regardless of float64 fraction imprecision.
@@ -653,8 +645,8 @@ func TestBuildTranches_StepIndexStamped(t *testing.T) {
 		t.Fatalf("BuildTranches() error = %v", err)
 	}
 
-	if len(result.BuyNow) != 0 {
-		t.Errorf("BuyNow count = %d, want 0 (all steps delayed)", len(result.BuyNow))
+	if n := len(immediate(result, now)); n != 0 {
+		t.Errorf("immediate tranche count = %d, want 0 (all steps delayed)", n)
 	}
 	if len(result.Tranches) != 3 {
 		t.Fatalf("Tranches count = %d, want 3", len(result.Tranches))
@@ -689,82 +681,11 @@ func TestBuildTranches_EmptyAllocations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildTranches() error = %v", err)
 	}
-	if len(result.BuyNow) != 0 {
-		t.Errorf("BuyNow count = %d, want 0 for empty allocations", len(result.BuyNow))
-	}
 	if len(result.Tranches) != 0 {
 		t.Errorf("Tranches count = %d, want 0 for empty allocations", len(result.Tranches))
 	}
-}
-
-// TestBuildTranches_RationaleContents verifies that the rationale string on a
-// buy-now action embeds the step index, step count, and the original allocation
-// rationale.
-func TestBuildTranches_RationaleContents(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	allocRationale := "flex layer: low_water=$5.0000/hr, gap=$5.0000/hr"
-	in := &TrancheInput{
-		Config: baseConfig(singleStepRamp()),
-		Allocations: []Allocation{{
-			Layer:         LayerComputeSP,
-			GapUSDPerHour: new(big.Rat).SetInt64(5),
-			Rationale:     allocRationale,
-			DataSources:   []string{"cost-explorer"},
-		}},
-		RunID:         "run-rationale",
-		Term:          Term1Year,
-		PaymentOption: PaymentNoUpfront,
-		Now:           now,
-		NewID:         seqID("r"),
-	}
-
-	result, err := BuildTranches(in)
-	if err != nil {
-		t.Fatalf("BuildTranches() error = %v", err)
-	}
-	if len(result.BuyNow) != 1 {
-		t.Fatalf("BuyNow count = %d, want 1", len(result.BuyNow))
-	}
-
-	r := result.BuyNow[0].Rationale
-	checks := []string{"ramp step 1/1", "100%", allocRationale}
-	for _, want := range checks {
-		if !strings.Contains(r, want) {
-			t.Errorf("rationale %q missing expected substring %q", r, want)
-		}
-	}
-}
-
-// TestBuildTranches_DataSourcesPropagated verifies that the DataSources from
-// each allocation are propagated verbatim to each buy-now PlannedAction.
-func TestBuildTranches_DataSourcesPropagated(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
-	wantSources := []string{"cost-explorer", "cloudwatch"}
-
-	in := baseInput(baseConfig(singleStepRamp()), []Allocation{{
-		Layer:         LayerComputeSP,
-		GapUSDPerHour: new(big.Rat).SetInt64(3),
-		Rationale:     "ds test",
-		DataSources:   wantSources,
-	}}, now)
-
-	result, err := BuildTranches(in)
-	if err != nil {
-		t.Fatalf("BuildTranches() error = %v", err)
-	}
-	if len(result.BuyNow) != 1 {
-		t.Fatalf("BuyNow count = %d, want 1", len(result.BuyNow))
-	}
-	got := result.BuyNow[0].DataSources
-	if len(got) != len(wantSources) {
-		t.Fatalf("DataSources len = %d, want %d", len(got), len(wantSources))
-	}
-	for i, s := range wantSources {
-		if got[i] != s {
-			t.Errorf("DataSources[%d] = %q, want %q", i, got[i], s)
-		}
+	if len(result.Tranches) != 0 {
+		t.Errorf("Tranches count = %d, want 0 for empty allocations", len(result.Tranches))
 	}
 }
 
@@ -863,11 +784,6 @@ func TestBuildTranches_EpsilonOvershootClamped(t *testing.T) {
 
 	// No output item may carry a zero or negative amount: the overshot step is
 	// clamped to the remaining gap and the starved last step is skipped.
-	for i, a := range result.BuyNow {
-		if a.AmountUSDPerHour.Sign() <= 0 {
-			t.Errorf("BuyNow[%d] amount = %s, want > 0", i, a.AmountUSDPerHour.RatString())
-		}
-	}
 	for i, tr := range result.Tranches {
 		r := new(big.Rat)
 		if _, ok := r.SetString(tr.AmountUSDPerHour); !ok {
@@ -881,11 +797,11 @@ func TestBuildTranches_EpsilonOvershootClamped(t *testing.T) {
 	// Concretely: buy-now consumes gap*0.5 exactly (0.5 is representable);
 	// step 1 overshoots and is clamped to the remaining gap*0.5; step 2 is
 	// starved to zero and skipped.
-	if len(result.BuyNow) != 1 {
-		t.Errorf("BuyNow count = %d, want 1", len(result.BuyNow))
+	if len(result.Tranches) != 2 {
+		t.Errorf("Tranches count = %d, want 2 (starved last step skipped)", len(result.Tranches))
 	}
-	if len(result.Tranches) != 1 {
-		t.Errorf("Tranches count = %d, want 1 (starved last step skipped)", len(result.Tranches))
+	if n := len(immediate(result, now)); n != 1 {
+		t.Errorf("immediate tranche count = %d, want 1", n)
 	}
 	assertAllValid(t, result)
 }
@@ -932,33 +848,40 @@ func TestBuildTranches_DuplicateIDsRejected(t *testing.T) {
 	assertAllValid(t, result)
 }
 
-// TestBuildTranches_SmallFractionRationale verifies that a small step fraction
-// renders with meaningful precision in the rationale (e.g. "0.4%") instead of
-// the misleading "(0%)" that zero-decimal rounding would produce on a
-// positive purchase.
-func TestBuildTranches_SmallFractionRationale(t *testing.T) {
+// TestBuildTranches_ImmediateStepIsTranche is the go#36 regression: gap $10/hr
+// over ramp [{0, 0.5}, {30, 0.5}]. The AfterDays == 0 half used to be returned
+// as a BuyNow action that no consumer persisted, so in-flight netting never saw
+// it. It must now be a tranche that fires at Now, so total persisted
+// commitment equals the gap exactly.
+func TestBuildTranches_ImmediateStepIsTranche(t *testing.T) {
 	t.Parallel()
-	now := time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC)
-	ramp := RampSchedule{Steps: []RampStep{
-		{AfterDays: 0, Fraction: 0.004},
-		{AfterDays: 30, Fraction: 0.996},
-	}}
-	in := baseInput(baseConfig(ramp), []Allocation{
-		mkAlloc(LayerComputeSP, 100),
-	}, now)
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	ramp := RampSchedule{Steps: []RampStep{{AfterDays: 0, Fraction: 0.5}, {AfterDays: 30, Fraction: 0.5}}}
+	gap := new(big.Rat).SetInt64(10)
+	in := baseInput(baseConfig(ramp), []Allocation{mkAlloc(LayerComputeSP, 10)}, now)
 
 	result, err := BuildTranches(in)
 	if err != nil {
 		t.Fatalf("BuildTranches() error = %v", err)
 	}
-	if len(result.BuyNow) != 1 {
-		t.Fatalf("BuyNow count = %d, want 1", len(result.BuyNow))
+	if len(result.Tranches) != 2 {
+		t.Fatalf("Tranches count = %d, want 2 (immediate + day 30)", len(result.Tranches))
 	}
-	r := result.BuyNow[0].Rationale
-	if !strings.Contains(r, "(0.4%)") {
-		t.Errorf("rationale %q must render the small fraction as \"(0.4%%)\"", r)
+	imm := immediate(result, now)
+	if len(imm) != 1 || imm[0].StepIndex != 0 {
+		t.Fatalf("immediate tranches = %+v, want exactly step 0", imm)
 	}
-	if strings.Contains(r, "(0%)") {
-		t.Errorf("rationale %q renders a positive purchase as \"(0%%)\"", r)
+	five := new(big.Rat).SetInt64(5)
+	for i, tr := range result.Tranches {
+		if got := trancheAmount(tr); got.Cmp(five) != 0 {
+			t.Errorf("Tranches[%d] amount = %s, want 5", i, got.RatString())
+		}
+		if tr.Status != TrancheStatusScheduled {
+			t.Errorf("Tranches[%d].Status = %q, want scheduled", i, tr.Status)
+		}
 	}
+	if got := totalAmount(result); got.Cmp(gap) != 0 {
+		t.Errorf("total = %s, want %s", got.RatString(), gap.RatString())
+	}
+	assertAllValid(t, result)
 }
