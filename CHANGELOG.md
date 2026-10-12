@@ -97,6 +97,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- **BREAKING `ladder.TrancheResult.BuyNow` removed; `BuildTranches` now emits a
+  `Tranche` for every ramp step, including `AfterDays == 0`** (its `FireAfter`
+  equals `TrancheInput.Now`). The immediate step was returned as a `BuyNow`
+  action that the platform never persisted, so in-flight netting could not see
+  it (#36). The only consumer is the platform's `internal/server/handler_ladder.go`;
+  cloud-commitments-cli and cloud-commitments-mcp do not reference it. Buy-now
+  rationale and data sources are no longer carried on the immediate step
+  (tranches have no such fields). `Tranche.AmountUSDPerHour` and
+  `AllocationInput.InFlightUSDPerHour` now document their unit (#349).
+
 - **Breaking (source):** `insurance.Config.APIKey` is now an opaque
   `insurance.Secret` (build it with `insurance.NewSecret(key)`) instead of a
   `string`. The key lives in a closure, so a `Config` held in an unexported
