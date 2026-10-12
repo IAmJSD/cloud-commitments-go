@@ -377,11 +377,30 @@ type FamilyExpiryReport struct {
 	// ExpiringNU is the normalized units of active RDS RIs ending inside the
 	// window that were deducted from family coverage.
 	ExpiringNU float64
+	// ReplacementNU is the normalized units of visible active, non-expiring RDS
+	// RIs that started inside the coverage lookback and so are not yet in the
+	// lagged coverage, summed over families that have expiring RIs. It is only
+	// non-zero when FamilyExpiryOptions.CoverageLookbackDays > 0.
+	ReplacementNU float64
 	// Unusable counts active RDS RIs expiring inside the window that could not
 	// be deducted: an unparsable instance class (NU 0) or a family key with no
 	// coverage family (e.g. an engine spelled differently from the coverage
 	// report). Callers must surface this; it never means "no expiry".
 	Unusable int
+}
+
+// FamilyExpiryOptions configures ApplyFamilyNUSizingRDSWithExpiryOptions.
+type FamilyExpiryOptions struct {
+	// WindowDays is the rebuy window: active RIs ending within it are treated
+	// as expiring. <= 0 disables the expiry adjustment.
+	WindowDays int
+	// CoverageLookbackDays is the lookback, in days, of the Cost Explorer
+	// coverage average the caller passed in (the lookbackDays given to
+	// GetRICoverageMap). Coverage is an average over that period, so an RI that
+	// started inside it is not yet fully reflected. Visible active, non-expiring
+	// RIs that started inside it are credited as already-bought replacements.
+	// <= 0 credits none, which is exactly ApplyFamilyNUSizingRDSWithExpiry.
+	CoverageLookbackDays int
 }
 
 // ApplyFamilyNUSizingRDSWithExpiry is ApplyFamilyNUSizingRDS with rebuy-window
@@ -400,6 +419,10 @@ type FamilyExpiryReport struct {
 // actually expires.
 // windowDays <= 0 or no commitments leaves coverage unchanged. A family
 // with several size rows or linked-account rows is deducted once.
+//
+// This form ignores replacement RIs the account already bought for the
+// expiring ones; callers that know the coverage lookback should use
+// ApplyFamilyNUSizingRDSWithExpiryOptions.
 func ApplyFamilyNUSizingRDSWithExpiry(
 	recs []common.Recommendation,
 	coverage PoolCoverageMap,
@@ -407,25 +430,75 @@ func ApplyFamilyNUSizingRDSWithExpiry(
 	commitments []common.Commitment,
 	windowDays int,
 ) (sizedRDS, nonRDS []common.Recommendation, drops FamilyDropCounts, expiry FamilyExpiryReport) {
+	return ApplyFamilyNUSizingRDSWithExpiryOptions(recs, coverage, targetPct, commitments,
+		FamilyExpiryOptions{WindowDays: windowDays})
+}
+
+// ApplyFamilyNUSizingRDSWithExpiryOptions is ApplyFamilyNUSizingRDSWithExpiry
+// that also credits replacements already bought. With R = the NU of visible
+// active, non-expiring RIs in the family that started within
+// opts.CoverageLookbackDays, the family's post-expiry covered NU is
+//
+//	max(0, max(min(C, C - E + R), min(C, A - E)))
+//
+// where C is CoveredNU, E the expiring NU and A the active NU. R only raises
+// the first term, so the result is never below the R = 0 formula (the purchase
+// never grows), never above C, and never more than E below C. Replacement RIs
+// bought inside the lookback are in the lagged C only in part, so crediting
+// them in full can only under-count the gap, never over-count it. With full
+// inventory the min(C, A - E) term already counts them.
+func ApplyFamilyNUSizingRDSWithExpiryOptions(
+	recs []common.Recommendation,
+	coverage PoolCoverageMap,
+	targetPct float64,
+	commitments []common.Commitment,
+	opts FamilyExpiryOptions,
+) (sizedRDS, nonRDS []common.Recommendation, drops FamilyDropCounts, expiry FamilyExpiryReport) {
 	if targetPct <= 0 || targetPct > 100 {
 		return nil, recs, drops, expiry
 	}
 	familyCov := AggregateRDSFamilyCoverage(coverage)
-	expiry = adjustFamilyCoverageForExpiry(familyCov, commitments, windowDays, time.Now())
+	expiry = adjustFamilyCoverageForExpiry(familyCov, commitments, opts, time.Now())
 	sizedRDS, nonRDS, drops = sizeRDSFamilies(recs, familyCov, targetPct)
 	return sizedRDS, nonRDS, drops, expiry
 }
 
 // adjustFamilyCoverageForExpiry mutates familyCov (a fresh aggregate owned by
-// the caller) as described on ApplyFamilyNUSizingRDSWithExpiry.
-func adjustFamilyCoverageForExpiry(familyCov map[string]FamilyCoverage, commitments []common.Commitment, windowDays int, now time.Time) FamilyExpiryReport {
+// the caller) as described on ApplyFamilyNUSizingRDSWithExpiryOptions.
+func adjustFamilyCoverageForExpiry(familyCov map[string]FamilyCoverage, commitments []common.Commitment, opts FamilyExpiryOptions, now time.Time) FamilyExpiryReport {
 	var report FamilyExpiryReport
-	if windowDays <= 0 || len(commitments) == 0 {
+	if opts.WindowDays <= 0 || len(commitments) == 0 {
 		return report
 	}
-	cutoff := now.Add(time.Duration(windowDays) * 24 * time.Hour)
-	activeNU := make(map[string]float64)
-	expiringNU := make(map[string]float64)
+	totals := tallyFamilyCommitments(familyCov, commitments, opts, now, &report)
+	for fk, exp := range totals.expiring {
+		fc := familyCov[fk]
+		rep := totals.replacement[fk]
+		fc.CoveredNU = math.Max(0, math.Max(math.Min(fc.CoveredNU, fc.CoveredNU-exp+rep), math.Min(fc.CoveredNU, totals.active[fk]-exp)))
+		familyCov[fk] = fc
+		report.ExpiringNU += exp
+		report.ReplacementNU += rep
+	}
+	return report
+}
+
+// familyNUTotals holds per-family normalized-unit sums over the inventory.
+type familyNUTotals struct {
+	active      map[string]float64 // every active RI
+	expiring    map[string]float64 // active RIs ending inside the rebuy window
+	replacement map[string]float64 // active, non-expiring RIs started inside the coverage lookback
+}
+
+// tallyFamilyCommitments sums the inventory per family and counts expiring RIs
+// it cannot use into report.Unusable.
+func tallyFamilyCommitments(familyCov map[string]FamilyCoverage, commitments []common.Commitment, opts FamilyExpiryOptions, now time.Time, report *FamilyExpiryReport) familyNUTotals {
+	cutoff := now.Add(time.Duration(opts.WindowDays) * 24 * time.Hour)
+	lagStart := now.Add(-time.Duration(opts.CoverageLookbackDays) * 24 * time.Hour)
+	t := familyNUTotals{
+		active:      make(map[string]float64),
+		expiring:    make(map[string]float64),
+		replacement: make(map[string]float64),
+	}
 	for i := range commitments {
 		fk, units, expiring, ok := rdsCommitmentFamilyUnits(&commitments[i], cutoff)
 		if !ok {
@@ -434,23 +507,20 @@ func adjustFamilyCoverageForExpiry(familyCov map[string]FamilyCoverage, commitme
 			}
 			continue
 		}
-		activeNU[fk] += units
+		t.active[fk] += units
 		if !expiring {
+			if opts.CoverageLookbackDays > 0 && commitments[i].StartDate.After(lagStart) {
+				t.replacement[fk] += units
+			}
 			continue
 		}
 		if _, known := familyCov[fk]; !known {
 			report.Unusable++
 			continue
 		}
-		expiringNU[fk] += units
+		t.expiring[fk] += units
 	}
-	for fk, exp := range expiringNU {
-		fc := familyCov[fk]
-		fc.CoveredNU = math.Max(0, math.Max(fc.CoveredNU-exp, math.Min(fc.CoveredNU, activeNU[fk]-exp)))
-		familyCov[fk] = fc
-		report.ExpiringNU += exp
-	}
-	return report
+	return t
 }
 
 // rdsCommitmentFamilyUnits maps an active RDS commitment to its family key and
