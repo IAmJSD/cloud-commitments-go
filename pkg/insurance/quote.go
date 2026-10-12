@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,27 @@ import (
 // (encoding/json behavior), so "FEE_HOURLY" is read as fee_hourly.
 
 var errMissing = errors.New("required field missing or null")
+
+// vendorEnumRE matches a plausible enum identifier. Only such a value is echoed
+// in a decode error; anything else (long, control characters, free text) is
+// reported by length so a hostile response cannot flood logs or inject text
+// into an error a consumer prints or returns to an LLM.
+var vendorEnumRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,32}$`)
+
+// describeVendorValue renders a rejected vendor value for an error message. A
+// new vendor enum value is the realistic trigger, so identifiers are shown.
+// Every vendor string interpolated into an error must go through it. Any
+// future int/float wire field would echo "number <literal>" from encoding/json
+// and needs the same care; the other echoes in this package are bounded
+// (exchange "invalid decimal: %q" <= 64 bytes, "%.20q" in the number check,
+// JSON syntax errors quote one character, client.go request errors echo
+// caller input).
+func describeVendorValue(s string) string {
+	if vendorEnumRE.MatchString(s) {
+		return strconv.Quote(s)
+	}
+	return fmt.Sprintf("(%d bytes, not shown)", len(s))
+}
 
 // wireNum holds the raw text of a JSON value that must be a number. Unlike
 // json.Number it keeps a quoted string's quotes, so ParseDecimalRat rejects it
@@ -456,7 +478,7 @@ func parsePayment(s string) (PaymentOption, error) {
 	case "":
 		return "", errMissing
 	default:
-		return "", fmt.Errorf("unsupported value %q", s)
+		return "", fmt.Errorf("unsupported value %s", describeVendorValue(s))
 	}
 }
 
@@ -478,7 +500,7 @@ func parseTermReason(s string) (TermReason, error) {
 	case "":
 		return "", errMissing
 	default:
-		return "", fmt.Errorf("unsupported value %q", s)
+		return "", fmt.Errorf("unsupported value %s", describeVendorValue(s))
 	}
 }
 
@@ -490,7 +512,7 @@ func parsePlanStatus(s string) (PlanStatus, error) {
 	case "":
 		return "", errMissing
 	default:
-		return "", fmt.Errorf("unsupported value %q", s)
+		return "", fmt.Errorf("unsupported value %s", describeVendorValue(s))
 	}
 }
 
@@ -504,7 +526,7 @@ func parseProvider(s *string) (common.ProviderType, error) {
 	case common.ProviderAWS, common.ProviderAzure, common.ProviderGCP:
 		return p, nil
 	default:
-		return "", fmt.Errorf("unsupported value %q", *s)
+		return "", fmt.Errorf("unsupported value %s", describeVendorValue(*s))
 	}
 }
 
@@ -513,7 +535,7 @@ func nullableTerm(s *string) (*string, error) {
 		return nil, nil
 	}
 	if _, ok := contractTerms[*s]; !ok {
-		return nil, fmt.Errorf("unsupported value %q", *s)
+		return nil, fmt.Errorf("unsupported value %s", describeVendorValue(*s))
 	}
 	return s, nil
 }

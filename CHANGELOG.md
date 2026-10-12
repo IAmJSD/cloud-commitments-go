@@ -93,6 +93,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **`pkg/insurance`:** decode errors no longer echo an uncapped vendor value
+  (#336). A rejected enum value is shown only when it is a short identifier
+  (`[A-Za-z0-9_.-]`, up to 32 bytes); anything else is reported as
+  `(N bytes, not shown)`, so a hostile response cannot flood logs or inject
+  text into an error that a consumer prints or returns to an LLM.
 - **Units change (Azure Consumption recommendations):** the cost fields were
   amounts over the API's lookback window but were treated as monthly figures
   and term totals (#267). For recommendations from the Consumption
