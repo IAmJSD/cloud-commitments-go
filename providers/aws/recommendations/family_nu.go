@@ -3,6 +3,7 @@ package recommendations
 import (
 	"math"
 	"strings"
+	"time"
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
 )
@@ -188,7 +189,17 @@ func ApplyFamilyNUSizingRDS(
 	if targetPct <= 0 || targetPct > 100 {
 		return nil, recs, drops
 	}
-	familyCov := AggregateRDSFamilyCoverage(coverage)
+	return sizeRDSFamilies(recs, AggregateRDSFamilyCoverage(coverage), targetPct)
+}
+
+// sizeRDSFamilies is the shared body of ApplyFamilyNUSizingRDS and
+// ApplyFamilyNUSizingRDSWithExpiry: it sizes each RDS family against the
+// supplied family coverage view.
+func sizeRDSFamilies(
+	recs []common.Recommendation,
+	familyCov map[string]FamilyCoverage,
+	targetPct float64,
+) (sizedRDS, nonRDS []common.Recommendation, drops FamilyDropCounts) {
 	familyIdx, nonRDS := partitionRDSRecsByFamily(recs)
 	for fk, indices := range familyIdx {
 		sized, familyDrops := sizeRDSFamilyRecs(recs, indices, familyCov[fk], targetPct)
@@ -358,4 +369,103 @@ func isRDSRIRec(rec common.Recommendation) bool {
 		return false
 	}
 	return rec.Service == common.ServiceRDS || rec.Service == common.ServiceRelationalDB
+}
+
+// FamilyExpiryReport describes how commitment expiry was folded into family
+// coverage by ApplyFamilyNUSizingRDSWithExpiry.
+type FamilyExpiryReport struct {
+	// ExpiringNU is the normalized units of active RDS RIs ending inside the
+	// window that were deducted from family coverage.
+	ExpiringNU float64
+	// Unusable counts active RDS RIs expiring inside the window that could not
+	// be deducted: an unparsable instance class (NU 0) or a family key with no
+	// coverage family (e.g. an engine spelled differently from the coverage
+	// report). Callers must surface this; it never means "no expiry".
+	Unusable int
+}
+
+// ApplyFamilyNUSizingRDSWithExpiry is ApplyFamilyNUSizingRDS with rebuy-window
+// expiry folded into family coverage first, in normalized units. RDS RIs are
+// size-flexible and Cost Explorer reports coverage under the size actually
+// running, so the deduction is made per family (region, family, engine,
+// deployment), not per size pool. For each family with expiring active RIs:
+//
+//	post-expiry covered NU = max(CoveredNU - expiringNU, min(CoveredNU, activeNU - expiringNU)), floored at 0
+//
+// activeNU sums count x NU over every active RI in the family the caller
+// supplied. The min() keeps underutilized RIs (more RI units than usage) from
+// overstating the gap. activeNU may be a subset of the org-wide coverage
+// (the CLI inventory is single-account, cli#2131), so the outer max() caps the
+// deduction at expiringNU: missing RIs must never remove more coverage than
+// actually expires.
+// windowDays <= 0 or no commitments leaves coverage unchanged. A family
+// with several size rows or linked-account rows is deducted once.
+func ApplyFamilyNUSizingRDSWithExpiry(
+	recs []common.Recommendation,
+	coverage PoolCoverageMap,
+	targetPct float64,
+	commitments []common.Commitment,
+	windowDays int,
+) (sizedRDS, nonRDS []common.Recommendation, drops FamilyDropCounts, expiry FamilyExpiryReport) {
+	if targetPct <= 0 || targetPct > 100 {
+		return nil, recs, drops, expiry
+	}
+	familyCov := AggregateRDSFamilyCoverage(coverage)
+	expiry = adjustFamilyCoverageForExpiry(familyCov, commitments, windowDays, time.Now())
+	sizedRDS, nonRDS, drops = sizeRDSFamilies(recs, familyCov, targetPct)
+	return sizedRDS, nonRDS, drops, expiry
+}
+
+// adjustFamilyCoverageForExpiry mutates familyCov (a fresh aggregate owned by
+// the caller) as described on ApplyFamilyNUSizingRDSWithExpiry.
+func adjustFamilyCoverageForExpiry(familyCov map[string]FamilyCoverage, commitments []common.Commitment, windowDays int, now time.Time) FamilyExpiryReport {
+	var report FamilyExpiryReport
+	if windowDays <= 0 || len(commitments) == 0 {
+		return report
+	}
+	cutoff := now.Add(time.Duration(windowDays) * 24 * time.Hour)
+	activeNU := make(map[string]float64)
+	expiringNU := make(map[string]float64)
+	for i := range commitments {
+		fk, units, expiring, ok := rdsCommitmentFamilyUnits(&commitments[i], cutoff)
+		if !ok {
+			if expiring {
+				report.Unusable++
+			}
+			continue
+		}
+		activeNU[fk] += units
+		if !expiring {
+			continue
+		}
+		if _, known := familyCov[fk]; !known {
+			report.Unusable++
+			continue
+		}
+		expiringNU[fk] += units
+	}
+	for fk, exp := range expiringNU {
+		fc := familyCov[fk]
+		fc.CoveredNU = math.Max(0, math.Max(fc.CoveredNU-exp, math.Min(fc.CoveredNU, activeNU[fk]-exp)))
+		familyCov[fk] = fc
+		report.ExpiringNU += exp
+	}
+	return report
+}
+
+// rdsCommitmentFamilyUnits maps an active RDS commitment to its family key and
+// normalized units. ok is false when the commitment is not an active RDS RI
+// (expiring is then false) or its class cannot be parsed (expiring is then
+// true when it ends inside the window, so the caller can report it).
+func rdsCommitmentFamilyUnits(c *common.Commitment, cutoff time.Time) (fk string, units float64, expiring, ok bool) {
+	if (c.Service != common.ServiceRDS && c.Service != common.ServiceRelationalDB) || !commitmentIsActive(*c) {
+		return "", 0, false, false
+	}
+	expiring = !c.EndDate.IsZero() && !c.EndDate.After(cutoff)
+	family := rdsFamilyFromType(c.ResourceType)
+	nu := rdsInstanceNUFromType(c.ResourceType)
+	if family == "" || nu == 0 {
+		return "", 0, expiring, false
+	}
+	return rdsFamilyKey(c.Region, family, c.Engine, c.Deployment), float64(c.Count) * nu, expiring, true
 }
