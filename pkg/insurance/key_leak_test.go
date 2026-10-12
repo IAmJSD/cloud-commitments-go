@@ -26,7 +26,7 @@ type nestedHolder struct{ inner unexportedPtrHolder }
 // Issue #325: fmt does not call Format on unexported fields, so the key must
 // not be stored in any field fmt can reach.
 func TestClientKeyNeverPrintedWherever(t *testing.T) {
-	c, err := newClient("http://127.0.0.1:1", Config{APIKey: testKey, OrgID: testOrg}, nil)
+	c, err := newClient("http://127.0.0.1:1", Config{APIKey: NewSecret(testKey), OrgID: testOrg}, nil)
 	require.NoError(t, err)
 
 	holders := map[string]any{
@@ -77,7 +77,7 @@ func TestClientKeyNeverPrintedWherever(t *testing.T) {
 // Client, unexported ones included, and require that no string equals or
 // contains the key.
 func TestClientHoldsNoStringContainingKey(t *testing.T) {
-	c, err := newClient("http://127.0.0.1:1", Config{APIKey: testKey, OrgID: testOrg}, nil)
+	c, err := newClient("http://127.0.0.1:1", Config{APIKey: NewSecret(testKey), OrgID: testOrg}, nil)
 	require.NoError(t, err)
 	seen := map[uintptr]bool{}
 	var walk func(path string, v reflect.Value)
