@@ -32,6 +32,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **`recommendations.ApplyFamilyNUSizingRDSWithExpiryOptions`:** the
+  rebuy-window RDS family sizing, plus credit for replacements already bought.
+  Coverage is a lookback average, so RIs bought inside `CoverageLookbackDays`
+  are not in it yet; with R the NU of visible active, non-expiring RIs that
+  started inside the lookback, post-expiry covered is
+  `max(0, max(min(C, C - E + R), min(C, A - E)))`. It is never below the R = 0
+  formula, so it can only buy less, and a partial inventory still never removes
+  more than expires. `FamilyExpiryReport.ReplacementNU` records R.
+  `CoverageLookbackDays <= 0` credits none. Additive; the other functions are
+  unchanged (LeanerCloud/cloud-commitments-cli#2132, #2175).
 - **`common.SavingsPlanDetails.Currency`:** the ISO 4217 code the hourly
   commitment is denominated in. Additive and unused until the Azure Savings Plan
   client starts requiring it (#46).
