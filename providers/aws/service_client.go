@@ -308,6 +308,12 @@ func (r *RecommendationsClientAdapter) GetRICoverageMap(ctx context.Context, loo
 	return r.client.GetRICoverageMap(ctx, lookbackDays, regions)
 }
 
+// GetEC2RICoverageMap is GetRICoverageMap restricted to EC2 pools (one CE
+// call per region); used by the ladder's EC2 coverage report.
+func (r *RecommendationsClientAdapter) GetEC2RICoverageMap(ctx context.Context, lookbackDays int, regions []string) (recommendations.PoolCoverageMap, error) {
+	return r.client.GetEC2RICoverageMap(ctx, lookbackDays, regions)
+}
+
 // SetRecLookbackPeriod configures the LookbackPeriodInDays forwarded to
 // GetReservationPurchaseRecommendation. Valid values: "7d", "30d", "60d".
 func (r *RecommendationsClientAdapter) SetRecLookbackPeriod(period string) {

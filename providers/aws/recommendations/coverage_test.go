@@ -492,3 +492,73 @@ func TestApplyCoverageMap_UnmatchedPool_DroppedByTargetCoverage(t *testing.T) {
 	assert.Empty(t, got)
 	assert.Equal(t, "Dropped 1 recs: target-coverage-unknown=1", drops.FormatOneLine())
 }
+
+// serviceRoutedCoverageCE answers GetReservationCoverage per SERVICE filter,
+// recording every call, so tests can prove which services were queried.
+type serviceRoutedCoverageCE struct {
+	mockCostExplorerAPI
+	byService map[string]*costexplorer.GetReservationCoverageOutput
+	inputs    []*costexplorer.GetReservationCoverageInput
+}
+
+func (m *serviceRoutedCoverageCE) GetReservationCoverage(_ context.Context, params *costexplorer.GetReservationCoverageInput, _ ...func(*costexplorer.Options)) (*costexplorer.GetReservationCoverageOutput, error) {
+	m.inputs = append(m.inputs, params)
+	for _, e := range params.Filter.And {
+		if e.Dimensions != nil && e.Dimensions.Key == types.DimensionService {
+			if out, ok := m.byService[e.Dimensions.Values[0]]; ok {
+				return out, nil
+			}
+		}
+	}
+	return &costexplorer.GetReservationCoverageOutput{}, nil
+}
+
+func coverageOutputFor(instanceType, pct string) *costexplorer.GetReservationCoverageOutput {
+	return &costexplorer.GetReservationCoverageOutput{CoveragesByTime: []types.CoverageByTime{{
+		Groups: []types.ReservationCoverageGroup{{
+			Attributes: map[string]string{"instanceType": instanceType},
+			Coverage: &types.Coverage{CoverageHours: &types.CoverageHours{
+				CoverageHoursPercentage: aws.String(pct),
+				TotalRunningHours:       aws.String("7200"),
+			}},
+		}},
+	}}}
+}
+
+// TestGetEC2RICoverageMap_QueriesOnlyEC2 is the go#37 regression: the
+// all-services map blends ElastiCache/Redshift/OpenSearch/MemoryDB pools
+// (same one-colon key shape) into what the ladder reports as EC2 coverage.
+// The EC2 fetch must issue exactly one EC2-filtered CE call per region and
+// return only EC2 pools.
+func TestGetEC2RICoverageMap_QueriesOnlyEC2(t *testing.T) {
+	mock := &serviceRoutedCoverageCE{byService: map[string]*costexplorer.GetReservationCoverageOutput{
+		ec2CoverageService:          coverageOutputFor("m5.large", "80.0"),
+		"Amazon ElastiCache":        coverageOutputFor("cache.m5.large", "0.0"),
+		"Amazon Redshift":           coverageOutputFor("dc2.large", "0.0"),
+		"Amazon OpenSearch Service": coverageOutputFor("m5.large.search", "0.0"),
+		"Amazon MemoryDB":           coverageOutputFor("db.r6g.large", "0.0"),
+	}}
+	client := NewClientWithAPI(mock, "us-east-1")
+
+	got, err := client.GetEC2RICoverageMap(context.Background(), 30, []string{"us-east-1"})
+	require.NoError(t, err)
+
+	require.Len(t, mock.inputs, 1, "one CE call per region, EC2 only")
+	assert.Equal(t, []string{ec2CoverageService}, mock.inputs[0].Filter.And[0].Dimensions.Values)
+	assert.Equal(t, PoolCoverageMap{poolKey("us-east-1", "m5.large"): {Pct: 80, AvgInstancesPerHour: 10}}, got)
+
+	// Control: the all-services fetch still returns the other services' pools
+	// for its multi-service callers (target-coverage sizing).
+	all, err := client.GetRICoverageMap(context.Background(), 30, []string{"us-east-1"})
+	require.NoError(t, err)
+	assert.Contains(t, all, poolKey("us-east-1", "cache.m5.large"))
+	assert.Contains(t, all, poolKey("us-east-1", "dc2.large"))
+}
+
+func TestGetEC2RICoverageMap_ErrorPropagates(t *testing.T) {
+	mock := &mockCoverageCE{coverageError: assert.AnError}
+	client := NewClientWithAPI(mock, "us-east-1")
+	got, err := client.GetEC2RICoverageMap(context.Background(), 30, []string{"us-east-1"})
+	require.Error(t, err)
+	assert.Nil(t, got)
+}

@@ -28,7 +28,7 @@ import (
 //
 //   - riLister          : ec2svc.Client.ListConvertibleReservedInstances
 //   - spLister          : spListerAdapter wrapping *sdksp.Client.DescribeSavingsPlans
-//   - riCoverageSource  : recommendations.Client.GetRICoverageMap
+//   - riCoverageSource  : recommendations.Client.GetEC2RICoverageMap
 //   - onDemandSeries    : onDemandSeriesAdapter wrapping recommendations.Client.GetOnDemandSeries
 //     (CE GetCostAndUsage; maps recommendations.DailyCost to DailyPoint)
 //   - utilizationSource : recommendations.Client.GetRIUtilization
