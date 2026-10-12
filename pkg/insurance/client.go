@@ -85,10 +85,14 @@ func newClient(baseURL string, cfg Config, hc *http.Client) (*Client, error) {
 	if strings.TrimSpace(key) == "" {
 		return nil, errors.New("archera API key is not configured")
 	}
-	// The key is sent and redacted verbatim, so surrounding whitespace would
-	// make the header and the redaction disagree.
-	if key != strings.TrimSpace(key) {
-		return nil, errors.New("archera API key has leading or trailing whitespace")
+	// The key travels in an HTTP header and is redacted verbatim from vendor
+	// text, so only printable ASCII is accepted: an invisible or look-alike
+	// character in the key would let a vendor echo defeat the redaction once
+	// cleanMessage strips it. The error names the position, never the key.
+	for i := 0; i < len(key); i++ {
+		if key[i] < 0x21 || key[i] > 0x7e {
+			return nil, fmt.Errorf("archera API key contains a non-printable or non-ASCII character at byte %d", i)
+		}
 	}
 	if !isUUID(cfg.OrgID) {
 		return nil, errors.New("archera org ID must be a UUID")

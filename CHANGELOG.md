@@ -94,12 +94,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Fixed
 
 - **`pkg/insurance`:** hardened vendor-text handling in `Client` errors
-  (#286). The sanitizer now also strips invisible format, line and paragraph
-  separator characters (Unicode Cf, Zl, Zp) so a vendor cannot split an echoed
-  API key or spoof bidi text; `Comparison` and `Plan` decode errors go through
-  the same strip, redact and truncate pipeline as `HTTPError.Message`;
-  `NewClient` rejects an API key with leading or trailing whitespace; and a
-  `Retry-After` beyond the int range is capped at 24 h instead of ignored.
+  (#286). The sanitizer now also strips format, line and paragraph separator
+  characters (Unicode Cf, Zl, Zp) from vendor text; other invisible characters
+  (for example U+034F, variation selectors, U+3164) are not stripped and can
+  still split an echoed key, which is why `NewClient` now rejects any API key
+  that is not printable ASCII (0x21-0x7E). `Comparison` and `Plan` decode
+  errors go through the same strip, redact and truncate pipeline as
+  `HTTPError.Message`, and a `Retry-After` beyond the int range is capped at
+  24 h instead of ignored.
 - **`pkg/insurance`:** decode errors no longer echo an uncapped vendor value
   (#336). A rejected enum value is shown only when it is a short identifier
   (`[A-Za-z0-9_.-]`, up to 32 bytes); anything else is reported as

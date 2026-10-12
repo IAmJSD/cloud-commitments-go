@@ -544,12 +544,52 @@ func TestClient_ErrorMessageRedactsBeforeTruncating(t *testing.T) {
 	assert.Equal(t, strings.Repeat("x", 195)+"yyyyy...", got)
 }
 
-func TestNewClient_RejectsPaddedKey(t *testing.T) {
-	for _, k := range []string{testKey + " ", " " + testKey, testKey + "\n"} {
-		_, err := newClient("http://127.0.0.1:1", Config{APIKey: NewSecret(k), OrgID: testOrg}, nil)
-		require.Error(t, err, "%q", k)
-		assert.NotContains(t, err.Error(), "sekret")
+func TestNewClient_KeyMustBePrintableASCII(t *testing.T) {
+	rejected := map[string]string{
+		"trailing space":            testKey + " ",
+		"leading space":             " " + testKey,
+		"trailing newline":          testKey + "\n",
+		"tab":                       "sekret\tkey",
+		"NUL":                       "sekret\x00key",
+		"DEL":                       "sekret\x7fkey",
+		"BOM":                       "\ufeff" + testKey,
+		"ZWSP":                      "\u200b" + testKey,
+		"NBSP":                      testKey + "\u00a0",
+		"ideographic space":         "\u3000" + testKey,
+		"combining grapheme joiner": "sekret\u034fkey",
+		"variation selector":        "sekret\ufe0fkey",
+		"hangul filler":             "sekret\u3164key",
+		"invalid UTF-8":             "sekret\xffkey",
+		"non-ASCII letter":          "sekr\u00e9t",
+		"all invisible":             "\u200b\u200d\ufeff",
 	}
+	for name, k := range rejected {
+		t.Run("rejects "+name, func(t *testing.T) {
+			_, err := newClient("http://127.0.0.1:1", Config{APIKey: NewSecret(k), OrgID: testOrg}, nil)
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), "sekret")
+		})
+	}
+	_, err := newClient("http://127.0.0.1:1", Config{APIKey: NewSecret("ab\u200bc"), OrgID: testOrg}, nil)
+	assert.EqualError(t, err, "archera API key contains a non-printable or non-ASCII character at byte 2")
+	for _, k := range []string{"aZ09-_.~+/=", "!", "~"} {
+		_, err := newClient("http://127.0.0.1:1", Config{APIKey: NewSecret(k), OrgID: testOrg}, nil)
+		assert.NoError(t, err, k)
+	}
+}
+
+// A vendor that echoes the x-api-key header back in a 401 message must see it
+// redacted, end to end with a valid key.
+func TestClient_EchoedHeaderKeyIsRedacted(t *testing.T) {
+	c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		b, _ := json.Marshal(map[string]string{"message": "invalid api key " + r.Header.Get("x-api-key")})
+		_, _ = w.Write(b)
+	}))
+	_, err := c.Plan(context.Background(), testPlan)
+	var he *HTTPError
+	require.ErrorAs(t, err, &he)
+	assert.Equal(t, "invalid api key [redacted]", he.Message)
 }
 
 // Decode errors are built in quote.go, which cannot reach the key; the client
@@ -573,11 +613,6 @@ func TestClient_DecodeErrorsAreRedacted(t *testing.T) {
 		err := reflect(t, testKey)
 		assert.NotContains(t, err.Error(), testKey)
 		assert.Contains(t, err.Error(), `unsupported value "[redacted]"`)
-	})
-	t.Run("zero-width split key as enum value", func(t *testing.T) {
-		err := reflect(t, testKey[:6]+"\u200b"+testKey[6:])
-		assert.NotContains(t, err.Error(), testKey)
-		assert.NotContains(t, err.Error(), "sekret")
 	})
 	t.Run("plan decode error", func(t *testing.T) {
 		body := strings.Replace(validPlanJSON, `"status": "reviewed"`, `"status": "`+testKey+`"`, 1)
