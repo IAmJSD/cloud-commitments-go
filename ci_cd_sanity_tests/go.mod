@@ -41,7 +41,7 @@ require (
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources v1.2.0
-	github.com/LeanerCloud/cloud-commitments-go/pkg v0.0.0-20261009181525-30bf383795db
+	github.com/LeanerCloud/cloud-commitments-go/pkg v0.0.0-20261012192523-3838efd56668
 	github.com/aws/aws-sdk-go-v2/service/sts v1.33.17
 )
 

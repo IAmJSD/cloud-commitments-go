@@ -757,7 +757,7 @@ func TestCommitmentCurrency_SameAcrossPurchaseValidateOffering(t *testing.T) {
 }
 
 func TestCommitmentCurrency_FailsClosed(t *testing.T) {
-	for _, bad := range []string{"", " eur", "EURO", "E1R", "us"} {
+	for _, bad := range []string{"", " eur", "EURO", "E1R", "us", "ınr", "ſek"} {
 		t.Run(bad, func(t *testing.T) {
 			alias := &mockOrderAliasClient{}
 			rp := &mockRPValidate{}

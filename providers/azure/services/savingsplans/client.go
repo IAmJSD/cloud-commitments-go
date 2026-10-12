@@ -284,17 +284,18 @@ func convertSavingsPlan(sp *armbillingbenefits.SavingsPlanModel, subscriptionID 
 	return &commitment
 }
 
-var currencyCodePattern = regexp.MustCompile(`^[A-Z]{3}$`)
+var currencyCodePattern = regexp.MustCompile(`^[A-Za-z]{3}$`)
 
-// commitmentCurrency returns the upper-cased ISO 4217 code of the commitment
-// amount. It fails closed on empty or malformed input (no trimming, no USD
-// default): Azure needs the amount's currency to match the billing account's.
+// commitmentCurrency returns the upper-cased 3-letter currency code of the
+// commitment amount. It fails closed on empty or malformed input (no trimming,
+// no USD default). The check is format-only, not ISO 4217 membership; the
+// pattern runs before upper-casing so Unicode case folds such as "ınr" or "ſek"
+// are rejected. Azure needs the code to match the billing account's currency.
 func commitmentCurrency(d *common.SavingsPlanDetails) (string, error) {
-	code := strings.ToUpper(d.Currency)
-	if !currencyCodePattern.MatchString(code) {
-		return "", fmt.Errorf("azure savings plan commitment currency %q is not a 3-letter ISO 4217 code", d.Currency)
+	if !currencyCodePattern.MatchString(d.Currency) {
+		return "", fmt.Errorf("azure savings plan commitment currency %q is not a 3-letter currency code", d.Currency)
 	}
-	return code, nil
+	return strings.ToUpper(d.Currency), nil
 }
 
 // PurchaseCommitment creates an Azure Savings Plan via the OrderAlias API.
