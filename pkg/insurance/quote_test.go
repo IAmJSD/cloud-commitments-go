@@ -570,3 +570,36 @@ func TestDescribeVendorValue(t *testing.T) {
 	assert.Equal(t, "(0 bytes, not shown)", describeVendorValue(""))
 	assert.Equal(t, "(5 bytes, not shown)", describeVendorValue("a b c"))
 }
+
+// Short values (<= 32 bytes) that are not plain identifiers must be withheld.
+// Each case kills a regex mutant: (?m) anchors, a \S charset, or a quote in
+// the class.
+func TestDescribeVendorValue_WithholdsShortNonIdentifiers(t *testing.T) {
+	for name, v := range map[string]string{
+		"newline in the middle": "abc\nINJECT",
+		"trailing newline":      "abc\n",
+		"leading newline":       "\nabc",
+		"control char":          "ab\x1b[31mc",
+		"bidi override":         "ab\u202ec",
+		"double quote":          `ab"c`,
+		"space":                 "ab c",
+		"NUL":                   "ab\x00c",
+		"non-space symbol":      "ab!c",
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.LessOrEqual(t, len(v), 32)
+			assert.Equal(t, fmt.Sprintf("(%d bytes, not shown)", len(v)), describeVendorValue(v))
+		})
+	}
+}
+
+func TestDecode_NewlinePrefixedPayloadIsWithheld(t *testing.T) {
+	v := "abc\n" + strings.Repeat("y", 300)
+	body := mutate(t, func(m map[string]any) {
+		obj(first(first(m["data"])["candidates"])["offer"])["provider"] = v
+	})
+	_, err := decodeComparison(t, body)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), fmt.Sprintf("(%d bytes, not shown)", len(v)))
+	assert.NotContains(t, err.Error(), "yyy")
+}
