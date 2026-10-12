@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -122,6 +123,12 @@ func (c *Client) GetRegion() string {
 }
 
 // GetRecommendations returns an empty slice.
+//
+// Contract for the future implementation: when this is backed by the Cost
+// Management benefitRecommendations API, it must set
+// SavingsPlanDetails.Currency from that response's properties.currencyCode.
+// There is no billing-account lookup, and an empty currency is never treated
+// as USD (PurchaseCommitment, ValidateOffering and GetOfferingDetails reject it).
 //
 // Azure does not have a stable public API for Savings Plan purchase
 // recommendations (the Benefits Recommendations API is still in preview).
@@ -277,6 +284,19 @@ func convertSavingsPlan(sp *armbillingbenefits.SavingsPlanModel, subscriptionID 
 	return &commitment
 }
 
+var currencyCodePattern = regexp.MustCompile(`^[A-Z]{3}$`)
+
+// commitmentCurrency returns the upper-cased ISO 4217 code of the commitment
+// amount. It fails closed on empty or malformed input (no trimming, no USD
+// default): Azure needs the amount's currency to match the billing account's.
+func commitmentCurrency(d *common.SavingsPlanDetails) (string, error) {
+	code := strings.ToUpper(d.Currency)
+	if !currencyCodePattern.MatchString(code) {
+		return "", fmt.Errorf("azure savings plan commitment currency %q is not a 3-letter ISO 4217 code", d.Currency)
+	}
+	return code, nil
+}
+
 // PurchaseCommitment creates an Azure Savings Plan via the OrderAlias API.
 //
 // Idempotency: the SavingsPlanOrderAlias is created with an HTTP PUT on the
@@ -312,6 +332,11 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 	billingScopeID := c.billingScopeID()
 	appliedScope := armbillingbenefits.AppliedScopeTypeShared
 	hourlyAmount := spDetails.HourlyCommitment
+	currency, err := commitmentCurrency(spDetails)
+	if err != nil {
+		result.Error = err
+		return result, result.Error
+	}
 	displayName := fmt.Sprintf("cudly-%s-%s", spDetails.PlanType, rec.Term)
 
 	body := armbillingbenefits.SavingsPlanOrderAliasModel{
@@ -323,7 +348,7 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 			AppliedScopeType: &appliedScope,
 			Commitment: &armbillingbenefits.Commitment{
 				Amount:       &hourlyAmount,
-				CurrencyCode: toPtr("USD"),
+				CurrencyCode: &currency,
 				Grain:        &grain,
 			},
 		},
@@ -404,6 +429,10 @@ func (c *Client) buildValidateBody(rec common.Recommendation) (armbillingbenefit
 	billingScopeID := c.billingScopeID()
 	appliedScope := armbillingbenefits.AppliedScopeTypeShared
 	hourlyAmount := spDetails.HourlyCommitment
+	currency, err := commitmentCurrency(spDetails)
+	if err != nil {
+		return armbillingbenefits.SavingsPlanPurchaseValidateRequest{}, err
+	}
 	displayName := "cudly-validate"
 
 	return armbillingbenefits.SavingsPlanPurchaseValidateRequest{
@@ -417,7 +446,7 @@ func (c *Client) buildValidateBody(rec common.Recommendation) (armbillingbenefit
 					AppliedScopeType: &appliedScope,
 					Commitment: &armbillingbenefits.Commitment{
 						Amount:       &hourlyAmount,
-						CurrencyCode: toPtr("USD"),
+						CurrencyCode: &currency,
 						Grain:        &grain,
 					},
 				},
@@ -461,6 +490,11 @@ func (c *Client) GetOfferingDetails(ctx context.Context, rec common.Recommendati
 	spDetails, ok := rec.Details.(*common.SavingsPlanDetails)
 	if !ok {
 		return nil, fmt.Errorf("invalid service details for Azure Savings Plans")
+	}
+
+	currency, err := commitmentCurrency(spDetails)
+	if err != nil {
+		return nil, err
 	}
 
 	// Calculate term hours.
@@ -507,7 +541,7 @@ func (c *Client) GetOfferingDetails(ctx context.Context, rec common.Recommendati
 		RecurringCost:       recurringCost,
 		TotalCost:           totalCost,
 		EffectiveHourlyRate: spDetails.HourlyCommitment,
-		Currency:            "USD",
+		Currency:            currency,
 	}, nil
 }
 
