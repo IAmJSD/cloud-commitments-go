@@ -2,6 +2,7 @@ package recommendations
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -70,6 +71,35 @@ type SPUtilizationSummary struct {
 	// TotalCommitmentUSDPerHour is the average total SP commitment in $/hr.
 	// Nil when CE returned no data.
 	TotalCommitmentUSDPerHour *float64
+	// OnDemandCostEquivalentUSDPerHour is the average on-demand price of the
+	// usage the SP commitment covered, in $/hr (CE Savings.OnDemandCostEquivalent
+	// divided by windowHours). Nil when CE returned no savings data.
+	OnDemandCostEquivalentUSDPerHour *float64
+}
+
+// ErrNoSPUtilization means CE has no usable utilization for the scope (no
+// plan, a plan too new for CE to report, or 0% used), so the
+// commitment-to-on-demand ratio cannot be derived. Callers must surface an
+// explainable no-op rather than fall back to a 1:1 ratio.
+var ErrNoSPUtilization = errors.New("sp utilization: no used commitment or on-demand equivalent reported")
+
+// CommitmentToOnDemandRatio returns k = used commitment / on-demand-equivalent
+// cost, computed from the window totals (not an average of daily ratios):
+// one commitment dollar covers 1/k on-demand dollars of usage. k must satisfy
+// 0 < k <= 1 (a plan cannot cost more than the usage it covers); k > 1 would
+// shrink a commitment converted to on-demand terms (E/k) and over-buy, so it
+// is an error. Missing or zero used/equivalent returns ErrNoSPUtilization.
+func (s SPUtilizationSummary) CommitmentToOnDemandRatio() (float64, error) {
+	if s.UsedCommitmentUSDPerHour == nil || s.OnDemandCostEquivalentUSDPerHour == nil ||
+		*s.UsedCommitmentUSDPerHour == 0 || *s.OnDemandCostEquivalentUSDPerHour == 0 {
+		return 0, ErrNoSPUtilization
+	}
+	k := *s.UsedCommitmentUSDPerHour / *s.OnDemandCostEquivalentUSDPerHour
+	if k <= 0 || k > 1 {
+		return 0, fmt.Errorf("sp utilization: commitment/on-demand ratio %g is outside (0, 1]; used=%g on-demand-equivalent=%g",
+			k, *s.UsedCommitmentUSDPerHour, *s.OnDemandCostEquivalentUSDPerHour)
+	}
+	return k, nil
 }
 
 // spCoverageMetricSpendCovered is the value for the REQUIRED Metrics
@@ -475,24 +505,34 @@ func buildSPUtilizationSummary(result *costexplorer.GetSavingsPlansUtilizationOu
 		summary.UtilizationPct = &v
 	}
 	if windowHours > 0 {
-		if u.UsedCommitment != nil {
-			v, err := parseSPFloat(aws.ToString(u.UsedCommitment), "UsedCommitment")
-			if err != nil {
-				return SPUtilizationSummary{}, err
-			}
-			rate := v / windowHours
-			summary.UsedCommitmentUSDPerHour = &rate
+		var err error
+		if summary.UsedCommitmentUSDPerHour, err = spRatePerHour(u.UsedCommitment, "UsedCommitment", windowHours); err != nil {
+			return SPUtilizationSummary{}, err
 		}
-		if u.TotalCommitment != nil {
-			v, err := parseSPFloat(aws.ToString(u.TotalCommitment), "TotalCommitment")
-			if err != nil {
+		if summary.TotalCommitmentUSDPerHour, err = spRatePerHour(u.TotalCommitment, "TotalCommitment", windowHours); err != nil {
+			return SPUtilizationSummary{}, err
+		}
+		if result.Total.Savings != nil {
+			if summary.OnDemandCostEquivalentUSDPerHour, err = spRatePerHour(result.Total.Savings.OnDemandCostEquivalent, "OnDemandCostEquivalent", windowHours); err != nil {
 				return SPUtilizationSummary{}, err
 			}
-			rate := v / windowHours
-			summary.TotalCommitmentUSDPerHour = &rate
 		}
 	}
 	return summary, nil
+}
+
+// spRatePerHour converts a CE window-total dollar string into a $/hr pointer;
+// nil in, nil out (CE returned no value).
+func spRatePerHour(total *string, field string, windowHours float64) (*float64, error) {
+	if total == nil {
+		return nil, nil
+	}
+	v, err := parseSPFloat(aws.ToString(total), field)
+	if err != nil {
+		return nil, err
+	}
+	rate := v / windowHours
+	return &rate, nil
 }
 
 // parseSPFloat parses a Cost Explorer string value into a float64, returning
