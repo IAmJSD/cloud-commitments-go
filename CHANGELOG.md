@@ -81,7 +81,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   struct field no longer prints it under any fmt verb, json, xml, yaml or slog.
   `Config.Format` is removed (`%v` of a `Config` now prints
   `{[redacted] <org>}`), and two copies of one `Config` are no longer
-  `reflect.DeepEqual` (#330)
+  `reflect.DeepEqual`. `Config` is also no longer comparable (`==` stops
+  compiling and a `Config` map key panics as unhashable), and
+  `json.Unmarshal` into a `Config` carrying an `APIKey` now errors where the
+  old `json:"-"` tag ignored it (#330)
 - **Breaking (source):** `common.PurchaseResult` gained an `ExistingCommitment`
   field. Downstream code that builds it with unkeyed composite literals no
   longer compiles; keyed literals are unaffected. The field is true when a

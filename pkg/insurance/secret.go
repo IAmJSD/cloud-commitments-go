@@ -24,7 +24,7 @@ func (s Secret) Reveal() string {
 }
 
 // Format redacts the value for every fmt verb and for slog text output.
-func (Secret) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(redactedText)) }
+func (Secret) Format(f fmt.State, _ rune) { _, _ = fmt.Fprint(f, redactedText) }
 
 // MarshalText redacts the value for encoding/json, encoding/xml, yaml and
 // slog's JSON handler.
