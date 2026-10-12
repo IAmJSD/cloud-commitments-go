@@ -39,25 +39,21 @@ type TrancheInput struct {
 
 // TrancheResult is the output of BuildTranches.
 //
-// When the ramp schedule contains no step with AfterDays == 0 (a fully-
-// delayed ramp), BuyNow will be empty and all commitment activity appears as
-// future Tranches. This is a valid configuration; callers should document a
-// fully-delayed ramp explicitly so operators are not surprised by the absence
-// of an immediate purchase.
+// Every non-zero ramp step becomes a Tranche, including the immediate
+// (AfterDays == 0) step: its FireAfter equals TrancheInput.Now. Persisting
+// the immediate step as a row is what lets in-flight netting see it; a
+// buy-now amount that lives only in a plan would be neither netted nor
+// executed. A fully-delayed ramp simply has no tranche with FireAfter == Now.
 type TrancheResult struct {
-	// BuyNow holds ActionPurchase actions for the immediate (AfterDays == 0)
-	// ramp step, if one exists in the schedule.
-	BuyNow []PlannedAction
-	// Tranches holds future scheduled ramp rows for every step with
-	// AfterDays > 0. Each row has status TrancheStatusScheduled and a
-	// FireAfter timestamp set to Now + AfterDays.
+	// Tranches holds one scheduled row per non-zero ramp step, in step order
+	// within each allocation. Each row has status TrancheStatusScheduled and
+	// FireAfter = Now + AfterDays.
 	Tranches []Tranche
 }
 
-// BuildTranches turns each Allocation into (a) buy-now PlannedActions for the
-// ramp step with AfterDays == 0, if present, and (b) future Tranche rows for
-// every ramp step with AfterDays > 0, staggered over the ramp schedule so
-// commitment terms expire at different times instead of bunching.
+// BuildTranches turns each Allocation into one Tranche row per ramp step,
+// staggered over the ramp schedule so commitment terms expire at different
+// times instead of bunching. The AfterDays == 0 step fires at Now.
 //
 // Step amounts are computed in exact big.Rat arithmetic. Every step amount is
 // clamped to the remaining unallocated gap and the last step receives the
@@ -149,7 +145,7 @@ func buildTrancheResult(in *TrancheInput) (*TrancheResult, error) {
 // ID from a misbehaving injected NewID would silently collapse scheduled
 // purchases at persistence time -- money-path data loss. Fail loud naming
 // the offender instead. (An empty ID is already rejected earlier by
-// Tranche.Validate inside buildFutureTranche; the check here is kept so this
+// Tranche.Validate inside buildTranche; the check here is kept so this
 // function is a self-contained guarantee over the whole batch.)
 func validateTrancheIDs(tranches []Tranche) error {
 	seen := make(map[string]struct{}, len(tranches))
@@ -197,25 +193,16 @@ func processAllocation(in *TrancheInput, alloc Allocation, steps []RampStep, res
 			// grand total exactly equal to the gap regardless of skips.
 			continue
 		}
-		if err := appendStep(in, alloc, step, i, nSteps, amount, result); err != nil {
+		if err := appendStep(in, alloc, step, i, amount, result); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// appendStep routes one non-zero step amount to BuyNow (AfterDays == 0) or
-// Tranches (AfterDays > 0).
-func appendStep(in *TrancheInput, alloc Allocation, step RampStep, stepIdx, nSteps int, amount *big.Rat, result *TrancheResult) error {
-	if step.AfterDays == 0 {
-		action, err := buildBuyNowAction(in, alloc, step, stepIdx, nSteps, amount)
-		if err != nil {
-			return err
-		}
-		result.BuyNow = append(result.BuyNow, action)
-		return nil
-	}
-	tr, err := buildFutureTranche(in, alloc, step, stepIdx, amount)
+// appendStep turns one non-zero step amount into a Tranche.
+func appendStep(in *TrancheInput, alloc Allocation, step RampStep, stepIdx int, amount *big.Rat, result *TrancheResult) error {
+	tr, err := buildTranche(in, alloc, step, stepIdx, amount)
 	if err != nil {
 		return err
 	}
@@ -256,51 +243,15 @@ func computeStepAmount(gap *big.Rat, fraction float64, isLast bool, priorSum *bi
 	return amount
 }
 
-// stepRationale returns a human-readable rationale string for a buy-now action
-// or future tranche, embedding the step position, fraction percentage, computed
-// amount, total gap, and the allocation's original rationale. The percentage
-// uses %.4g so small fractions render meaningfully (0.4% instead of the
-// misleading "0%" that fixed zero-decimal rounding would produce on a
-// positive purchase).
-func stepRationale(alloc Allocation, stepIdx, totalSteps int, fraction float64, amount, gap *big.Rat) string {
-	return fmt.Sprintf(
-		"ramp step %d/%d (%.4g%%): %s of %s total. %s",
-		stepIdx+1, totalSteps, fraction*100,
-		fmtRatUSD(amount), fmtRatUSD(gap),
-		alloc.Rationale,
-	)
-}
-
-// buildBuyNowAction creates a validated PlannedAction (ActionPurchase) for a
-// ramp step with AfterDays == 0. Returns an error if the produced action fails
-// its own Validate check, which would indicate a bug in the caller-supplied
-// input (e.g. an empty Term).
-func buildBuyNowAction(in *TrancheInput, alloc Allocation, step RampStep, stepIdx, nSteps int, amount *big.Rat) (PlannedAction, error) {
-	rationale := stepRationale(alloc, stepIdx, nSteps, step.Fraction, amount, alloc.GapUSDPerHour)
-	action := PlannedAction{
-		Action:           ActionPurchase,
-		Layer:            alloc.Layer,
-		AmountUSDPerHour: new(big.Rat).Set(amount),
-		Term:             in.Term,
-		PaymentOption:    in.PaymentOption,
-		Rationale:        rationale,
-		DataSources:      alloc.DataSources,
-	}
-	if err := action.Validate(); err != nil {
-		return PlannedAction{}, fmt.Errorf("buy-now action (layer %s, step %d): %w", alloc.Layer, stepIdx, err)
-	}
-	return action, nil
-}
-
-// buildFutureTranche creates a validated Tranche for a ramp step with
-// AfterDays > 0. FireAfter is set to Now + AfterDays days. The ID is assigned
+// buildTranche creates a validated Tranche for one ramp step. FireAfter is
+// set to Now + AfterDays days (Now itself for the immediate step). The ID is assigned
 // by calling in.NewID(). Layer, Term, and PaymentOption are stamped so the
 // tranche is fully self-describing: the executor that fires it must be able
 // to place the purchase without consulting the parent run's plan (two
 // allocations with equal gaps on different layers stay distinguishable from
 // the tranche row alone). Returns an error if the produced tranche fails its
 // own Validate check.
-func buildFutureTranche(in *TrancheInput, alloc Allocation, step RampStep, stepIdx int, amount *big.Rat) (Tranche, error) {
+func buildTranche(in *TrancheInput, alloc Allocation, step RampStep, stepIdx int, amount *big.Rat) (Tranche, error) {
 	tr := Tranche{
 		ID:               in.NewID(),
 		RunID:            in.RunID,

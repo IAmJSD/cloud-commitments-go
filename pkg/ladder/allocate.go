@@ -39,7 +39,9 @@ func minAllocatableGap() *big.Rat {
 // config's scope: the sum of its scheduled (not-yet-fired) ladder tranches
 // ONLY. Fired/completed tranches are deliberately excluded because they are
 // executed purchases already reflected in each layer's ExistingUSDPerHour;
-// counting them here as well would double-subtract and under-purchase. It is
+// counting them here as well would double-subtract and under-purchase. Its
+// unit is the gap's: on-demand-equivalent USD/hr until the OD-to-commitment
+// conversion lands in Allocate (go#349), commitment USD/hr after. It is
 // required non-nil (fail loud) so callers must always explicitly account for
 // in-flight commitment. A genuinely zero in-flight must be passed as a pointer
 // to 0.0, not nil. Subtracting in-flight from the gap prevents new runs from
