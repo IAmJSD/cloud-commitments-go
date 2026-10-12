@@ -48,14 +48,18 @@ type mockOrderAliasClient struct {
 	// capturedName records the alias name passed to BeginCreate so tests can
 	// assert the deterministic idempotency-derived name.
 	capturedName string
+	capturedBody armbillingbenefits.SavingsPlanOrderAliasModel
+	calls        int
 }
 
 func (m *mockOrderAliasClient) BeginCreate(
 	_ context.Context,
 	savingsPlanOrderAliasName string,
-	_ armbillingbenefits.SavingsPlanOrderAliasModel,
+	body armbillingbenefits.SavingsPlanOrderAliasModel,
 	_ *armbillingbenefits.SavingsPlanOrderAliasClientBeginCreateOptions,
 ) (SavingsPlanOrderAliasPoller, error) {
+	m.calls++
+	m.capturedBody = body
 	m.capturedName = savingsPlanOrderAliasName
 	if m.createErr != nil {
 		return nil, m.createErr
@@ -75,15 +79,19 @@ func (p *mockPoller) PollUntilDone(_ context.Context, _ *PollOptions) (armbillin
 
 // mockRPValidate is a struct-based mock for RPValidateAPI.
 type mockRPValidate struct {
-	resp armbillingbenefits.RPClientValidatePurchaseResponse
-	err  error
+	resp     armbillingbenefits.RPClientValidatePurchaseResponse
+	err      error
+	captured armbillingbenefits.SavingsPlanPurchaseValidateRequest
+	calls    int
 }
 
 func (m *mockRPValidate) ValidatePurchase(
 	_ context.Context,
-	_ armbillingbenefits.SavingsPlanPurchaseValidateRequest,
+	req armbillingbenefits.SavingsPlanPurchaseValidateRequest,
 	_ *armbillingbenefits.RPClientValidatePurchaseOptions,
 ) (armbillingbenefits.RPClientValidatePurchaseResponse, error) {
+	m.calls++
+	m.captured = req
 	return m.resp, m.err
 }
 
@@ -274,6 +282,7 @@ func makeRec(term string) common.Recommendation {
 		Details: &common.SavingsPlanDetails{
 			PlanType:         "Compute",
 			HourlyCommitment: 1.5,
+			Currency:         "USD",
 		},
 	}
 }
@@ -451,7 +460,7 @@ func TestGetOfferingDetails_1yr_NoUpfront(t *testing.T) {
 	rec := common.Recommendation{
 		Term:          "1yr",
 		PaymentOption: "No Upfront",
-		Details:       &common.SavingsPlanDetails{PlanType: "Compute", HourlyCommitment: 1.0},
+		Details:       &common.SavingsPlanDetails{PlanType: "Compute", HourlyCommitment: 1.0, Currency: "USD"},
 	}
 
 	details, err := c.GetOfferingDetails(context.Background(), rec)
@@ -472,7 +481,7 @@ func TestGetOfferingDetails_3yr_AllUpfront(t *testing.T) {
 	rec := common.Recommendation{
 		Term:          "3yr",
 		PaymentOption: "All Upfront",
-		Details:       &common.SavingsPlanDetails{PlanType: "Compute", HourlyCommitment: 1.0},
+		Details:       &common.SavingsPlanDetails{PlanType: "Compute", HourlyCommitment: 1.0, Currency: "USD"},
 	}
 
 	details, err := c.GetOfferingDetails(context.Background(), rec)
@@ -489,7 +498,7 @@ func TestGetOfferingDetails_5yr_AllUpfront(t *testing.T) {
 	rec := common.Recommendation{
 		Term:          "5yr",
 		PaymentOption: "All Upfront",
-		Details:       &common.SavingsPlanDetails{PlanType: "Compute", HourlyCommitment: 1.0},
+		Details:       &common.SavingsPlanDetails{PlanType: "Compute", HourlyCommitment: 1.0, Currency: "USD"},
 	}
 
 	details, err := c.GetOfferingDetails(context.Background(), rec)
@@ -507,7 +516,7 @@ func TestGetOfferingDetails_BadTerm(t *testing.T) {
 	rec := common.Recommendation{
 		Term:          "99yr",
 		PaymentOption: "No Upfront",
-		Details:       &common.SavingsPlanDetails{PlanType: "Compute", HourlyCommitment: 1.0},
+		Details:       &common.SavingsPlanDetails{PlanType: "Compute", HourlyCommitment: 1.0, Currency: "USD"},
 	}
 
 	_, err := c.GetOfferingDetails(context.Background(), rec)
@@ -520,7 +529,7 @@ func TestGetOfferingDetails_BadPaymentOption(t *testing.T) {
 	rec := common.Recommendation{
 		Term:          "1yr",
 		PaymentOption: "Quarterly",
-		Details:       &common.SavingsPlanDetails{PlanType: "Compute", HourlyCommitment: 1.0},
+		Details:       &common.SavingsPlanDetails{PlanType: "Compute", HourlyCommitment: 1.0, Currency: "USD"},
 	}
 
 	_, err := c.GetOfferingDetails(context.Background(), rec)
@@ -713,4 +722,65 @@ func TestAzureSavingsPlanState(t *testing.T) {
 	for ps, want := range cases {
 		assert.Equal(t, want, azureSavingsPlanState(ps), "provisioning state %q", ps)
 	}
+}
+
+// --- commitment currency (go#46) ---
+
+func currencyRec(currency string) common.Recommendation {
+	rec := makeRec("1yr")
+	rec.Details = &common.SavingsPlanDetails{PlanType: "Compute", HourlyCommitment: 12, Currency: currency}
+	return rec
+}
+
+func TestCommitmentCurrency_SameAcrossPurchaseValidateOffering(t *testing.T) {
+	rec := currencyRec("JPY")
+	orderID := "order1"
+	alias := &mockOrderAliasClient{createPoller: &mockPoller{resp: armbillingbenefits.SavingsPlanOrderAliasClientCreateResponse{
+		SavingsPlanOrderAliasModel: armbillingbenefits.SavingsPlanOrderAliasModel{ID: &orderID},
+	}}}
+	rp := &mockRPValidate{}
+	c := NewClient(nil, "sub", "eastus")
+	c.SetOrderAliasClient(alias)
+	c.SetRPValidateClient(rp)
+
+	_, err := c.PurchaseCommitment(context.Background(), rec, common.PurchaseOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.ValidateOffering(context.Background(), rec))
+	details, err := c.GetOfferingDetails(context.Background(), rec)
+	require.NoError(t, err)
+
+	commitment := alias.capturedBody.Properties.Commitment
+	assert.Equal(t, "JPY", *commitment.CurrencyCode)
+	assert.InDelta(t, 12.0, *commitment.Amount, 0.001)
+	assert.Equal(t, "JPY", *rp.captured.Benefits[0].Properties.Commitment.CurrencyCode)
+	assert.Equal(t, "JPY", details.Currency)
+}
+
+func TestCommitmentCurrency_FailsClosed(t *testing.T) {
+	for _, bad := range []string{"", " eur", "EURO", "E1R", "us", "ınr", "ſek"} {
+		t.Run(bad, func(t *testing.T) {
+			alias := &mockOrderAliasClient{}
+			rp := &mockRPValidate{}
+			c := NewClient(nil, "sub", "eastus")
+			c.SetOrderAliasClient(alias)
+			c.SetRPValidateClient(rp)
+			rec := currencyRec(bad)
+
+			_, err := c.PurchaseCommitment(context.Background(), rec, common.PurchaseOptions{})
+			require.Error(t, err)
+			assert.Zero(t, alias.calls)
+			require.Error(t, c.ValidateOffering(context.Background(), rec))
+			assert.Zero(t, rp.calls)
+			_, err = c.GetOfferingDetails(context.Background(), rec)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestCommitmentCurrency_LowercaseNormalised(t *testing.T) {
+	rp := &mockRPValidate{}
+	c := NewClient(nil, "sub", "eastus")
+	c.SetRPValidateClient(rp)
+	require.NoError(t, c.ValidateOffering(context.Background(), currencyRec("eur")))
+	assert.Equal(t, "EUR", *rp.captured.Benefits[0].Properties.Commitment.CurrencyCode)
 }
