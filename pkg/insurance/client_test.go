@@ -191,6 +191,10 @@ func TestClient_ErrorMapping(t *testing.T) {
 		{"retry-after wraps negative if multiplied", 503, "9223372037", `{}`, "", 24 * time.Hour},
 		{"retry-after wraps tiny if multiplied", 503, "18446744074", `{}`, "", 24 * time.Hour},
 		{"retry-after exactly the cap", 503, "86400", `{}`, "", 24 * time.Hour},
+		{"retry-after one under the cap", 503, "86399", `{}`, "", 86399 * time.Second},
+		{"retry-after one over the cap", 503, "86401", `{}`, "", 24 * time.Hour},
+		{"retry-after past int64 is capped", 503, "99999999999999999999", `{}`, "", 24 * time.Hour},
+		{"retry-after negative past int64 ignored", 503, "-99999999999999999999", `{}`, "", 0},
 		{"retry-after negative ignored", 503, "-5", `{}`, "", 0},
 		{"retry-after date ignored", 503, "Wed, 21 Oct 2026 07:28:00 GMT", `{}`, "", 0},
 	}
@@ -483,4 +487,149 @@ func TestBoundedReader_SurfacesProbeError(t *testing.T) {
 	assert.ErrorIs(t, err, boom)
 	_, err = io.ReadAll(&boundedReader{r: probeErrReader{io.EOF}, n: 0})
 	assert.NoError(t, err)
+}
+
+// errorMessageFor serves one 500 response with the given vendor message and
+// returns the sanitized HTTPError.Message.
+func errorMessageFor(t *testing.T, message string) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]string{"message": message})
+	require.NoError(t, err)
+	c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write(b)
+	}))
+	_, err = c.Plan(context.Background(), testPlan)
+	var he *HTTPError
+	require.ErrorAs(t, err, &he)
+	return he.Message
+}
+
+func TestClient_ErrorMessageStripsInvisibleFormatting(t *testing.T) {
+	// One input per stripped category: Cf (several), Zl, Zp.
+	for name, r := range map[string]string{
+		"Cf zero-width space":    "\u200b",
+		"Cf zero-width joiner":   "\u200d",
+		"Cf BOM":                 "\ufeff",
+		"Cf RTL override":        "\u202e",
+		"Cf isolate":             "\u2066",
+		"Zl line separator":      "\u2028",
+		"Zp paragraph separator": "\u2029",
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, "abcd", errorMessageFor(t, "ab"+r+"cd"))
+		})
+	}
+}
+
+func TestClient_ErrorMessageRedactsSplitAndRepeatedKeys(t *testing.T) {
+	split := testKey[:6] + "\u200b" + testKey[6:10] + "\x01" + testKey[10:]
+	// Exact equality: a redact-before-strip pipeline would leave the
+	// reassembled key.
+	assert.Equal(t, "k=[redacted]", errorMessageFor(t, "k="+split))
+	assert.Equal(t, "[redacted] [redacted] [redacted]",
+		errorMessageFor(t, testKey+" "+testKey+" "+testKey))
+}
+
+func TestClient_ErrorMessageRedactsBeforeTruncating(t *testing.T) {
+	// The redacted key ends exactly at byte 200, so it must not be cut.
+	got := errorMessageFor(t, strings.Repeat("x", 190)+testKey)
+	assert.Equal(t, strings.Repeat("x", 190)+"[redacted]", got)
+	// Truncating first would leave the key prefix before the cut.
+	got = errorMessageFor(t, strings.Repeat("x", 195)+testKey)
+	assert.Equal(t, strings.Repeat("x", 195)+"[reda...", got)
+	assert.NotContains(t, got, "sekret")
+	// Cleaning must precede truncation: stripped characters do not use budget.
+	got = errorMessageFor(t, strings.Repeat("x", 195)+strings.Repeat("\x01", 10)+"yyyyyyyyyy")
+	assert.Equal(t, strings.Repeat("x", 195)+"yyyyy...", got)
+}
+
+func TestNewClient_KeyMustBePrintableASCII(t *testing.T) {
+	rejected := map[string]string{
+		"trailing space":            testKey + " ",
+		"leading space":             " " + testKey,
+		"trailing newline":          testKey + "\n",
+		"tab":                       "sekret\tkey",
+		"NUL":                       "sekret\x00key",
+		"DEL":                       "sekret\x7fkey",
+		"BOM":                       "\ufeff" + testKey,
+		"ZWSP":                      "\u200b" + testKey,
+		"NBSP":                      testKey + "\u00a0",
+		"ideographic space":         "\u3000" + testKey,
+		"combining grapheme joiner": "sekret\u034fkey",
+		"variation selector":        "sekret\ufe0fkey",
+		"hangul filler":             "sekret\u3164key",
+		"invalid UTF-8":             "sekret\xffkey",
+		"non-ASCII letter":          "sekr\u00e9t",
+		"all invisible":             "\u200b\u200d\ufeff",
+	}
+	for name, k := range rejected {
+		t.Run("rejects "+name, func(t *testing.T) {
+			_, err := newClient("http://127.0.0.1:1", Config{APIKey: NewSecret(k), OrgID: testOrg}, nil)
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), "sekret")
+		})
+	}
+	_, err := newClient("http://127.0.0.1:1", Config{APIKey: NewSecret("ab\u200bc"), OrgID: testOrg}, nil)
+	assert.EqualError(t, err, "archera API key contains a non-printable or non-ASCII character at byte 2")
+	for _, k := range []string{"aZ09-_.~+/=", "!", "~"} {
+		_, err := newClient("http://127.0.0.1:1", Config{APIKey: NewSecret(k), OrgID: testOrg}, nil)
+		assert.NoError(t, err, k)
+	}
+}
+
+// A vendor that echoes the x-api-key header back in a 401 message must see it
+// redacted, end to end with a valid key.
+func TestClient_EchoedHeaderKeyIsRedacted(t *testing.T) {
+	c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		b, _ := json.Marshal(map[string]string{"message": "invalid api key " + r.Header.Get("x-api-key")})
+		_, _ = w.Write(b)
+	}))
+	_, err := c.Plan(context.Background(), testPlan)
+	var he *HTTPError
+	require.ErrorAs(t, err, &he)
+	assert.Equal(t, "invalid api key [redacted]", he.Message)
+}
+
+// Decode errors are built in quote.go, which cannot reach the key; the client
+// layer must sanitize them. After #336 the decode path withholds most vendor
+// values, but a short identifier is still echoed, so a vendor that reflects the
+// key back as an enum value must be redacted.
+func TestClient_DecodeErrorsAreRedacted(t *testing.T) {
+	reflect := func(t *testing.T, value string) error {
+		t.Helper()
+		body := mutate(t, func(m map[string]any) {
+			obj(first(first(m["data"])["candidates"])["offer"])["provider"] = value
+		})
+		c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		_, err := c.Comparison(context.Background(), ComparisonRequest{PlanID: testPlan})
+		require.Error(t, err)
+		return err
+	}
+	t.Run("key as enum value", func(t *testing.T) {
+		err := reflect(t, testKey)
+		assert.NotContains(t, err.Error(), testKey)
+		assert.Contains(t, err.Error(), `unsupported value "[redacted]"`)
+	})
+	t.Run("plan decode error", func(t *testing.T) {
+		body := strings.Replace(validPlanJSON, `"status": "reviewed"`, `"status": "`+testKey+`"`, 1)
+		require.NotEqual(t, validPlanJSON, body)
+		c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		_, err := c.Plan(context.Background(), testPlan)
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), testKey)
+		assert.Contains(t, err.Error(), "[redacted]")
+	})
+	t.Run("sentinel survives sanitizing", func(t *testing.T) {
+		c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{}`))
+		}))
+		_, err := c.Plan(context.Background(), testPlan)
+		require.ErrorIs(t, err, errMissing)
+	})
 }

@@ -81,8 +81,18 @@ func NewClient(cfg Config, hc *http.Client) (*Client, error) {
 }
 
 func newClient(baseURL string, cfg Config, hc *http.Client) (*Client, error) {
-	if strings.TrimSpace(cfg.APIKey.Reveal()) == "" {
+	key := cfg.APIKey.Reveal()
+	if strings.TrimSpace(key) == "" {
 		return nil, errors.New("archera API key is not configured")
+	}
+	// The key travels in an HTTP header and is redacted verbatim from vendor
+	// text, so only printable ASCII is accepted: an invisible or look-alike
+	// character in the key would let a vendor echo defeat the redaction once
+	// cleanMessage strips it. The error names the position, never the key.
+	for i := 0; i < len(key); i++ {
+		if key[i] < 0x21 || key[i] > 0x7e {
+			return nil, fmt.Errorf("archera API key contains a non-printable or non-ASCII character at byte %d", i)
+		}
 	}
 	if !isUUID(cfg.OrgID) {
 		return nil, errors.New("archera org ID must be a UUID")
@@ -92,18 +102,12 @@ func newClient(baseURL string, cfg Config, hc *http.Client) (*Client, error) {
 	}
 	noRedirect := *hc
 	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	key := cfg.APIKey.Reveal()
 	return &Client{
 		baseURL: baseURL,
 		orgID:   cfg.OrgID,
 		hc:      &noRedirect,
 		setAuth: func(req *http.Request) { req.Header.Set("x-api-key", key) },
-		redact: func(msg string) string {
-			if key == "" {
-				return msg
-			}
-			return strings.ReplaceAll(msg, key, "[redacted]")
-		},
+		redact:  func(msg string) string { return strings.ReplaceAll(msg, key, "[redacted]") },
 	}, nil
 }
 
@@ -137,7 +141,11 @@ func (c *Client) Comparison(ctx context.Context, req ComparisonRequest) (*Compar
 		return nil, err
 	}
 	defer func() { _ = body.Close() }()
-	return DecodeComparison(&boundedReader{r: body, n: maxResponseBytes}, c.orgID, req.PlanID, fetchedAt)
+	cmp, err := DecodeComparison(&boundedReader{r: body, n: maxResponseBytes}, c.orgID, req.PlanID, fetchedAt)
+	if err != nil {
+		return nil, sanitizeDecodeError(err, c.redact)
+	}
+	return cmp, nil
 }
 
 // Plan reads the documented CommitmentPlan operation.
@@ -150,7 +158,11 @@ func (c *Client) Plan(ctx context.Context, planID string) (*Plan, error) {
 		return nil, err
 	}
 	defer func() { _ = body.Close() }()
-	return DecodePlan(&boundedReader{r: body, n: maxResponseBytes})
+	plan, err := DecodePlan(&boundedReader{r: body, n: maxResponseBytes})
+	if err != nil {
+		return nil, sanitizeDecodeError(err, c.redact)
+	}
+	return plan, nil
 }
 
 func (c *Client) planPath(planID string) string {
@@ -224,7 +236,10 @@ func sanitizeTransportError(err error) error {
 
 func newHTTPError(resp *http.Response, redact func(string) string) *HTTPError {
 	e := &HTTPError{StatusCode: resp.StatusCode}
-	if s, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); err == nil && s > 0 {
+	// A value past the int range makes Atoi return ErrRange with the clamped
+	// maximum, which the cap below handles; a negative overflow stays ignored.
+	s, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After")))
+	if (err == nil || errors.Is(err, strconv.ErrRange)) && s > 0 {
 		// Compare before multiplying: s*time.Second overflows int64 for large s.
 		if s > int(maxRetryAfter/time.Second) {
 			e.RetryAfter = maxRetryAfter
@@ -239,15 +254,42 @@ func newHTTPError(resp *http.Response, redact func(string) string) *HTTPError {
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err == nil && json.Unmarshal(raw, &shape) == nil {
-		e.Message = truncate(redact(cleanMessage(shape.Message)), maxErrorMessageLen)
+		e.Message = sanitizeVendorText(shape.Message, redact)
 	}
 	return e
 }
 
-// cleanMessage drops control characters (log forging, ANSI injection).
+// sanitizeVendorText is the one pipeline for vendor-influenced text: strip
+// invisible characters first so a split key is reassembled, then redact the
+// key, then truncate (redacting after the cut would leave a key prefix).
+func sanitizeVendorText(msg string, redact func(string) string) string {
+	return truncate(redact(cleanMessage(msg)), maxErrorMessageLen)
+}
+
+// sanitizedError carries the sanitized text of a decode error while keeping
+// the original in the Unwrap chain, so errors.Is/As (errMissing, read-size
+// and transport errors) still work.
+type sanitizedError struct {
+	msg string
+	err error
+}
+
+func (e *sanitizedError) Error() string { return e.msg }
+func (e *sanitizedError) Unwrap() error { return e.err }
+
+// sanitizeDecodeError runs a decode error through the same pipeline as
+// HTTPError.Message. Decode errors are built in quote.go, which cannot reach
+// the client's redactor.
+func sanitizeDecodeError(err error, redact func(string) string) error {
+	return &sanitizedError{msg: sanitizeVendorText(err.Error(), redact), err: err}
+}
+
+// cleanMessage drops control characters (log forging, ANSI injection) and the
+// invisible format, line and paragraph separators (Cf, Zl, Zp) that spoof
+// bidi text, forge line breaks or split an echoed key.
 func cleanMessage(msg string) string {
 	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
 			return -1
 		}
 		return r
