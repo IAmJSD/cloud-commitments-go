@@ -31,21 +31,11 @@ const maxRetryAfter = 24 * time.Hour
 const maxErrorMessageLen = 200
 
 // Config identifies the vendor organization and credential. APIKey is sent
-// only as the x-api-key header. Format redacts it for every fmt verb except %p
-// and %T on a non-pointer Config, which fmt handles before consulting Format;
-// never pass a Config value to %p. fmt cannot call methods on unexported
-// struct fields, so a Config held by the caller in an unexported field still
-// prints the key raw: drop the Config once NewClient has returned, and never
-// log one. NewClient does not retain the Config.
+// only as the x-api-key header. Secret redacts itself under every printer, so
+// a Config is safe to print or hold in any struct field.
 type Config struct {
-	APIKey string `json:"-"`
+	APIKey Secret
 	OrgID  string
-}
-
-// Format redacts the key for fmt verbs, so %v, %+v, %#v and %s of a Config (or
-// a pointer to one) never print it.
-func (c Config) Format(s fmt.State, _ rune) {
-	_, _ = fmt.Fprintf(s, "insurance.Config{OrgID:%q, APIKey:[redacted]}", c.OrgID)
 }
 
 // HTTPError is a non-2xx vendor response. Only the status, the Retry-After
@@ -91,7 +81,7 @@ func NewClient(cfg Config, hc *http.Client) (*Client, error) {
 }
 
 func newClient(baseURL string, cfg Config, hc *http.Client) (*Client, error) {
-	if strings.TrimSpace(cfg.APIKey) == "" {
+	if strings.TrimSpace(cfg.APIKey.Reveal()) == "" {
 		return nil, errors.New("archera API key is not configured")
 	}
 	// The key is sent and redacted verbatim, so surrounding whitespace would
@@ -107,7 +97,7 @@ func newClient(baseURL string, cfg Config, hc *http.Client) (*Client, error) {
 	}
 	noRedirect := *hc
 	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	key := cfg.APIKey
+	key := cfg.APIKey.Reveal()
 	return &Client{
 		baseURL: baseURL,
 		orgID:   cfg.OrgID,
