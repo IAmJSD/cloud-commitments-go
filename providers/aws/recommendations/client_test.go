@@ -501,7 +501,7 @@ func TestGetAllRecommendations(t *testing.T) {
 
 	var incomplete *IncompleteRecommendationsError
 	require.ErrorAs(t, err, &incomplete)
-	require.Equal(t, 24, incomplete.FailedDetails)
+	require.Equal(t, 30, incomplete.FailedDetails)
 	require.Zero(t, incomplete.FailedScopes)
 	// Only EC2 will successfully parse since the mock returns EC2 details for all services
 	// Other services will fail parsing and be skipped
@@ -541,7 +541,7 @@ func TestGetAllRecommendations_SomeServicesFail(t *testing.T) {
 
 	var incomplete *IncompleteRecommendationsError
 	require.ErrorAs(t, err, &incomplete)
-	require.Equal(t, 24, incomplete.FailedDetails)
+	require.Equal(t, 30, incomplete.FailedDetails)
 	require.Zero(t, incomplete.FailedScopes)
 	// Should have recommendations from services that succeeded
 	assert.NotEmpty(t, recs)
@@ -661,7 +661,7 @@ func TestGetAllRecommendations_IncludesSavingsPlans(t *testing.T) {
 	recs, err := client.GetAllRecommendations(context.Background())
 	var incomplete *IncompleteRecommendationsError
 	require.ErrorAs(t, err, &incomplete)
-	require.Equal(t, 24, incomplete.FailedDetails)
+	require.Equal(t, 30, incomplete.FailedDetails)
 	require.Zero(t, incomplete.FailedScopes)
 
 	// At least one EC2 rec must be present (existing services not regressed).
@@ -990,4 +990,26 @@ func TestSetRecLookbackPeriod_ReachesGetReservationPurchaseRecommendation(t *tes
 			}
 		})
 	}
+}
+
+// GetAllRecommendations must query MemoryDB alongside the other RI services.
+func TestGetAllRecommendations_QueriesMemoryDB(t *testing.T) {
+	mockAPI := &mockCostExplorerAPI{
+		riRecommendations: &costexplorer.GetReservationPurchaseRecommendationOutput{},
+		spRecommendations: &costexplorer.GetSavingsPlansPurchaseRecommendationOutput{},
+	}
+	client := NewClientWithAPI(mockAPI, "us-east-1")
+
+	_, err := client.GetAllRecommendations(context.Background())
+	require.NoError(t, err)
+
+	mockAPI.mu.Lock()
+	defer mockAPI.mu.Unlock()
+	memoryDBCalls := 0
+	for _, in := range mockAPI.riCalls {
+		if aws.ToString(in.Service) == "Amazon MemoryDB Service" {
+			memoryDBCalls++
+		}
+	}
+	assert.Equal(t, 6, memoryDBCalls, "one call per (term, payment) combination")
 }
