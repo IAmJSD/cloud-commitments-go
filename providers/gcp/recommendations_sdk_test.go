@@ -238,7 +238,7 @@ func sdkCostRecommendation(savings int64, state recommenderpb.RecommendationStat
 		PrimaryImpact: &recommenderpb.Impact{
 			Category: recommenderpb.Impact_COST,
 			Projection: &recommenderpb.Impact_CostProjection{CostProjection: &recommenderpb.CostProjection{
-				Duration: durationpb.New(30 * 24 * time.Hour),
+				Duration: durationpb.New(730 * time.Hour),
 				Cost:     &money.Money{CurrencyCode: "USD", Units: -savings},
 			}},
 		},

@@ -31,9 +31,9 @@ func TestExtractCostImpact_NormalizesToMonthly(t *testing.T) {
 		duration time.Duration
 		want     float64
 	}{
-		"30 days is already monthly": {30 * 24 * time.Hour, 120},
-		"a 365-day projection":       {365 * 24 * time.Hour, 120 * 30.0 / 365},
-		"a 15-day projection":        {15 * 24 * time.Hour, 240},
+		"a 730h month is already monthly": {730 * time.Hour, 120},
+		"a 365-day projection":            {365 * 24 * time.Hour, 120 * 730.0 / 8760},
+		"a 15-day projection":             {15 * 24 * time.Hour, 120 * 730.0 / 360},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

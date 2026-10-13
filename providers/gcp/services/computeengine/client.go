@@ -1329,9 +1329,9 @@ func machineTypeFromResourcePath(resource string) (string, bool) {
 	return machineType, true
 }
 
-// savingsWindow is the period EstimatedSavings is reported over: the platform
-// treats savings as monthly, and GCP bills a month as 30 days.
-const savingsWindow = 30 * 24 * time.Hour
+// savingsWindow is the period EstimatedSavings is reported over: a 730-hour
+// month (8760 / 12), the month length used across the providers.
+const savingsWindow = 730 * time.Hour
 
 // extractCostImpactFromRecommendation extracts the cost impact from a GCP
 // recommendation and normalizes it to savingsWindow using the projection's
