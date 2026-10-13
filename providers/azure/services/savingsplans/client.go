@@ -125,7 +125,7 @@ func (c *Client) GetRegion() string {
 // GetRecommendations returns Shared-scope Compute Savings Plan purchase
 // recommendations from the Cost Management Benefit Recommendations API
 // (api-version 2024-08-01) at this client's subscription scope. See
-// benefit_recommendations.go. Term and LookbackPeriod from params are honoured;
+// benefit_recommendations.go. Term and LookbackPeriod from params are honored;
 // an unsupported value is an error.
 func (c *Client) GetRecommendations(ctx context.Context, params *common.RecommendationParams) ([]common.Recommendation, error) {
 	return c.getBenefitRecommendations(ctx, params)

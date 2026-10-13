@@ -64,9 +64,9 @@ func TestGetRecommendations_MapsRow(t *testing.T) {
 	assert.Equal(t, "monthly", r.PaymentOption)
 	assert.Equal(t, 0.0, r.CommitmentCost)
 	require.NotNil(t, r.RecurringMonthlyCost)
-	assert.InDelta(t, 1.5*730, *r.RecurringMonthlyCost, 1e-9)
-	assert.InDelta(t, 292*730.0/1460, r.EstimatedSavings, 1e-9)
-	assert.InDelta(t, 2920*730.0/1460, r.OnDemandCost, 1e-9)
+	assert.InDelta(t, 1.5*hoursPerMonth, *r.RecurringMonthlyCost, 1e-9)
+	assert.InDelta(t, 292*hoursPerMonth/1460, r.EstimatedSavings, 1e-9)
+	assert.InDelta(t, 2920*hoursPerMonth/1460, r.OnDemandCost, 1e-9)
 	d := r.Details.(*common.SavingsPlanDetails)
 	assert.Equal(t, 1.5, d.HourlyCommitment)
 	assert.Equal(t, "USD", d.Currency)
@@ -92,7 +92,7 @@ func TestGetRecommendations_EmptyTermRequestsBoth(t *testing.T) {
 	require.Len(t, recs, 2)
 	assert.Equal(t, "1yr", recs[0].Term)
 	assert.Equal(t, "3yr", recs[1].Term)
-	assert.NotContains(t, h.reqs[0].URL.Query().Get("$filter"), "lookBackPeriod")
+	assert.Contains(t, h.reqs[0].URL.Query().Get("$filter"), "properties/lookBackPeriod eq 'Last7Days'")
 }
 
 func TestGetRecommendations_EmptyValue(t *testing.T) {
@@ -124,12 +124,13 @@ func TestGetRecommendations_RejectsForeignNextLink(t *testing.T) {
 	assert.Len(t, h.reqs, 1, "bearer token must not be sent to the foreign host")
 }
 
-func TestGetRecommendations_SelfReferentialNextLink(t *testing.T) {
+func TestGetRecommendations_RejectsHTTPNextLink(t *testing.T) {
 	h := &routeHTTP{reply: func(*http.Request) (int, string) {
-		return 200, `{"value":[],"nextLink":"https://management.azure.com/loop"}`
+		return 200, `{"value":[],"nextLink":"http://management.azure.com/next"}`
 	}}
 	_, err := newTestClient(h).GetRecommendations(context.Background(), &common.RecommendationParams{Term: "3yr"})
 	require.Error(t, err)
+	assert.Len(t, h.reqs, 1)
 }
 
 func TestGetRecommendations_Errors(t *testing.T) {
@@ -183,4 +184,13 @@ func TestBenefitRecsURL_PathAndQuery(t *testing.T) {
 	u, err := url.Parse(newTestClient(nil).benefitRecsURL("P3Y", ""))
 	require.NoError(t, err)
 	assert.Equal(t, "/subscriptions/sub-1/providers/Microsoft.CostManagement/benefitRecommendations", u.Path)
+}
+
+func TestGetRecommendations_PageCapIsAnError(t *testing.T) {
+	h := &routeHTTP{reply: func(*http.Request) (int, string) {
+		return 200, `{"value":[],"nextLink":"https://management.azure.com/loop"}`
+	}}
+	_, err := newTestClient(h).GetRecommendations(context.Background(), &common.RecommendationParams{Term: "3yr"})
+	require.Error(t, err)
+	assert.Len(t, h.reqs, benefitRecsMaxPages)
 }

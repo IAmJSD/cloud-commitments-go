@@ -13,6 +13,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/recommendations"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/services/internal/reservations"
 )
 
 // Cost Management Benefit Recommendations - List, api-version 2024-08-01:
@@ -35,9 +37,14 @@ const (
 	scopeShared              = "Shared"
 	grainHourly              = "Hourly"
 
-	// hoursPerMonth matches the 730 h/month used by the other Azure
-	// recommendation converters for monthly figures.
-	hoursPerMonth = 730.0
+	// defaultBenefitLookback is sent when params carry no lookback, so the
+	// scaling never depends on an API-side default. It matches the Azure
+	// reservation path (internal/recommendations consumptionLookBack).
+	defaultBenefitLookback = "Last7Days"
+
+	// hoursPerMonth uses the same average month as the other Azure
+	// recommendation converters (recommendations.DaysPerMonth = 30.4375 days).
+	hoursPerMonth = recommendations.DaysPerMonth * 24
 )
 
 type benefitRecsPage struct {
@@ -69,13 +76,11 @@ type benefitRecommendDetls struct {
 }
 
 // benefitLookback maps RecommendationParams.LookbackPeriod to the API enum.
-// An empty value is omitted from the filter (API default Last60Days).
+// An empty value selects defaultBenefitLookback.
 func benefitLookback(p string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(p)) {
-	case "":
-		return "", nil
-	case "7d":
-		return "Last7Days", nil
+	case "", "7d":
+		return defaultBenefitLookback, nil
 	case "30d":
 		return "Last30Days", nil
 	case "60d":
@@ -88,23 +93,19 @@ func benefitLookback(p string) (string, error) {
 // benefitTerms returns the API terms to request. An empty term requests both
 // P1Y and P3Y because the API default (P3Y) would silently drop 1-year rows.
 func benefitTerms(t string) ([]string, error) {
-	switch strings.ToLower(strings.TrimSpace(t)) {
-	case "":
+	if strings.TrimSpace(t) == "" {
 		return []string{"P1Y", "P3Y"}, nil
-	case "1", "1yr", "1y", "p1y":
-		return []string{"P1Y"}, nil
-	case "3", "3yr", "3y", "p3y":
-		return []string{"P3Y"}, nil
-	default:
-		return nil, fmt.Errorf("unsupported term %q for Azure savings plan recommendations (the API supports 1yr and 3yr)", t)
 	}
+	years, err := reservations.ParseTermYears(t)
+	if err != nil {
+		return nil, fmt.Errorf("unsupported term %q for Azure savings plan recommendations (the API supports 1yr and 3yr): %w", t, err)
+	}
+	return []string{fmt.Sprintf("P%dY", years)}, nil
 }
 
 func (c *Client) benefitRecsURL(term, lookback string) string {
-	filter := "properties/scope eq 'Shared' AND properties/term eq '" + term + "'"
-	if lookback != "" {
-		filter += " AND properties/lookBackPeriod eq '" + lookback + "'"
-	}
+	filter := "properties/scope eq 'Shared' AND properties/term eq '" + term +
+		"' AND properties/lookBackPeriod eq '" + lookback + "'"
 	q := url.Values{}
 	q.Set("$filter", filter)
 	q.Set("api-version", benefitRecsAPIVersion)
@@ -153,16 +154,11 @@ func (c *Client) getBenefitRecommendations(ctx context.Context, params *common.R
 
 func (c *Client) fetchBenefitPages(ctx context.Context, bearer, firstURL string) ([]benefitRecommendation, error) {
 	var all []benefitRecommendation
-	seen := map[string]struct{}{}
 	next := firstURL
 	for pageIdx := 0; next != ""; pageIdx++ {
 		if pageIdx >= benefitRecsMaxPages {
 			return nil, fmt.Errorf("result exceeds the %d-page cap with nextLink still set", benefitRecsMaxPages)
 		}
-		if _, dup := seen[next]; dup {
-			return nil, fmt.Errorf("self-referential nextLink (page %d)", pageIdx)
-		}
-		seen[next] = struct{}{}
 		if err := requireARMURL(next); err != nil {
 			return nil, fmt.Errorf("page %d: %w", pageIdx, err)
 		}
