@@ -525,6 +525,10 @@ type RecommendationParams struct {
 	// Savings Plans specific filters
 	IncludeSPTypes []string // Compute, EC2Instance, SageMaker, Database
 	ExcludeSPTypes []string
+	// SPAccountScope selects the Cost Explorer account scope for Savings Plans
+	// recommendations: "linked" or "payer" (case-insensitive). Empty means
+	// linked. Payer scope only applies to a management account.
+	SPAccountScope string
 }
 
 // Account represents a cloud account/subscription/project.
