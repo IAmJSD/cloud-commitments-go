@@ -137,7 +137,18 @@ func TestApplyCoverage_RISizedToZero_DropsAndRecords(t *testing.T) {
 		out := ApplyCoverage([]common.Recommendation{rec}, 10, nil, d)
 		assert.Empty(t, out)
 		assert.Equal(t, 1, d.Total())
-		assert.Contains(t, d.FormatOneLine(), common.DropTargetSizedToZero)
+		assert.Contains(t, d.FormatOneLine(), common.DropCoverageSizedToZero)
+		assert.NotContains(t, d.FormatOneLine(), common.DropTargetSizedToZero,
+			"a --coverage drop must not be attributed to --target-coverage")
+	})
+
+	t.Run("coverage zero drops all and records them", func(t *testing.T) {
+		t.Parallel()
+		d := common.NewDropSummary()
+		out := ApplyCoverage([]common.Recommendation{rec, rec}, 0, nil, d)
+		assert.Empty(t, out)
+		assert.Equal(t, 2, d.Total())
+		assert.Contains(t, d.FormatOneLine(), common.DropCoverageSizedToZero)
 	})
 
 	t.Run("with nil drops", func(t *testing.T) {
