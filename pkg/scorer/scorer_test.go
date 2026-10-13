@@ -140,3 +140,30 @@ func TestScore_CombinedFilters(t *testing.T) {
 	assert.Equal(t, "c5.large", result.Passed[0].ResourceType)
 	assert.Len(t, result.Filtered, 2)
 }
+
+// Live shape: EC2 partial-upfront recs from the AWS parser never carry
+// BreakEvenMonths, so the filter must derive it from upfront, savings and term.
+func TestScore_MaxBreakEvenMonths_ComputedFromCosts(t *testing.T) {
+	t.Parallel()
+	partial := rec(common.ServiceEC2, "us-east-1", "m5.large", 30, 40, 720, 1, 0)
+	partial.Term = "1yr"
+	noUpfront := rec(common.ServiceEC2, "us-east-1", "c5.large", 20, 25, 0, 1, 0)
+	noUpfront.Term = "1yr"
+	unknownTerm := rec(common.ServiceEC2, "us-east-1", "r5.large", 20, 25, 500, 1, 0)
+
+	result := Score([]common.Recommendation{partial, noUpfront, unknownTerm}, Config{MaxBreakEvenMonths: 1})
+
+	assert.Len(t, result.Passed, 1)
+	assert.Equal(t, "c5.large", result.Passed[0].ResourceType, "no-upfront has nothing to recover")
+	assert.Len(t, result.Filtered, 2)
+	byType := map[string]string{}
+	for _, f := range result.Filtered {
+		byType[f.Recommendation.ResourceType] = f.FilterReason
+	}
+	assert.Contains(t, byType["m5.large"], "7.2 months exceeds maximum 1")
+	assert.Contains(t, byType["r5.large"], "cannot be computed")
+
+	loose := Score([]common.Recommendation{partial}, Config{MaxBreakEvenMonths: 12})
+	assert.Len(t, loose.Passed, 1)
+	assert.InDelta(t, 7.2, loose.Passed[0].BreakEvenMonths, 1e-9, "computed value is surfaced for reports")
+}
