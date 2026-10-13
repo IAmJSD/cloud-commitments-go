@@ -116,7 +116,7 @@ func commitmentDescription(label string) *regexp.Regexp {
 	return regexp.MustCompile(`^Commitment v1: ` + family + `(Cpu|Ram) in .* for (1|3) Years?$`)
 }
 
-// rateMatcher recognises the catalog SKUs of one family, region and term.
+// rateMatcher recognizes the catalog SKUs of one family, region and term.
 type rateMatcher struct {
 	region      string
 	onDemand    *regexp.Regexp
@@ -151,7 +151,7 @@ func (m rateMatcher) classify(sku *cloudbilling.Sku) (isCommit, isRAM, matched b
 	}
 	for _, re := range m.commitments {
 		sub := re.FindStringSubmatch(sku.Description)
-		if sub == nil || sub[2] != m.wantTerm {
+		if len(sub) == 0 || sub[2] != m.wantTerm {
 			continue
 		}
 		if sku.Category.UsageType != m.wantUsage {
