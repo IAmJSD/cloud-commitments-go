@@ -300,7 +300,9 @@ func WithSkipLog(ctx context.Context) (context.Context, *SkipLog) {
 	return context.WithValue(ctx, skipLogKey{}, l), l
 }
 
-func recordSkip(ctx context.Context, service string, err error) {
+// RecordSkip logs a dropped recommendation and records it in the context's
+// SkipLog, if any.
+func RecordSkip(ctx context.Context, service string, err error) {
 	logging.Errorf("azure %s: skipping recommendation: %v", service, err)
 	if l, ok := ctx.Value(skipLogKey{}).(*SkipLog); ok {
 		l.mu.Lock()
@@ -336,7 +338,7 @@ func (e *PartialResultError) Error() string {
 func ExtractConsumptionOrSkip(ctx context.Context, service string, rec armconsumption.ReservationRecommendationClassification) *ExtractedFields {
 	f, err := ExtractConsumption(rec)
 	if err != nil {
-		recordSkip(ctx, service, err)
+		RecordSkip(ctx, service, err)
 		return nil
 	}
 	return f
@@ -354,7 +356,7 @@ func AppendConsumptionVariants(ctx context.Context, service string, recs []commo
 		if IsCollectionFailure(err) {
 			return recs, fmt.Errorf("azure %s: %w", service, err)
 		}
-		recordSkip(ctx, service, err)
+		RecordSkip(ctx, service, err)
 		return recs, nil
 	}
 	return append(recs, variants...), nil

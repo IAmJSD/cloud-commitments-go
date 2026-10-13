@@ -1,0 +1,130 @@
+package azure
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/advisor/armadvisor"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
+	azrecs "github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/recommendations"
+)
+
+// Fixture-based: payloads are shaped from armadvisor.ResourceRecommendationBase
+// with the extendedProperties keys documented in advisorKey* (no live Azure
+// Advisor data was available).
+
+func advisorRec(impacted string, ext map[string]*string) *armadvisor.ResourceRecommendationBase {
+	return &armadvisor.ResourceRecommendationBase{
+		Properties: &armadvisor.RecommendationProperties{ImpactedField: &impacted, ExtendedProperties: ext},
+	}
+}
+
+func reservationExt(over map[string]*string) map[string]*string {
+	ext := map[string]*string{
+		"reservedResourceType": strPtr("VirtualMachines"),
+		"annualSavingsAmount":  strPtr("1200"),
+		"savingsCurrency":      strPtr("USD"),
+		"term":                 strPtr("P3Y"),
+		"sku":                  strPtr("Standard_D2s_v3"),
+		"qty":                  strPtr("2"),
+		"region":               strPtr("eastus"),
+	}
+	for k, v := range over {
+		if v == nil {
+			delete(ext, k)
+		} else {
+			ext[k] = v
+		}
+	}
+	return ext
+}
+
+const subscriptionScope = "Microsoft.Subscriptions/subscriptions"
+
+func TestConvertAdvisor_DerivesFieldsFromPayload(t *testing.T) {
+	a := &RecommendationsClientAdapter{subscriptionID: "sub"}
+
+	ri := a.convertAdvisorRecommendation(context.Background(), advisorRec(subscriptionScope, reservationExt(nil)))
+	require.NotNil(t, ri)
+	assert.Equal(t, common.CommitmentReservedInstance, ri.CommitmentType)
+	assert.Equal(t, "3yr", ri.Term, "term comes from the payload, not a 1yr default")
+	assert.Equal(t, "Standard_D2s_v3", ri.ResourceType)
+	assert.Equal(t, 2, ri.Count)
+	assert.Equal(t, 100.0, ri.EstimatedSavings)
+	assert.Empty(t, ri.PaymentOption, "the payload carries no payment plan; variants are fanned out later")
+
+	sp := a.convertAdvisorRecommendation(context.Background(), advisorRec(subscriptionScope, map[string]*string{
+		"recommendationSubCategory": strPtr("SavingsPlan"),
+		"annualSavingsAmount":       strPtr("2400"),
+		"savingsCurrency":           strPtr("USD"),
+		"term":                      strPtr("P1Y"),
+	}))
+	require.NotNil(t, sp)
+	assert.Equal(t, common.CommitmentSavingsPlan, sp.CommitmentType)
+	assert.Equal(t, "1yr", sp.Term)
+}
+
+func TestConvertAdvisor_NonPurchaseRecommendationsAreIgnored(t *testing.T) {
+	a := &RecommendationsClientAdapter{subscriptionID: "sub"}
+	// Resize/shutdown: resource-scoped, no reservedResourceType.
+	ctx, skips := azrecs.WithSkipLog(context.Background())
+	rightsize := advisorRec("Microsoft.Compute/virtualMachines", map[string]*string{
+		"annualSavingsAmount": strPtr("1000"), "savingsCurrency": strPtr("USD"),
+	})
+	assert.Nil(t, a.convertAdvisorRecommendation(ctx, rightsize))
+	assert.Empty(t, skips.Entries(), "a non-purchase recommendation is not a skip")
+}
+
+func TestConvertAdvisor_UnknownOrMissingValuesAreSkippedLoudly(t *testing.T) {
+	a := &RecommendationsClientAdapter{subscriptionID: "sub"}
+	for name, over := range map[string]map[string]*string{
+		"unknown term":     {"term": strPtr("P5Y")},
+		"missing term":     {"term": nil},
+		"non-USD":          {"savingsCurrency": strPtr("EUR")},
+		"missing currency": {"savingsCurrency": nil},
+		"missing sku":      {"sku": nil},
+		"missing qty":      {"qty": nil},
+		"zero qty":         {"qty": strPtr("0")},
+		"junk qty":         {"qty": strPtr("two")},
+		"unknown rrt":      {"reservedResourceType": strPtr("Quantum")},
+		"missing savings":  {"annualSavingsAmount": nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, skips := azrecs.WithSkipLog(context.Background())
+			assert.Nil(t, a.convertAdvisorRecommendation(ctx, advisorRec(subscriptionScope, reservationExt(over))))
+			assert.Len(t, skips.Entries(), 1)
+		})
+	}
+}
+
+func TestAppendAdvisorPageRecs_VariantsKeepCostUnknown(t *testing.T) {
+	a := &RecommendationsClientAdapter{subscriptionID: "sub"}
+	page := armadvisor.RecommendationsClientListResponse{ResourceRecommendationBaseListResult: armadvisor.ResourceRecommendationBaseListResult{
+		Value: []*armadvisor.ResourceRecommendationBase{advisorRec(subscriptionScope, reservationExt(nil))},
+	}}
+	recs := a.appendAdvisorPageRecs(context.Background(), common.RecommendationParams{}, page, nil)
+	require.Len(t, recs, 2)
+	for i, payment := range []string{"upfront", "monthly"} {
+		assert.Equal(t, payment, recs[i].PaymentOption)
+		assert.Equal(t, 100.0, recs[i].EstimatedSavings)
+		assert.Nil(t, recs[i].RecurringMonthlyCost, "no price in the payload: unknown, not zero")
+	}
+}
+
+func TestGetRecommendations_AdvisorTruncationIsSurfaced(t *testing.T) {
+	overrideServiceClientFns(t, &fakeServiceClient{}, &fakeServiceClient{}, &fakeServiceClient{}, &fakeServiceClient{}, &fakeServiceClient{})
+	a := &RecommendationsClientAdapter{cred: &mockAzureTokenCredential{}, subscriptionID: "sub"}
+	a.getAdvisorRecsFn = func(ctx context.Context, p common.RecommendationParams) ([]common.Recommendation, error) {
+		pager := &fakePager[armadvisor.RecommendationsClientListResponse]{limit: 10000, page: advisorPage}
+		return a.collectAdvisorRecommendations(ctx, p, pager)
+	}
+	recs, err := a.GetRecommendations(context.Background(), &common.RecommendationParams{})
+	assert.NotEmpty(t, recs, "what was collected is kept")
+	var partial *azrecs.PartialResultError
+	require.True(t, errors.As(err, &partial), "a capped Advisor walk must not look complete: %v", err)
+	assert.Contains(t, partial.Skipped[0], "pagination cap")
+}
