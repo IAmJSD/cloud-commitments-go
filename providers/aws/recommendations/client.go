@@ -333,21 +333,21 @@ func (c *Client) GetRecommendationsForService(ctx context.Context, service commo
 
 // GetAllRecommendations fetches recommendations for all supported services.
 //
-// All five service calls run concurrently under errgroup. Each goroutine
+// All six RI service calls (plus Savings Plans) run concurrently under errgroup. Each goroutine
 // captures its own error in a closure-scoped variable and returns nil to the
 // group so a single per-service failure does not cancel its siblings (matching
 // the previous loop's `continue`-on-error tolerance). Results are merged in
-// the canonical order EC2 → RDS → ElastiCache → OpenSearch → Redshift after
+// the canonical order EC2 → RDS → ElastiCache → OpenSearch → Redshift → MemoryDB → Savings Plans after
 // all goroutines finish so order-sensitive consumers stay stable.
 //
 // Partial results retain diagnostics through mergeServiceResults; callers decide
 // whether their workflow can use an incomplete collection.
 func (c *Client) GetAllRecommendations(ctx context.Context) ([]common.Recommendation, error) {
 	var (
-		ec2Recs, rdsRecs, cacheRecs, osRecs, redshiftRecs []common.Recommendation
-		ec2Err, rdsErr, cacheErr, osErr, redshiftErr      error
-		spRecs                                            []common.Recommendation
-		spErr                                             error
+		ec2Recs, rdsRecs, cacheRecs, osRecs, redshiftRecs, memoryDBRecs []common.Recommendation
+		ec2Err, rdsErr, cacheErr, osErr, redshiftErr, memoryDBErr       error
+		spRecs                                                          []common.Recommendation
+		spErr                                                           error
 	)
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -384,6 +384,10 @@ func (c *Client) GetAllRecommendations(ctx context.Context) ([]common.Recommenda
 		return nil
 	})
 	g.Go(func() error {
+		memoryDBRecs, memoryDBErr = c.GetRecommendationsForService(gctx, common.ServiceMemoryDB)
+		return nil
+	})
+	g.Go(func() error {
 		spRecs, spErr = c.GetRecommendationsForService(gctx, common.ServiceSavingsPlansAll)
 		return nil
 	})
@@ -409,6 +413,7 @@ func (c *Client) GetAllRecommendations(ctx context.Context) ([]common.Recommenda
 		serviceResult{name: "ElastiCache", recs: cacheRecs, err: cacheErr},
 		serviceResult{name: "OpenSearch", recs: osRecs, err: osErr},
 		serviceResult{name: "Redshift", recs: redshiftRecs, err: redshiftErr},
+		serviceResult{name: "MemoryDB", recs: memoryDBRecs, err: memoryDBErr},
 		serviceResult{name: "SavingsPlans", recs: spRecs, err: spErr},
 	)
 }
