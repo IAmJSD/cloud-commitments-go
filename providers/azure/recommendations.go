@@ -284,20 +284,20 @@ func withSkips(recs []common.Recommendation, err error, skips *azrecs.SkipLog) (
 func dropCoveredAdvisorSavingsPlans(advisor, sp []common.Recommendation) []common.Recommendation {
 	type key struct{ account, term string }
 	covered := make(map[key]bool)
-	for _, r := range sp {
-		if r.CommitmentType == common.CommitmentSavingsPlan {
-			covered[key{r.Account, r.Term}] = true
+	for i := range sp {
+		if sp[i].CommitmentType == common.CommitmentSavingsPlan {
+			covered[key{sp[i].Account, sp[i].Term}] = true
 		}
 	}
 	if len(covered) == 0 {
 		return advisor
 	}
 	out := make([]common.Recommendation, 0, len(advisor))
-	for _, r := range advisor {
-		if r.CommitmentType == common.CommitmentSavingsPlan && covered[key{r.Account, r.Term}] {
+	for i := range advisor {
+		if advisor[i].CommitmentType == common.CommitmentSavingsPlan && covered[key{advisor[i].Account, advisor[i].Term}] {
 			continue
 		}
-		out = append(out, r)
+		out = append(out, advisor[i])
 	}
 	return out
 }
@@ -450,7 +450,7 @@ func (r *RecommendationsClientAdapter) collectAdvisorRecommendations(ctx context
 		}
 		page, err := pager.NextPage(ctx)
 		if err != nil {
-			return recommendations, fmt.Errorf("%w: page error after %d recommendations: %v", errAdvisorTruncated, len(recommendations), err)
+			return recommendations, fmt.Errorf("%w: page error after %d recommendations: %w", errAdvisorTruncated, len(recommendations), err)
 		}
 		recommendations = r.appendAdvisorPageRecs(ctx, params, page, recommendations)
 	}
@@ -529,7 +529,7 @@ const (
 // recommendations are commitment purchases; resource-level recommendations
 // such as resize or shutdown are not, and are ignored (ok=false, no error).
 // An unmapped reservedResourceType is ignored (debug log), not a skip.
-func advisorPurchaseKind(ctx context.Context, ext map[string]*string) (common.CommitmentType, string, bool) {
+func advisorPurchaseKind(ext map[string]*string) (common.CommitmentType, string, bool) {
 	service := serviceFromExtendedProperties(ext)
 	if service == "" {
 		if v := ext[advisorKeyRRT]; v != nil && *v != "" {
@@ -558,7 +558,7 @@ func (r *RecommendationsClientAdapter) convertAdvisorRecommendation(ctx context.
 		return nil
 	}
 	ext := advisorRec.Properties.ExtendedProperties
-	commitmentType, service, ok := advisorPurchaseKind(ctx, ext)
+	commitmentType, service, ok := advisorPurchaseKind(ext)
 	if !ok {
 		return nil
 	}
