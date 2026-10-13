@@ -3,6 +3,7 @@ package azure
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -209,7 +210,7 @@ func (r *RecommendationsClientAdapter) GetRecommendations(ctx context.Context, p
 		advisorFn = r.getAdvisorRecommendations
 	}
 	goService(&advisorErr, func() {
-		advisorRecs, advisorErr = advisorFn(gctx, *params)
+		advisorRecs, advisorErr = collectAdvisorOrSkip(gctx, advisorFn, *params)
 	})
 
 	// Wait for all goroutines. g.Wait() always returns nil because every
@@ -245,7 +246,7 @@ func (r *RecommendationsClientAdapter) GetRecommendations(ctx context.Context, p
 		// credential failure -- the same hazard the savingsplans exclusion
 		// prevents. When getAdvisorRecommendations is changed to propagate
 		// hard errors, flip this flag back to true.
-		serviceResult{"advisor", advisorRecs, advisorErr, false})
+		serviceResult{"advisor", dropCoveredAdvisorSavingsPlans(advisorRecs, spRecs), advisorErr, false})
 	return withSkips(merged, err, skips)
 }
 
@@ -261,6 +262,33 @@ func withSkips(recs []common.Recommendation, err error, skips *azrecs.SkipLog) (
 		return recs, &azrecs.PartialResultError{Skipped: skipped}
 	}
 	return recs, nil
+}
+
+// dropCoveredAdvisorSavingsPlans removes Advisor Savings Plan rows that the
+// savings-plan client (Benefit Recommendations API) already covers, matched on
+// (account, term). Advisor's row carries only a saving, no commitment amount,
+// so the Benefit Recommendations row is the better record of the same advice.
+// Matching on a key, not dropping all Advisor SP rows, keeps Advisor's advice
+// when that client returns nothing for an account and term.
+func dropCoveredAdvisorSavingsPlans(advisor, sp []common.Recommendation) []common.Recommendation {
+	type key struct{ account, term string }
+	covered := make(map[key]bool)
+	for _, r := range sp {
+		if r.CommitmentType == common.CommitmentSavingsPlan {
+			covered[key{r.Account, r.Term}] = true
+		}
+	}
+	if len(covered) == 0 {
+		return advisor
+	}
+	out := make([]common.Recommendation, 0, len(advisor))
+	for _, r := range advisor {
+		if r.CommitmentType == common.CommitmentSavingsPlan && covered[key{r.Account, r.Term}] {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // serviceResult bundles a per-service collection outcome for the deterministic
@@ -370,9 +398,28 @@ type AdvisorPager interface {
 	NextPage(ctx context.Context) (armadvisor.RecommendationsClientListResponse, error)
 }
 
+// errAdvisorTruncated marks an Advisor walk that stopped before the last
+// page (page cap or page error); the recommendations gathered so far are
+// returned with it.
+var errAdvisorTruncated = errors.New("azure advisor: recommendation list is incomplete")
+
+// collectAdvisorOrSkip runs the Advisor collection and reports a truncated
+// walk through the context's skip log, keeping the recommendations gathered so
+// far, so GetRecommendations surfaces it as a *azrecs.PartialResultError.
+// Any other error is returned unchanged.
+func collectAdvisorOrSkip(ctx context.Context, fn func(context.Context, common.RecommendationParams) ([]common.Recommendation, error), params common.RecommendationParams) ([]common.Recommendation, error) {
+	recs, err := fn(ctx, params)
+	if errors.Is(err, errAdvisorTruncated) {
+		azrecs.RecordSkip(ctx, "advisor", err)
+		return recs, nil
+	}
+	return recs, err
+}
+
 // collectAdvisorRecommendations walks the Advisor pager. A canceled context
-// is an error; a page error or hitting the page cap keeps what was collected
-// so far with a warning (the intentional partial-OK path).
+// is an error. Hitting the page cap or a page error returns the
+// recommendations collected so far together with errAdvisorTruncated, never a
+// bare partial result.
 func (r *RecommendationsClientAdapter) collectAdvisorRecommendations(ctx context.Context, params common.RecommendationParams, pager AdvisorPager) ([]common.Recommendation, error) {
 	recommendations := make([]common.Recommendation, 0)
 	for pageIdx := 0; pager.More(); pageIdx++ {
@@ -380,19 +427,13 @@ func (r *RecommendationsClientAdapter) collectAdvisorRecommendations(ctx context
 			return nil, fmt.Errorf("azure advisor: context canceled during pagination: %w", err)
 		}
 		if pageIdx >= maxAdvisorPages {
-			logging.Warnf("Azure Advisor pagination cap (%d pages) reached after %d recommendations (partial results returned)", maxAdvisorPages, len(recommendations))
-			break
+			return recommendations, fmt.Errorf("%w: pagination cap (%d pages) reached after %d recommendations", errAdvisorTruncated, maxAdvisorPages, len(recommendations))
 		}
 		page, err := pager.NextPage(ctx)
 		if err != nil {
-			// Advisor partial-OK is intentional: per-service reservation results
-			// (compute, database, etc.) remain useful on their own when Advisor
-			// pagination fails mid-stream. Warnf with the accumulated count so
-			// operators can assess the completeness of the Advisor slice.
-			logging.Warnf("Azure Advisor pagination error after %d recommendations (partial results returned): %v", len(recommendations), err)
-			break
+			return recommendations, fmt.Errorf("%w: page error after %d recommendations: %v", errAdvisorTruncated, len(recommendations), err)
 		}
-		recommendations = r.appendAdvisorPageRecs(params, page, recommendations)
+		recommendations = r.appendAdvisorPageRecs(ctx, params, page, recommendations)
 	}
 
 	return recommendations, nil
@@ -402,6 +443,7 @@ func (r *RecommendationsClientAdapter) collectAdvisorRecommendations(ctx context
 // and appends them to the provided slice. Pulled out of getAdvisorRecommendations
 // to keep that function under the cyclomatic limit.
 func (r *RecommendationsClientAdapter) appendAdvisorPageRecs(
+	ctx context.Context,
 	params common.RecommendationParams,
 	page armadvisor.RecommendationsClientListResponse,
 	recommendations []common.Recommendation,
@@ -410,8 +452,7 @@ func (r *RecommendationsClientAdapter) appendAdvisorPageRecs(
 		if advisorRec.Properties == nil {
 			continue
 		}
-		// Convert Azure Advisor recommendation to our common format
-		rec := r.convertAdvisorRecommendation(advisorRec)
+		rec := r.convertAdvisorRecommendation(ctx, advisorRec)
 		if rec != nil && shouldIncludeService(params, rec.Service) {
 			// Preserve Advisor-provided EstimatedSavings when both OnDemandCost
 			// and CommitmentCost are unset (zero), since ExpandPaymentVariants
@@ -448,14 +489,58 @@ func resolveAdvisorRegion(advisorRec *armadvisor.ResourceRecommendationBase) str
 	return ""
 }
 
-// convertAdvisorRecommendation converts an Azure Advisor recommendation to common format.
-func (r *RecommendationsClientAdapter) convertAdvisorRecommendation(advisorRec *armadvisor.ResourceRecommendationBase) *common.Recommendation {
+// Advisor ExtendedProperties keys. The SDK types ExtendedProperties as a bare
+// map[string]*string, so the keys are not in the SDK. annualSavingsAmount,
+// savingsCurrency, term and lookbackPeriod are the names Microsoft's Advisor
+// Resource Graph samples read from properties.extendedProperties
+// (learn.microsoft.com/azure/advisor/advisor-azure-resource-graph);
+// reservedResourceType, recommendationSubCategory, sku and qty are the keys
+// this collector has always relied on.
+const (
+	advisorKeySavings  = "annualSavingsAmount"
+	advisorKeyCurrency = "savingsCurrency"
+	advisorKeyTerm     = "term"
+	advisorKeySKU      = "sku"
+	advisorKeyQty      = "qty"
+	advisorKeyRRT      = "reservedResourceType"
+)
+
+// advisorPurchaseKind classifies an Advisor recommendation. Only
+// subscription-scoped reservation (reservedResourceType) and Savings Plan
+// recommendations are commitment purchases; resource-level recommendations
+// such as resize or shutdown are not, and are ignored (ok=false, no error).
+// An unmapped reservedResourceType is ignored (debug log), not a skip.
+func advisorPurchaseKind(ctx context.Context, ext map[string]*string) (common.CommitmentType, string, bool) {
+	service := serviceFromExtendedProperties(ext)
+	if service == "" {
+		if v := ext[advisorKeyRRT]; v != nil && *v != "" {
+			// Advisor routinely returns reservations for services this
+			// collector does not price; they are not ours to convert.
+			logging.Debugf("azure advisor: ignoring %s %q", advisorKeyRRT, *v)
+		}
+		return "", "", false
+	}
+	if v := ext["recommendationSubCategory"]; v != nil && strings.EqualFold(*v, "SavingsPlan") {
+		return common.CommitmentSavingsPlan, service, true
+	}
+	return common.CommitmentReservedInstance, service, true
+}
+
+// convertAdvisorRecommendation converts an Azure Advisor commitment
+// recommendation to common format. Payload problems are recorded in the
+// context's skip log and yield nil.
+//
+// Payment option is left empty: the Advisor payload carries no payment-plan
+// or price field, and Azure charges the same total for upfront and monthly
+// billing, so ExpandPaymentVariants fans it out to both. CommitmentCost stays 0
+// and RecurringMonthlyCost nil (unknown) because the payload has no price.
+func (r *RecommendationsClientAdapter) convertAdvisorRecommendation(ctx context.Context, advisorRec *armadvisor.ResourceRecommendationBase) *common.Recommendation {
 	if advisorRec.Properties == nil {
 		return nil
 	}
-
-	service := extractServiceType(advisorRec)
-	if service == "" {
+	ext := advisorRec.Properties.ExtendedProperties
+	commitmentType, service, ok := advisorPurchaseKind(ctx, ext)
+	if !ok {
 		return nil
 	}
 
@@ -463,34 +548,61 @@ func (r *RecommendationsClientAdapter) convertAdvisorRecommendation(advisorRec *
 		Provider:       common.ProviderAzure,
 		Service:        common.ServiceType(service),
 		Account:        r.subscriptionID,
-		CommitmentType: common.CommitmentReservedInstance,
-		Term:           "1yr",
-		PaymentOption:  "upfront",
+		CommitmentType: commitmentType,
 	}
-
 	rec.Region = resolveAdvisorRegion(advisorRec)
 
-	if err := populateFromExtendedProperties(rec, advisorRec.Properties.ExtendedProperties); err != nil {
-		logging.Warnf("Azure Advisor %s recommendation in %q dropped: %v", service, rec.Region, err)
+	if err := populateFromExtendedProperties(rec, ext); err != nil {
+		azrecs.RecordSkip(ctx, "advisor", fmt.Errorf("%s recommendation in %q: %w", service, rec.Region, err))
 		return nil
 	}
 	return rec
 }
 
-// populateFromExtendedProperties fills savings, SKU, term, and count from
-// the Advisor recommendation's ExtendedProperties map. It returns an error
-// when the savings figure is absent or unparsable, so the caller never ships
-// a fabricated zero.
+// populateFromExtendedProperties fills savings, SKU, term and count from the
+// Advisor ExtendedProperties map and errors on anything absent or unknown:
+// savings, a USD currency label and a known term are always required; a
+// reservation also needs its SKU and a positive quantity.
 func populateFromExtendedProperties(rec *common.Recommendation, ext map[string]*string) error {
-	annualSavings, err := extFloat(ext, "annualSavingsAmount")
+	annualSavings, err := extFloat(ext, advisorKeySavings)
 	if err != nil {
 		return err
 	}
+	if cur := extString(ext, advisorKeyCurrency, ""); !strings.EqualFold(cur, "USD") {
+		return fmt.Errorf("%s %q is not USD", advisorKeyCurrency, cur)
+	}
 	rec.EstimatedSavings = annualSavings / 12
-	rec.ResourceType = extString(ext, "sku", rec.ResourceType)
-	rec.Term = extString(ext, "term", rec.Term)
-	rec.Count = extInt(ext, "qty", rec.Count)
+
+	if rec.Term, err = advisorTerm(ext); err != nil {
+		return err
+	}
+	if rec.CommitmentType == common.CommitmentSavingsPlan {
+		return nil
+	}
+	if rec.ResourceType = extString(ext, advisorKeySKU, ""); rec.ResourceType == "" {
+		return fmt.Errorf("%s is absent", advisorKeySKU)
+	}
+	qty, err := extInt(ext, advisorKeyQty)
+	if err != nil {
+		return err
+	}
+	rec.Count = qty
 	return nil
+}
+
+// advisorTerm maps the Advisor term ("P1Y"/"P3Y", or the already-normalised
+// "1yr"/"3yr") to the common form and errors on a missing or unknown value.
+func advisorTerm(ext map[string]*string) (string, error) {
+	switch t := extString(ext, advisorKeyTerm, ""); t {
+	case "P1Y", "1yr":
+		return "1yr", nil
+	case "P3Y", "3yr":
+		return "3yr", nil
+	case "":
+		return "", fmt.Errorf("%s is absent", advisorKeyTerm)
+	default:
+		return "", fmt.Errorf("unknown %s %q", advisorKeyTerm, t)
+	}
 }
 
 func extString(m map[string]*string, key, fallback string) string {
@@ -518,45 +630,19 @@ func extFloat(m map[string]*string, key string) (float64, error) {
 	return f, nil
 }
 
-func extInt(m map[string]*string, key string, fallback int) int {
-	if v, ok := m[key]; ok && v != nil {
-		if n, err := strconv.Atoi(*v); err == nil {
-			return n
-		}
+func extInt(m map[string]*string, key string) (int, error) {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return 0, fmt.Errorf("%s is absent", key)
 	}
-	return fallback
-}
-
-// extractServiceType determines the service type from an Advisor recommendation.
-// First checks ImpactedField (resource-scoped), then falls back to
-// ExtendedProperties (subscription-scoped reservations/savings plans).
-func extractServiceType(rec *armadvisor.ResourceRecommendationBase) string {
-	if rec.Properties == nil {
-		return ""
+	n, err := strconv.Atoi(*v)
+	if err != nil {
+		return 0, fmt.Errorf("%s %q is not an integer: %w", key, *v, err)
 	}
-	if svc := serviceFromImpactedField(rec.Properties.ImpactedField); svc != "" {
-		return svc
+	if n <= 0 {
+		return 0, fmt.Errorf("%s %q is not positive", key, *v)
 	}
-	return serviceFromExtendedProperties(rec.Properties.ExtendedProperties)
-}
-
-// serviceFromImpactedField maps Azure resource namespace to service type.
-func serviceFromImpactedField(field *string) string {
-	if field == nil {
-		return ""
-	}
-	f := *field
-	switch {
-	case strings.Contains(f, "Microsoft.Compute"):
-		return string(common.ServiceCompute)
-	case strings.Contains(f, "Microsoft.Sql"):
-		return string(common.ServiceRelationalDB)
-	case strings.Contains(f, "Microsoft.Cache"):
-		return string(common.ServiceCache)
-	case strings.Contains(f, "Microsoft.DBforMySQL"), strings.Contains(f, "Microsoft.DBforPostgreSQL"):
-		return string(common.ServiceRelationalDB)
-	}
-	return ""
+	return n, nil
 }
 
 // serviceFromExtendedProperties resolves service type for subscription-scoped
@@ -577,7 +663,7 @@ func serviceFromExtendedProperties(ext map[string]*string) string {
 	}
 	if subcat, ok := ext["recommendationSubCategory"]; ok && subcat != nil {
 		if strings.EqualFold(*subcat, "SavingsPlan") {
-			return string(common.ServiceCompute)
+			return string(common.ServiceSavingsPlansAll)
 		}
 	}
 	return ""
