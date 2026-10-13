@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -26,20 +27,21 @@ func catalogServer(t *testing.T, total, pageSize int, tokens *[]string) *httptes
 			start, _ = strconv.Atoi(token)
 		}
 		end := min(start+pageSize, total)
-		body := `{"skus":[`
+		var body strings.Builder
+		body.WriteString(`{"skus":[`)
 		for i := start; i < end; i++ {
 			if i > start {
-				body += ","
+				body.WriteString(",")
 			}
-			body += fmt.Sprintf(`{"skuId":"sku-%d"}`, i)
+			fmt.Fprintf(&body, `{"skuId":"sku-%d"}`, i)
 		}
-		body += `]`
+		body.WriteString("]")
 		if end < total {
-			body += fmt.Sprintf(`,"nextPageToken":"%d"`, end)
+			fmt.Fprintf(&body, `,"nextPageToken":"%d"`, end)
 		}
-		body += `}`
+		body.WriteString("}")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(body))
+		_, _ = w.Write([]byte(body.String()))
 	}))
 }
 
