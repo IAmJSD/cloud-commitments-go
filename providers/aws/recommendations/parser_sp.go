@@ -97,6 +97,11 @@ func parseOptionalFloatOrWarn(field string, s *string) float64 {
 // hoursPerMonth is the standard AWS billing constant for monthly cost calculations.
 const hoursPerMonth = 730.0
 
+const (
+	hoursPerYear  = 8760.0
+	monthsPerYear = 12.0
+)
+
 // ec2SPFields holds the Cost Explorer SavingsPlansDetails fields that are
 // specific to EC2Instance Savings Plans. Extracted from parseSavingsPlanDetail
 // to keep that function's cyclomatic complexity under the gocyclo-10 threshold.
@@ -140,6 +145,28 @@ func spPlanTypeDisplayString(pt types.SupportedSavingsPlansType) string {
 		return "Database"
 	}
 	return string(pt)
+}
+
+// spRecurringMonthlyCost returns the monthly recurring payment of a Savings
+// Plan: (hourly x 8760 x years - upfront) / (12 x years).
+func spRecurringMonthlyCost(hourly, upfront float64, term, paymentOption string) (float64, error) {
+	if paymentOption == "all-upfront" {
+		return 0, nil
+	}
+	var years float64
+	switch term {
+	case "1yr", "1":
+		years = 1
+	case "3yr", "3":
+		years = 3
+	default:
+		return 0, fmt.Errorf("savings plan recurring cost: unsupported term %q", term)
+	}
+	monthly := (hourly*hoursPerYear*years - upfront) / (monthsPerYear * years)
+	if monthly < 0 {
+		return 0, fmt.Errorf("savings plan recurring cost: upfront %.2f exceeds the %.2f total commitment (hourly %.4f, term %s)", upfront, hourly*hoursPerYear*years, hourly, term)
+	}
+	return monthly, nil
 }
 
 // parseSavingsPlanDetail converts a single Savings Plan recommendation detail
@@ -210,27 +237,18 @@ func (c *Client) parseSavingsPlanDetail(
 	// See extractEC2SPFields for the extraction logic and field semantics.
 	ec2Fields := extractEC2SPFields(planType, detail)
 
-	// RecurringMonthlyCost is the portion of the SP commitment that appears
-	// on monthly bills (i.e. excludes upfront payments).
-	//
-	//   - all-upfront: recurring = 0 (everything was paid upfront; monthly
-	//     bills show no further charge). Use explicit 0, not nil, so the
-	//     frontend can distinguish "known-zero" from "data not provided".
-	//   - partial-upfront / no-upfront: recurring ≈ HourlyCommitmentToPurchase
-	//     × 730. For partial-upfront this slightly over-counts (it includes the
-	//     amortized upfront portion), but AWS CE does not expose the recurring-
-	//     only hourly rate directly, so this is the best available approximation.
-	//   - nil: HourlyCommitmentToPurchase was absent from the API response
-	//     (should not happen for well-formed CE responses, but handled defensively).
+	// RecurringMonthlyCost is the part of the commitment billed monthly, i.e.
+	// the total commitment (HourlyCommitmentToPurchase x hours in the term)
+	// minus the upfront payment CE quotes, spread over the term's months.
+	// CE exposes no recurring-only field. all-upfront is an explicit 0 and
+	// no-upfront reduces to hourly x 730. nil means CE sent no hourly commitment.
 	var recurringMonthlyCost *float64
 	if detail.HourlyCommitmentToPurchase != nil {
-		if params.PaymentOption == "all-upfront" {
-			zero := 0.0
-			recurringMonthlyCost = &zero
-		} else {
-			monthly := hourlyCommitment * hoursPerMonth
-			recurringMonthlyCost = &monthly
+		monthly, err := spRecurringMonthlyCost(hourlyCommitment, upfrontCost, params.Term, params.PaymentOption)
+		if err != nil {
+			return nil, err
 		}
+		recurringMonthlyCost = &monthly
 	}
 
 	return &common.Recommendation{
