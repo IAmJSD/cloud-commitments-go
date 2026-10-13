@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	recommender "cloud.google.com/go/recommender/apiv1"
@@ -18,12 +19,13 @@ import (
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/gcp/internal/billingcurrency"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/gcp/internal/skulist"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/gcp/internal/skumatch"
 )
 
-// recsPageSize is the page size requested from the Recommender API, and
-// maxRecsPages caps how many pages one listing may span. The iterator hands
-// out items, so the item cap is the product of the two.
+// recsPageSize is the page size requested from the Recommender API. The
+// iterator hands out items, so the cap is maxRecsPages pages of recsPageSize
+// items, i.e. maxRecsItems (2000) items in total.
 const (
 	recsPageSize = 100
 	maxRecsPages = 20
@@ -37,9 +39,6 @@ func checkRecsCap(itemIdx int, nextErr error) error {
 	}
 	return nil
 }
-
-// maxSKUPages caps Cloud Billing SKU listing pagination.
-const maxSKUPages = 200
 
 // SQLAdminService interface for SQL admin operations (enables mocking).
 type SQLAdminService interface {
@@ -66,6 +65,8 @@ type RecommenderClient interface {
 
 // Client handles GCP Cloud SQL commitments.
 type Client struct {
+	skuMu             sync.Mutex
+	skuCache          *cloudbilling.ListSkusResponse
 	ctx               context.Context
 	projectID         string
 	region            string
@@ -123,24 +124,11 @@ type realBillingService struct {
 }
 
 func (r *realBillingService) ListSKUs(serviceID string) (*cloudbilling.ListSkusResponse, error) {
-	merged := &cloudbilling.ListSkusResponse{}
-	pageToken := ""
-	for page := 0; page < maxSKUPages; page++ {
-		call := r.service.Services.Skus.List(serviceID)
-		if pageToken != "" {
-			call = call.PageToken(pageToken)
-		}
-		resp, err := call.Do()
-		if err != nil {
-			return nil, err
-		}
-		merged.Skus = append(merged.Skus, resp.Skus...)
-		if resp.NextPageToken == "" {
-			return merged, nil
-		}
-		pageToken = resp.NextPageToken
+	skus, err := skulist.All(context.Background(), r.service.Services.Skus.List(serviceID), skulist.DefaultMaxPages)
+	if err != nil {
+		return nil, fmt.Errorf("%s: list SKUs for %s: %w", "cloudsql", serviceID, err)
 	}
-	return nil, fmt.Errorf("%s: SKU listing for %s exceeded %d pages", "cloudsql", serviceID, maxSKUPages)
+	return &cloudbilling.ListSkusResponse{Skus: skus}, nil
 }
 
 // realRecommenderIterator wraps the real recommender iterator.
@@ -385,7 +373,7 @@ func (c *Client) getSQLPricing(ctx context.Context, tier, region string, termYea
 		return nil, err
 	}
 
-	skus, err := svc.ListSKUs("services/9662-B51E-5089")
+	skus, err := c.listSKUs(svc)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list SKUs: %w", err)
 	}
@@ -616,4 +604,20 @@ func contains(slice []string, str string) bool {
 		}
 	}
 	return false
+}
+
+// listSKUs returns the service's SKU catalog, listing it once per client so
+// that pricing N recommendations costs one catalog read instead of N.
+func (c *Client) listSKUs(svc BillingService) (*cloudbilling.ListSkusResponse, error) {
+	c.skuMu.Lock()
+	defer c.skuMu.Unlock()
+	if c.skuCache != nil {
+		return c.skuCache, nil
+	}
+	skus, err := svc.ListSKUs("services/9662-B51E-5089")
+	if err != nil {
+		return nil, err
+	}
+	c.skuCache = skus
+	return skus, nil
 }

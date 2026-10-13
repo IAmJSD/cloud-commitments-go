@@ -2,16 +2,12 @@ package memorystore
 
 import (
 	"context"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"cloud.google.com/go/recommender/apiv1/recommenderpb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/api/cloudbilling/v1"
-	"google.golang.org/api/option"
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
 )
@@ -40,38 +36,69 @@ func TestGetRecommendations_ManyItemsWithinPageCap(t *testing.T) {
 	assert.Len(t, recs, n)
 }
 
-// A genuine cap breach still fails loud.
-func TestGetRecommendations_PageCapBreachFails(t *testing.T) {
+// Exactly maxRecsItems recommendations are within the cap; the old per-item
+// check rejected anything past 20.
+func TestGetRecommendations_ExactlyAtCapSucceeds(t *testing.T) {
+	c, _ := NewClient(context.Background(), "p", "us-central1")
+	c.SetRecommenderClient(&MockRecommenderClient{recommendations: activeRecs(maxRecsItems)})
+	c.SetBillingService(&MockBillingService{skus: &cloudbilling.ListSkusResponse{}})
+
+	recs, err := c.GetRecommendations(context.Background(), &common.RecommendationParams{})
+	require.NoError(t, err)
+	assert.Len(t, recs, maxRecsItems)
+}
+
+// A genuine cap breach still fails loud and returns no partial list.
+func TestGetRecommendations_PastCapFails(t *testing.T) {
 	c, _ := NewClient(context.Background(), "p", "us-central1")
 	c.SetRecommenderClient(&MockRecommenderClient{recommendations: activeRecs(maxRecsItems + 1)})
 	c.SetBillingService(&MockBillingService{skus: &cloudbilling.ListSkusResponse{}})
 
-	_, err := c.GetRecommendations(context.Background(), &common.RecommendationParams{})
+	recs, err := c.GetRecommendations(context.Background(), &common.RecommendationParams{})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cap reached")
+	assert.Nil(t, recs)
 }
 
-func TestRealBillingService_ListSKUs_FollowsNextPageToken(t *testing.T) {
-	var tokens []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tok := r.URL.Query().Get("pageToken")
-		tokens = append(tokens, tok)
-		w.Header().Set("Content-Type", "application/json")
-		switch tok {
-		case "":
-			fmt.Fprint(w, `{"skus":[{"skuId":"A"}],"nextPageToken":"t2"}`)
-		case "t2":
-			fmt.Fprint(w, `{"skus":[{"skuId":"B"}],"nextPageToken":"t3"}`)
-		default:
-			fmt.Fprint(w, `{"skus":[{"skuId":"C"}]}`)
-		}
-	}))
-	defer srv.Close()
+// The cap is expressed in pages, so the request must ask for the page size
+// the cap assumes.
+type reqCapture struct {
+	RecommenderClient
+	req *recommenderpb.ListRecommendationsRequest
+}
 
-	api, err := cloudbilling.NewService(context.Background(), option.WithEndpoint(srv.URL), option.WithoutAuthentication())
+func (r *reqCapture) ListRecommendations(ctx context.Context, req *recommenderpb.ListRecommendationsRequest) RecommenderIterator {
+	r.req = req
+	return r.RecommenderClient.ListRecommendations(ctx, req)
+}
+
+func TestGetRecommendations_RequestsExplicitPageSize(t *testing.T) {
+	c, _ := NewClient(context.Background(), "p", "us-central1")
+	capture := &reqCapture{RecommenderClient: &MockRecommenderClient{recommendations: nil}}
+	c.SetRecommenderClient(capture)
+
+	_, err := c.GetRecommendations(context.Background(), &common.RecommendationParams{})
 	require.NoError(t, err)
-	resp, err := (&realBillingService{service: api}).ListSKUs("services/x")
-	require.NoError(t, err)
-	require.Len(t, resp.Skus, 3)
-	assert.Equal(t, []string{"", "t2", "t3"}, tokens)
+	require.NotNil(t, capture.req)
+	assert.EqualValues(t, recsPageSize, capture.req.PageSize)
+}
+
+// Pricing N recommendations lists the SKU catalog once.
+type countingBilling struct {
+	BillingService
+	calls int
+}
+
+func (b *countingBilling) ListSKUs(id string) (*cloudbilling.ListSkusResponse, error) {
+	b.calls++
+	return b.BillingService.ListSKUs(id)
+}
+
+func TestListSKUs_CachedPerClient(t *testing.T) {
+	b := &countingBilling{BillingService: &MockBillingService{skus: &cloudbilling.ListSkusResponse{}}}
+	c, _ := NewClient(context.Background(), "p", "us-central1")
+	for i := 0; i < 3; i++ {
+		_, err := c.listSKUs(b)
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 1, b.calls)
 }
