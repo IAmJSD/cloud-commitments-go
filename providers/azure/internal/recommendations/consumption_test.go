@@ -231,12 +231,15 @@ func TestAppendConsumptionVariants_SkipsOnlyTheUnpriceable(t *testing.T) {
 	bad.ResourceType = "Standard_Bad"
 
 	p := NewPricer("compute", stub.lookup)
+	ctx, skips := WithSkipLog(context.Background())
 	var recs []common.Recommendation
-	recs, err := AppendConsumptionVariants(context.Background(), "compute", recs, bad, p)
+	recs, err := AppendConsumptionVariants(ctx, "compute", recs, bad, p)
 	require.NoError(t, err, "an unresolvable price skips only that recommendation")
-	recs, err = AppendConsumptionVariants(context.Background(), "compute", recs, good, p)
+	recs, err = AppendConsumptionVariants(ctx, "compute", recs, good, p)
 	require.NoError(t, err)
 	require.Len(t, recs, 2)
+	require.Len(t, skips.Entries(), 1, "the skipped SKU is recorded, not only logged")
+	assert.Contains(t, skips.Entries()[0], "Standard_Bad")
 	assert.Equal(t, "Standard_D2as_v4", recs[0].ResourceType)
 }
 

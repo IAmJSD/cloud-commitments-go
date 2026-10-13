@@ -544,8 +544,8 @@ func (c *Client) getRedisPricing(ctx context.Context, sku, region string, termYe
 
 // convertRecommendation converts an Azure Consumption API recommendation to the common format.
 // Returns nil when the input is nil or cannot be parsed (e.g. an unsupported SDK Kind).
-func (c *Client) convertRecommendation(_ context.Context, rec armconsumption.ReservationRecommendationClassification) *common.Recommendation {
-	f := recommendations.ExtractConsumptionOrSkip("managedredis", rec)
+func (c *Client) convertRecommendation(ctx context.Context, rec armconsumption.ReservationRecommendationClassification) *common.Recommendation {
+	f := recommendations.ExtractConsumptionOrSkip(ctx, "managedredis", rec)
 	if f == nil {
 		return nil
 	}

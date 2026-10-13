@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/consumption/armconsumption"
 
@@ -284,30 +285,82 @@ func ExpandConsumptionVariants(ctx context.Context, base common.Recommendation, 
 	return []common.Recommendation{upfront, monthly}, nil
 }
 
+// SkipLog collects the recommendations a collection dropped. It is attached
+// to the collection context by WithSkipLog and is safe for concurrent use.
+type SkipLog struct {
+	mu      sync.Mutex
+	entries []string
+}
+
+type skipLogKey struct{}
+
+// WithSkipLog returns a context carrying a fresh SkipLog and that log.
+func WithSkipLog(ctx context.Context) (context.Context, *SkipLog) {
+	l := &SkipLog{}
+	return context.WithValue(ctx, skipLogKey{}, l), l
+}
+
+// RecordSkip logs a dropped recommendation and records it in the context's
+// SkipLog, if any.
+func RecordSkip(ctx context.Context, service string, err error) {
+	logging.Errorf("azure %s: skipping recommendation: %v", service, err)
+	if l, ok := ctx.Value(skipLogKey{}).(*SkipLog); ok {
+		l.mu.Lock()
+		l.entries = append(l.entries, fmt.Sprintf("%s: %v", service, err))
+		l.mu.Unlock()
+	}
+}
+
+// Entries returns a copy of the recorded skip reasons.
+func (l *SkipLog) Entries() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.entries...)
+}
+
+// PartialResultError reports that a collection dropped recommendations it
+// could not scale or price (non-USD billing currency, unpriceable SKU, ...).
+// The recommendations that did succeed are returned alongside it; callers that
+// want them use errors.As and keep the slice, callers that treat any error as
+// a failed run see the problem instead of an empty-looking success.
+type PartialResultError struct {
+	Skipped []string
+}
+
+// Partial marks the error as one that accompanies usable recommendations; the
+// cross-provider partial-result check matches on this method.
+func (e *PartialResultError) Partial() bool { return true }
+
+func (e *PartialResultError) Error() string {
+	return fmt.Sprintf("azure recommendations: %d recommendation(s) skipped: %s", len(e.Skipped), strings.Join(e.Skipped, "; "))
+}
+
 // ExtractConsumptionOrSkip wraps ExtractConsumption for the service
-// converters: a recommendation that cannot be scaled is logged as an error
-// and reported as nil, so one bad recommendation does not fail the collection.
-func ExtractConsumptionOrSkip(service string, rec armconsumption.ReservationRecommendationClassification) *ExtractedFields {
+// converters: a recommendation that cannot be scaled is logged, recorded in
+// the context's SkipLog (see WithSkipLog) and reported as nil, so one bad
+// recommendation does not abort the collection but is still surfaced.
+func ExtractConsumptionOrSkip(ctx context.Context, service string, rec armconsumption.ReservationRecommendationClassification) *ExtractedFields {
 	f, err := ExtractConsumption(rec)
 	if err != nil {
-		logging.Errorf("azure %s: skipping recommendation: %v", service, err)
+		RecordSkip(ctx, service, err)
 		return nil
 	}
 	return f
 }
 
 // AppendConsumptionVariants appends the variants of base to recs. A
-// recommendation the catalog has no usable price for is logged as an error and
-// skipped, leaving recs unchanged. A price lookup that fails to complete
-// returns the error (see IsCollectionFailure): the caller must fail the
-// collection rather than return a silently partial result.
+// recommendation the catalog has no usable price for is logged, recorded in
+// the context's SkipLog and skipped, leaving recs unchanged. A price lookup
+// that fails to complete returns the error (see IsCollectionFailure): the
+// caller must fail the collection rather than return a silently partial
+// result.
 func AppendConsumptionVariants(ctx context.Context, service string, recs []common.Recommendation, base common.Recommendation, p *Pricer) ([]common.Recommendation, error) {
 	variants, err := ExpandConsumptionVariants(ctx, base, p)
 	if err != nil {
 		if IsCollectionFailure(err) {
 			return recs, fmt.Errorf("azure %s: %w", service, err)
 		}
-		logging.Errorf("azure %s: skipping recommendation: %v", service, err)
+		RecordSkip(ctx, service, err)
 		return recs, nil
 	}
 	return append(recs, variants...), nil

@@ -601,3 +601,31 @@ func TestFilterRecentCommitments_EndedStatesIgnored(t *testing.T) {
 
 	assert.Empty(t, NewDuplicateChecker(DefaultDuplicateCheckLookbackHours).filterRecentCommitments(commitments))
 }
+
+// A partially covered recommendation keeps its money in step with Count.
+func TestAdjustRecommendationsForExisting_PartialCoverageScalesMoney(t *testing.T) {
+	t.Parallel()
+	client := &fakeServiceClient{commitments: []common.Commitment{
+		{ResourceType: "db.t3.small", Region: "us-east-1", Engine: "mysql", Count: 6, State: "active", StartDate: time.Now().Add(-1 * time.Hour)},
+	}}
+	monthly := 100.0
+	recs := []common.Recommendation{{
+		ResourceType: "db.t3.small", Region: "us-east-1", Count: 10,
+		CommitmentCost: 1000, OnDemandCost: 2000, EstimatedSavings: 500, SavingsPercentage: 25,
+		RecurringMonthlyCost: &monthly,
+		Details:              &common.DatabaseDetails{Engine: "mysql"},
+	}}
+
+	passed, _, err := NewDuplicateChecker(0).AdjustRecommendationsForExisting(context.Background(), recs, client)
+
+	require.NoError(t, err)
+	require.Len(t, passed, 1)
+	assert.Equal(t, 4, passed[0].Count)
+	assert.InDelta(t, 400.0, passed[0].CommitmentCost, 1e-9)
+	assert.InDelta(t, 800.0, passed[0].OnDemandCost, 1e-9)
+	assert.InDelta(t, 200.0, passed[0].EstimatedSavings, 1e-9)
+	assert.Equal(t, 25.0, passed[0].SavingsPercentage, "ratio is invariant")
+	require.NotNil(t, passed[0].RecurringMonthlyCost)
+	assert.InDelta(t, 40.0, *passed[0].RecurringMonthlyCost, 1e-9)
+	assert.Equal(t, 100.0, monthly, "caller's pointer is not mutated")
+}
