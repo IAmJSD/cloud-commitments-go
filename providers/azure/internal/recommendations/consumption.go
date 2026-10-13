@@ -327,6 +327,10 @@ type PartialResultError struct {
 	Skipped []string
 }
 
+// Partial marks the error as one that accompanies usable recommendations; the
+// cross-provider partial-result check matches on this method.
+func (e *PartialResultError) Partial() bool { return true }
+
 func (e *PartialResultError) Error() string {
 	return fmt.Sprintf("azure recommendations: %d recommendation(s) skipped: %s", len(e.Skipped), strings.Join(e.Skipped, "; "))
 }

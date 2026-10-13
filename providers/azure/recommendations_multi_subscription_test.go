@@ -459,3 +459,23 @@ func TestMultiSubscriptionRecommendationsClient_GetRecommendationsForService_Pas
 	assert.Equal(t, common.ServiceCompute, fake1.gotParams.Service)
 	assert.Equal(t, common.ServiceCompute, fake2.gotParams.Service)
 }
+
+// Reviewer probe for go#366: two subscriptions, each with one recommendation
+// and one skipped one. A partial result must keep the recommendations and
+// aggregate the skips, not be counted as a failed subscription.
+func TestMultiSubscriptionRecommendationsClient_PartialResultKeepsRecommendations(t *testing.T) {
+	withFakeSubscriptionClients(t, map[string]*fakeRecommendationsClient{
+		"sub-1": {recs: []common.Recommendation{{Account: "sub-1"}}, err: &PartialResultError{Skipped: []string{"compute: EUR"}}},
+		"sub-2": {recs: []common.Recommendation{{Account: "sub-2"}}, err: &PartialResultError{Skipped: []string{"compute: bad sku"}}},
+	})
+	client, err := NewMultiSubscriptionRecommendationsClient(&mockAzureTokenCredential{}, twoTestAccounts())
+	require.NoError(t, err)
+
+	recs, err := client.GetAllRecommendations(context.Background())
+	assert.Len(t, recs, 2)
+	partial := AsPartialResult(err)
+	require.NotNil(t, partial, "got %v", err)
+	assert.ElementsMatch(t, []string{"sub-1: compute: EUR", "sub-2: compute: bad sku"}, partial.Skipped)
+	assert.True(t, partial.Partial())
+	assert.Nil(t, AsPartialSubscriptionFailure(err), "a partial result is not a failed subscription")
+}
