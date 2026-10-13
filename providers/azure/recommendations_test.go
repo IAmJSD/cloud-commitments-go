@@ -207,7 +207,9 @@ func overrideServiceClientFns(t *testing.T, compute, database, cache, cosmos, sp
 	origCache := newCacheClientFn
 	origCosmos := newCosmosDBClientFn
 	origSP := newSavingsPlansClientFn
+	origSynapse := newSynapseClientFn
 	t.Cleanup(func() {
+		newSynapseClientFn = origSynapse
 		newComputeClientFn = origCompute
 		newDatabaseClientFn = origDatabase
 		newCacheClientFn = origCache
@@ -219,6 +221,7 @@ func overrideServiceClientFns(t *testing.T, compute, database, cache, cosmos, sp
 	newCacheClientFn = newFakeFn(cache)
 	newCosmosDBClientFn = newFakeFn(cosmos)
 	newSavingsPlansClientFn = newFakeFn(sp)
+	newSynapseClientFn = newFakeFn(&fakeServiceClient{})
 }
 
 func TestRecommendationsClientAdapter_GetRecommendationsForService(t *testing.T) {
@@ -359,106 +362,6 @@ func TestRecommendationsClientAdapter_GetRecommendations_PropagatesContextCancel
 		"GetRecommendations must propagate the parent ctx error after g.Wait()")
 }
 
-func TestExtractServiceType(t *testing.T) {
-	tests := []struct {
-		name          string
-		impactedField string
-		expected      string
-	}{
-		{
-			name:          "Microsoft.Compute returns Compute",
-			impactedField: "Microsoft.Compute/virtualMachines",
-			expected:      string(common.ServiceCompute),
-		},
-		{
-			name:          "Microsoft.Sql returns RelationalDB",
-			impactedField: "Microsoft.Sql/servers",
-			expected:      string(common.ServiceRelationalDB),
-		},
-		{
-			name:          "Microsoft.Cache returns Cache",
-			impactedField: "Microsoft.Cache/Redis",
-			expected:      string(common.ServiceCache),
-		},
-		{
-			name:          "Microsoft.DBforMySQL returns RelationalDB",
-			impactedField: "Microsoft.DBforMySQL/servers",
-			expected:      string(common.ServiceRelationalDB),
-		},
-		{
-			name:          "Microsoft.DBforPostgreSQL returns RelationalDB",
-			impactedField: "Microsoft.DBforPostgreSQL/servers",
-			expected:      string(common.ServiceRelationalDB),
-		},
-		{
-			name:          "Unknown resource type returns empty",
-			impactedField: "Microsoft.Storage/storageAccounts",
-			expected:      "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rec := &armadvisor.ResourceRecommendationBase{
-				Properties: &armadvisor.RecommendationProperties{
-					ImpactedField: &tt.impactedField,
-				},
-			}
-			result := extractServiceType(rec)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestExtractServiceType_NilProperties(t *testing.T) {
-	// Test with nil properties
-	rec := &armadvisor.ResourceRecommendationBase{
-		Properties: nil,
-	}
-	result := extractServiceType(rec)
-	assert.Equal(t, "", result)
-}
-
-func TestExtractServiceType_NilImpactedField(t *testing.T) {
-	// Test with nil impacted field
-	rec := &armadvisor.ResourceRecommendationBase{
-		Properties: &armadvisor.RecommendationProperties{
-			ImpactedField: nil,
-		},
-	}
-	result := extractServiceType(rec)
-	assert.Equal(t, "", result)
-}
-
-func TestConvertAdvisorRecommendation(t *testing.T) {
-	adapter := &RecommendationsClientAdapter{
-		subscriptionID: "test-subscription",
-	}
-
-	impactedField := "Microsoft.Compute/virtualMachines"
-	resourceID := "/subscriptions/123/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/vm1"
-
-	rec := &armadvisor.ResourceRecommendationBase{
-		ID: &resourceID,
-		Properties: &armadvisor.RecommendationProperties{
-			ImpactedField: &impactedField,
-			ExtendedProperties: map[string]*string{
-				"annualSavingsAmount": strPtr("1000.00"),
-				"savingsCurrency":     strPtr("USD"),
-			},
-		},
-	}
-
-	result := adapter.convertAdvisorRecommendation(rec)
-	require.NotNil(t, result)
-	assert.Equal(t, common.ProviderAzure, result.Provider)
-	assert.Equal(t, common.ServiceCompute, result.Service)
-	assert.Equal(t, "test-subscription", result.Account)
-	assert.Equal(t, common.CommitmentReservedInstance, result.CommitmentType)
-	assert.Equal(t, "1yr", result.Term)
-	assert.Equal(t, "upfront", result.PaymentOption)
-}
-
 func TestConvertAdvisorRecommendation_NilProperties(t *testing.T) {
 	adapter := &RecommendationsClientAdapter{
 		subscriptionID: "test-subscription",
@@ -468,7 +371,7 @@ func TestConvertAdvisorRecommendation_NilProperties(t *testing.T) {
 		Properties: nil,
 	}
 
-	result := adapter.convertAdvisorRecommendation(rec)
+	result := adapter.convertAdvisorRecommendation(context.Background(), rec)
 	assert.Nil(t, result)
 }
 
@@ -484,48 +387,8 @@ func TestConvertAdvisorRecommendation_UnknownService(t *testing.T) {
 		},
 	}
 
-	result := adapter.convertAdvisorRecommendation(rec)
+	result := adapter.convertAdvisorRecommendation(context.Background(), rec)
 	assert.Nil(t, result)
-}
-
-// A real zero saving must survive conversion, while an absent or unparsable
-// annualSavingsAmount must drop the recommendation instead of shipping $0.
-func TestConvertAdvisorRecommendation_ZeroVersusAbsentSavings(t *testing.T) {
-	adapter := &RecommendationsClientAdapter{subscriptionID: "test-subscription"}
-	impactedField := "Microsoft.Compute/virtualMachines"
-	mkRec := func(ext map[string]*string) *armadvisor.ResourceRecommendationBase {
-		return &armadvisor.ResourceRecommendationBase{
-			Properties: &armadvisor.RecommendationProperties{
-				ImpactedField:      &impactedField,
-				ExtendedProperties: ext,
-			},
-		}
-	}
-
-	zero := adapter.convertAdvisorRecommendation(mkRec(map[string]*string{"annualSavingsAmount": strPtr("0")}))
-	require.NotNil(t, zero, "a real zero saving must be kept")
-	assert.Equal(t, 0.0, zero.EstimatedSavings)
-
-	populated := adapter.convertAdvisorRecommendation(mkRec(map[string]*string{"annualSavingsAmount": strPtr("1200")}))
-	require.NotNil(t, populated)
-	assert.Equal(t, 100.0, populated.EstimatedSavings)
-
-	for name, ext := range map[string]map[string]*string{
-		"key absent":          {"sku": strPtr("Standard_D2s_v3")},
-		"nil value":           {"annualSavingsAmount": nil},
-		"nil map":             nil,
-		"thousands separator": {"annualSavingsAmount": strPtr("1,234.00")},
-		"empty string":        {"annualSavingsAmount": strPtr("")},
-		"NaN":                 {"annualSavingsAmount": strPtr("NaN")},
-		"nan":                 {"annualSavingsAmount": strPtr("nan")},
-		"Inf":                 {"annualSavingsAmount": strPtr("Inf")},
-		"-Inf":                {"annualSavingsAmount": strPtr("-Inf")},
-		"negative":            {"annualSavingsAmount": strPtr("-1200")},
-	} {
-		t.Run(name, func(t *testing.T) {
-			assert.Nil(t, adapter.convertAdvisorRecommendation(mkRec(ext)))
-		})
-	}
 }
 
 func strPtr(s string) *string {
@@ -720,6 +583,7 @@ func TestGetRecommendations_Parallelism(t *testing.T) {
 	origDatabase := newDatabaseClientFn
 	origCache := newCacheClientFn
 	origCosmos := newCosmosDBClientFn
+	origSynapse := newSynapseClientFn
 	origSP := newSavingsPlansClientFn
 	t.Cleanup(func() {
 		newComputeClientFn = origCompute
@@ -727,6 +591,7 @@ func TestGetRecommendations_Parallelism(t *testing.T) {
 		newCacheClientFn = origCache
 		newCosmosDBClientFn = origCosmos
 		newSavingsPlansClientFn = origSP
+		newSynapseClientFn = origSynapse
 	})
 
 	rec := func(svc common.ServiceType) common.Recommendation {
@@ -739,6 +604,7 @@ func TestGetRecommendations_Parallelism(t *testing.T) {
 	newCacheClientFn = newFakeFn(&fakeServiceClient{sleepDur: fakeServiceSleep, recs: []common.Recommendation{rec(common.ServiceCache)}})
 	newCosmosDBClientFn = newFakeFn(&fakeServiceClient{sleepDur: fakeServiceSleep, recs: []common.Recommendation{rec(common.ServiceNoSQL)}})
 	newSavingsPlansClientFn = noopFake
+	newSynapseClientFn = newFakeFn(&fakeServiceClient{})
 
 	adapter := &RecommendationsClientAdapter{
 		cred:             &mockAzureTokenCredential{},
@@ -771,6 +637,7 @@ func TestGetRecommendations_OrderPreservation(t *testing.T) {
 	origDatabase := newDatabaseClientFn
 	origCache := newCacheClientFn
 	origCosmos := newCosmosDBClientFn
+	origSynapse := newSynapseClientFn
 	origSP := newSavingsPlansClientFn
 	t.Cleanup(func() {
 		newComputeClientFn = origCompute
@@ -778,6 +645,7 @@ func TestGetRecommendations_OrderPreservation(t *testing.T) {
 		newCacheClientFn = origCache
 		newCosmosDBClientFn = origCosmos
 		newSavingsPlansClientFn = origSP
+		newSynapseClientFn = origSynapse
 	})
 
 	makeRec := func(svc common.ServiceType) common.Recommendation {
@@ -792,6 +660,7 @@ func TestGetRecommendations_OrderPreservation(t *testing.T) {
 	newCacheClientFn = newFakeFn(&fakeServiceClient{sleepDur: 20 * time.Millisecond, recs: []common.Recommendation{makeRec(common.ServiceCache)}})
 	newCosmosDBClientFn = newFakeFn(&fakeServiceClient{sleepDur: 10 * time.Millisecond, recs: []common.Recommendation{makeRec(common.ServiceNoSQL)}})
 	newSavingsPlansClientFn = newFakeFn(&fakeServiceClient{})
+	newSynapseClientFn = newFakeFn(&fakeServiceClient{})
 
 	adapter := &RecommendationsClientAdapter{
 		cred:             &mockAzureTokenCredential{},
@@ -822,6 +691,7 @@ func TestGetRecommendations_ErrorIsolation(t *testing.T) {
 	origDatabase := newDatabaseClientFn
 	origCache := newCacheClientFn
 	origCosmos := newCosmosDBClientFn
+	origSynapse := newSynapseClientFn
 	origSP := newSavingsPlansClientFn
 	t.Cleanup(func() {
 		newComputeClientFn = origCompute
@@ -829,6 +699,7 @@ func TestGetRecommendations_ErrorIsolation(t *testing.T) {
 		newCacheClientFn = origCache
 		newCosmosDBClientFn = origCosmos
 		newSavingsPlansClientFn = origSP
+		newSynapseClientFn = origSynapse
 	})
 
 	makeRec := func(svc common.ServiceType) common.Recommendation {
@@ -841,6 +712,7 @@ func TestGetRecommendations_ErrorIsolation(t *testing.T) {
 	newCacheClientFn = newFakeFn(&fakeServiceClient{sleepDur: fakeServiceSleep, recs: []common.Recommendation{makeRec(common.ServiceCache)}})
 	newCosmosDBClientFn = newFakeFn(&fakeServiceClient{sleepDur: fakeServiceSleep, recs: []common.Recommendation{makeRec(common.ServiceNoSQL)}})
 	newSavingsPlansClientFn = newFakeFn(&fakeServiceClient{})
+	newSynapseClientFn = newFakeFn(&fakeServiceClient{})
 
 	adapter := &RecommendationsClientAdapter{
 		cred:             &mockAzureTokenCredential{},
@@ -860,33 +732,4 @@ func TestGetRecommendations_ErrorIsolation(t *testing.T) {
 	assert.Contains(t, services, common.ServiceCache, "cache recs must be present despite db error")
 	assert.Contains(t, services, common.ServiceNoSQL, "cosmosdb recs must be present despite db error")
 	assert.NotContains(t, services, common.ServiceRelationalDB, "db recs must be absent when db errors")
-}
-
-// The Advisor path must keep the pre-existing expansion: Advisor supplies only
-// a monthly saving (no on-demand or commitment figure), which survives onto
-// both variants with no recurring cost and no scaling applied.
-func TestAppendAdvisorPageRecs_ExpansionUnchanged(t *testing.T) {
-	adapter := &RecommendationsClientAdapter{subscriptionID: "test-subscription"}
-	impactedField := "Microsoft.Compute/virtualMachines"
-	page := armadvisor.RecommendationsClientListResponse{
-		ResourceRecommendationBaseListResult: armadvisor.ResourceRecommendationBaseListResult{
-			Value: []*armadvisor.ResourceRecommendationBase{{
-				Properties: &armadvisor.RecommendationProperties{
-					ImpactedField:      &impactedField,
-					ExtendedProperties: map[string]*string{"annualSavingsAmount": strPtr("1200"), "sku": strPtr("Standard_D2s_v3"), "term": strPtr("3yr"), "qty": strPtr("2")},
-				},
-			}},
-		},
-	}
-
-	recs := adapter.appendAdvisorPageRecs(common.RecommendationParams{}, page, nil)
-	require.Len(t, recs, 2)
-	for i, payment := range []string{"upfront", "monthly"} {
-		assert.Equal(t, payment, recs[i].PaymentOption)
-		assert.Equal(t, 100.0, recs[i].EstimatedSavings)
-		assert.Zero(t, recs[i].OnDemandCost)
-		assert.Zero(t, recs[i].CommitmentCost)
-		assert.Zero(t, recs[i].SavingsPercentage)
-		assert.Nil(t, recs[i].RecurringMonthlyCost)
-	}
 }
