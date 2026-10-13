@@ -153,12 +153,28 @@ func (c *Client) GetRecommendations(ctx context.Context, params *common.Recommen
 		AccountScope:         types.AccountScopeLinked,
 	}
 
+	if isEC2Service(params.Service) {
+		input.ServiceSpecification = &types.ServiceSpecification{
+			EC2Specification: &types.EC2Specification{OfferingClass: ec2RecommendationOfferingClass},
+		}
+	}
+
 	allRecs, err := c.fetchRIAllPages(ctx, input, params.Service)
 	if err != nil {
 		return nil, err
 	}
 
 	return c.parseRecommendations(ctx, allRecs, *params)
+}
+
+// ec2RecommendationOfferingClass is the EC2 offering class the recommendation
+// is priced for. CE prices Standard when no specification is sent, but the EC2
+// purchase path defaults to Convertible (services/ec2 resolveOfferingClassType),
+// so the request names the class explicitly to match what is bought (go#375).
+const ec2RecommendationOfferingClass = types.OfferingClassConvertible
+
+func isEC2Service(s common.ServiceType) bool {
+	return s == common.ServiceEC2 || s == common.ServiceCompute
 }
 
 // fetchRIAllPages paginates over all pages of RI recommendations for a single
@@ -333,21 +349,21 @@ func (c *Client) GetRecommendationsForService(ctx context.Context, service commo
 
 // GetAllRecommendations fetches recommendations for all supported services.
 //
-// All five service calls run concurrently under errgroup. Each goroutine
+// All six RI service calls (plus Savings Plans) run concurrently under errgroup. Each goroutine
 // captures its own error in a closure-scoped variable and returns nil to the
 // group so a single per-service failure does not cancel its siblings (matching
 // the previous loop's `continue`-on-error tolerance). Results are merged in
-// the canonical order EC2 → RDS → ElastiCache → OpenSearch → Redshift after
+// the canonical order EC2 → RDS → ElastiCache → OpenSearch → Redshift → MemoryDB → Savings Plans after
 // all goroutines finish so order-sensitive consumers stay stable.
 //
 // Partial results retain diagnostics through mergeServiceResults; callers decide
 // whether their workflow can use an incomplete collection.
 func (c *Client) GetAllRecommendations(ctx context.Context) ([]common.Recommendation, error) {
 	var (
-		ec2Recs, rdsRecs, cacheRecs, osRecs, redshiftRecs []common.Recommendation
-		ec2Err, rdsErr, cacheErr, osErr, redshiftErr      error
-		spRecs                                            []common.Recommendation
-		spErr                                             error
+		ec2Recs, rdsRecs, cacheRecs, osRecs, redshiftRecs, memoryDBRecs []common.Recommendation
+		ec2Err, rdsErr, cacheErr, osErr, redshiftErr, memoryDBErr       error
+		spRecs                                                          []common.Recommendation
+		spErr                                                           error
 	)
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -384,6 +400,10 @@ func (c *Client) GetAllRecommendations(ctx context.Context) ([]common.Recommenda
 		return nil
 	})
 	g.Go(func() error {
+		memoryDBRecs, memoryDBErr = c.GetRecommendationsForService(gctx, common.ServiceMemoryDB)
+		return nil
+	})
+	g.Go(func() error {
 		spRecs, spErr = c.GetRecommendationsForService(gctx, common.ServiceSavingsPlansAll)
 		return nil
 	})
@@ -409,6 +429,7 @@ func (c *Client) GetAllRecommendations(ctx context.Context) ([]common.Recommenda
 		serviceResult{name: "ElastiCache", recs: cacheRecs, err: cacheErr},
 		serviceResult{name: "OpenSearch", recs: osRecs, err: osErr},
 		serviceResult{name: "Redshift", recs: redshiftRecs, err: redshiftErr},
+		serviceResult{name: "MemoryDB", recs: memoryDBRecs, err: memoryDBErr},
 		serviceResult{name: "SavingsPlans", recs: spRecs, err: spErr},
 	)
 }

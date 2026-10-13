@@ -4,6 +4,7 @@ package scorer
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -14,7 +15,7 @@ import (
 // Zero values mean "no filter" for numeric thresholds; empty slice means "all services".
 type Config struct {
 	MinSavingsPct      float64  // Minimum savings percentage. 0 = no filter.
-	MaxBreakEvenMonths int      // Maximum break-even months. 0 = no filter.
+	MaxBreakEvenMonths int      // Maximum break-even months. 0 = no filter. No-upfront recs pass; recs whose break-even cannot be computed are filtered.
 	MinCount           int      // Minimum count per recommendation. 0 = no filter.
 	EnabledServices    []string // Empty = all services. E.g. ["ec2", "rds"].
 }
@@ -50,7 +51,13 @@ func Score(recs []common.Recommendation, cfg Config) ScoredResult {
 				FilterReason:   reason,
 			})
 		} else {
-			result.Passed = append(result.Passed, *rec)
+			passed := *rec
+			// Surface the computed value so reports show it; never write +Inf
+			// (not JSON-encodable) or the 0 of "no upfront / unknown".
+			if months, known := common.BreakEven(passed); known && months > 0 && !math.IsInf(months, 0) {
+				passed.BreakEvenMonths = months
+			}
+			result.Passed = append(result.Passed, passed)
 		}
 	}
 
@@ -82,8 +89,14 @@ func filterReason(rec common.Recommendation, cfg Config, enabledServices map[str
 		return fmt.Sprintf("savings %.1f%% below minimum %.1f%%", rec.SavingsPercentage, cfg.MinSavingsPct)
 	}
 
-	if cfg.MaxBreakEvenMonths > 0 && rec.BreakEvenMonths > float64(cfg.MaxBreakEvenMonths) {
-		return fmt.Sprintf("break-even %.1f months exceeds maximum %d months", rec.BreakEvenMonths, cfg.MaxBreakEvenMonths)
+	if cfg.MaxBreakEvenMonths > 0 {
+		months, known := common.BreakEven(rec)
+		if !known {
+			return fmt.Sprintf("break-even cannot be computed (upfront %.2f, savings %.2f, term %q); --max-break-even-months %d cannot be enforced", rec.CommitmentCost, rec.EstimatedSavings, rec.Term, cfg.MaxBreakEvenMonths)
+		}
+		if months > float64(cfg.MaxBreakEvenMonths) {
+			return fmt.Sprintf("break-even %.1f months exceeds maximum %d months", months, cfg.MaxBreakEvenMonths)
+		}
 	}
 
 	if cfg.MinCount > 0 && rec.Count < cfg.MinCount {

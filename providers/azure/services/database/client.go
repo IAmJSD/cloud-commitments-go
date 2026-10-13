@@ -632,7 +632,7 @@ func (c *Client) fetchAzurePricing(ctx context.Context, filter string) (*AzureRe
 // lazily-cached subscription-wide server/managed-instance lists;
 // both stay empty when the fetch fails or the subscription is ambiguous.
 func (c *Client) convertAzureSQLRecommendation(ctx context.Context, azureRec armconsumption.ReservationRecommendationClassification) *common.Recommendation {
-	f := azrecs.ExtractConsumptionOrSkip("database", azureRec)
+	f := azrecs.ExtractConsumptionOrSkip(ctx, "database", azureRec)
 	if f == nil {
 		return nil
 	}

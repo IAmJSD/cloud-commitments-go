@@ -215,3 +215,45 @@ func TestDimensionPredicates_IgnoreAccount(t *testing.T) {
 	assert.True(t, f.IncludesInstanceType(rec.ResourceType))
 	assert.True(t, f.IncludesEngine(&rec))
 }
+
+func TestIncludesEngine_EC2PlatformIsTheEngine(t *testing.T) {
+	t.Parallel()
+	rec := func(platform string) *common.Recommendation {
+		return &common.Recommendation{Details: &common.ComputeDetails{Platform: platform}}
+	}
+	tests := []struct {
+		name     string
+		filters  Filters
+		platform string
+		want     bool
+	}{
+		{"include displayed value", Filters{IncludeEngines: []string{"Windows (Amazon VPC)"}}, "Windows (Amazon VPC)", true},
+		{"include bare name", Filters{IncludeEngines: []string{"windows"}}, "Windows (Amazon VPC)", true},
+		{"include is case-insensitive", Filters{IncludeEngines: []string{"WINDOWS"}}, "Windows", true},
+		{"include other platform", Filters{IncludeEngines: []string{"windows"}}, "Linux/UNIX", false},
+		{"exclude windows", Filters{ExcludeEngines: []string{"windows"}}, "Windows (Amazon VPC)", false},
+		{"exclude windows keeps linux", Filters{ExcludeEngines: []string{"windows"}}, "Linux/UNIX", true},
+		{"linux alias", Filters{IncludeEngines: []string{"linux"}}, "Linux/UNIX (Amazon VPC)", true},
+		{"windows does not match SQL Server variant", Filters{ExcludeEngines: []string{"windows"}}, "Windows with SQL Server", true},
+		{"empty platform with include list", Filters{IncludeEngines: []string{"windows"}}, "", false},
+		{"empty platform with exclude list", Filters{ExcludeEngines: []string{"windows"}}, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, tt.filters.IncludesEngine(rec(tt.platform)))
+		})
+	}
+
+	t.Run("value-typed ComputeDetails", func(t *testing.T) {
+		t.Parallel()
+		r := &common.Recommendation{Details: common.ComputeDetails{Platform: "Windows"}}
+		assert.False(t, Filters{ExcludeEngines: []string{"windows"}}.IncludesEngine(r))
+	})
+	t.Run("typed nil ComputeDetails does not panic", func(t *testing.T) {
+		t.Parallel()
+		var d *common.ComputeDetails
+		r := &common.Recommendation{Details: d}
+		assert.NotPanics(t, func() { Filters{ExcludeEngines: []string{"windows"}}.IncludesEngine(r) })
+	})
+}

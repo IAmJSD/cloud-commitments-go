@@ -119,6 +119,7 @@ func (r *RecommendationsClientAdapter) GetRecommendations(ctx context.Context, p
 	)
 
 	g, gctx := errgroup.WithContext(ctx)
+	gctx, skips := azrecs.WithSkipLog(gctx)
 
 	// Each per-service goroutine is a leaf — it issues the actual ARM /
 	// pricing-API call. The shared semaphore on gctx (set by the scheduler)
@@ -223,7 +224,7 @@ func (r *RecommendationsClientAdapter) GetRecommendations(ctx context.Context, p
 		return nil, err
 	}
 
-	return mergeServiceResults(serviceResult{"compute", computeRecs, computeErr, includeCompute},
+	merged, err := mergeServiceResults(serviceResult{"compute", computeRecs, computeErr, includeCompute},
 		serviceResult{"database", dbRecs, dbErr, includeDB},
 		serviceResult{"cache", cacheRecs, cacheErr, includeCache},
 		serviceResult{"cosmosdb", cosmosRecs, cosmosErr, includeCosmos},
@@ -245,6 +246,21 @@ func (r *RecommendationsClientAdapter) GetRecommendations(ctx context.Context, p
 		// prevents. When getAdvisorRecommendations is changed to propagate
 		// hard errors, flip this flag back to true.
 		serviceResult{"advisor", advisorRecs, advisorErr, false})
+	return withSkips(merged, err, skips)
+}
+
+// withSkips attaches the collection's skipped recommendations (non-USD
+// currency, unpriceable SKU) to a merge result as a *azrecs.PartialResultError
+// returned alongside the recommendations that did succeed, so an EUR/GBP
+// account does not look like "no savings".
+func withSkips(recs []common.Recommendation, err error, skips *azrecs.SkipLog) ([]common.Recommendation, error) {
+	if err != nil {
+		return nil, err
+	}
+	if skipped := skips.Entries(); len(skipped) > 0 {
+		return recs, &azrecs.PartialResultError{Skipped: skipped}
+	}
+	return recs, nil
 }
 
 // serviceResult bundles a per-service collection outcome for the deterministic

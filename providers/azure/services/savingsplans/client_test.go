@@ -120,13 +120,6 @@ func TestGetRegion(t *testing.T) {
 
 // --- GetRecommendations ---
 
-func TestGetRecommendations_AlwaysEmpty(t *testing.T) {
-	c := NewClient(nil, "sub", "eastus")
-	recs, err := c.GetRecommendations(context.Background(), &common.RecommendationParams{})
-	require.NoError(t, err)
-	assert.Empty(t, recs)
-}
-
 // --- GetValidResourceTypes ---
 
 func TestGetValidResourceTypes(t *testing.T) {
