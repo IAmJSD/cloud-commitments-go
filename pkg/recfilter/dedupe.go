@@ -65,7 +65,10 @@ func (d *DuplicateChecker) AdjustRecommendationsForExisting(ctx context.Context,
 	existingMap := buildExistingCommitmentsMap(recentExisting, d.Logf)
 	d.Logf.printf("    [DuplicateChecker] Existing map has %d unique keys", len(existingMap))
 
-	passed, filtered = adjustRecommendationsAgainstExisting(recs, existingMap, d.Logf)
+	passed, filtered, err = adjustRecommendationsAgainstExisting(recs, existingMap, d.Logf)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	if len(filtered) > 0 {
 		d.Logf.printf("    [DuplicateChecker] Result: %d recommendations kept out of %d (avoided %d duplicates)",
@@ -212,13 +215,16 @@ func buildExistingCommitmentsMap(commitments []common.Commitment, logf Logf) map
 
 // adjustRecommendationsAgainstExisting adjusts recommendations based on existing commitments.
 // Returns (passed, filtered) where filtered contains recs whose count was reduced to zero.
-func adjustRecommendationsAgainstExisting(recs []common.Recommendation, existingMap map[string]int, logf Logf) (passed, filtered []common.Recommendation) {
+func adjustRecommendationsAgainstExisting(recs []common.Recommendation, existingMap map[string]int, logf Logf) (passed, filtered []common.Recommendation, err error) {
 	passed = make([]common.Recommendation, 0, len(recs))
 	filtered = make([]common.Recommendation, 0)
 
 	for _rvc := range recs {
 		rec := recs[_rvc]
-		adjusted := adjustSingleRecommendation(rec, existingMap, logf)
+		adjusted, err := adjustSingleRecommendation(rec, existingMap, logf)
+		if err != nil {
+			return nil, nil, err
+		}
 		if adjusted.Count > 0 {
 			passed = append(passed, adjusted)
 		} else {
@@ -226,13 +232,14 @@ func adjustRecommendationsAgainstExisting(recs []common.Recommendation, existing
 		}
 	}
 
-	return passed, filtered
+	return passed, filtered, nil
 }
 
-// adjustSingleRecommendation adjusts a single recommendation based on existing commitments.
-func adjustSingleRecommendation(rec common.Recommendation, existingMap map[string]int, logf Logf) common.Recommendation {
+// adjustSingleRecommendation adjusts a single recommendation based on existing
+// commitments. A reduced count scales the money fields with it.
+func adjustSingleRecommendation(rec common.Recommendation, existingMap map[string]int, logf Logf) (common.Recommendation, error) {
 	if rec.Count <= 0 {
-		return common.Recommendation{Count: 0}
+		return common.Recommendation{Count: 0}, nil
 	}
 	engine, isElastiCache := dedupeEngine(rec.Provider, rec.Service, common.EngineFromDetails(rec.Details))
 	deployment := common.NormalizeDeploymentName(common.DeploymentFromDetails(rec.Details))
@@ -254,16 +261,18 @@ func adjustSingleRecommendation(rec common.Recommendation, existingMap map[strin
 
 	if remaining <= 0 {
 		logf.printf("    [DuplicateChecker] SKIP %s: recent commitments cover recommended %d", key, rec.Count)
-		return common.Recommendation{Count: 0}
+		return common.Recommendation{Count: 0}, nil
 	}
 
-	adjusted := rec
+	adjusted, err := common.ResizeCount(rec, remaining)
+	if err != nil {
+		return common.Recommendation{}, err
+	}
 	if remaining < rec.Count {
-		adjusted.Count = remaining
 		logf.printf("    [DuplicateChecker] PARTIAL %s: adjusted count from %d to %d", key, rec.Count, adjusted.Count)
 	}
 
-	return adjusted
+	return adjusted, nil
 }
 
 // AdjustRecommendationsForExistingRIs is an alias for AdjustRecommendationsForExisting.

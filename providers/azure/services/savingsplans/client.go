@@ -122,26 +122,13 @@ func (c *Client) GetRegion() string {
 	return c.region
 }
 
-// GetRecommendations returns an empty slice.
-//
-// Contract for the future implementation: when this is backed by the Cost
-// Management benefitRecommendations API, it must set
-// SavingsPlanDetails.Currency from that response's properties.currencyCode.
-// There is no billing-account lookup, and an empty currency is never treated
-// as USD (PurchaseCommitment, ValidateOffering and GetOfferingDetails reject it).
-//
-// Azure does not have a stable public API for Savings Plan purchase
-// recommendations (the Benefits Recommendations API is still in preview).
-// This mirrors the AWS Savings Plans client which also returns empty here and
-// delegates to Cost Explorer centrally.
-//
-// NOTE: because this stub succeeds unconditionally, it is excluded from the
-// all-attempted-failed guard in the parent RecommendationsClientAdapter
-// (providers/azure/recommendations.go, COR-03). When this method starts
-// making real API calls, flip that call site's attempted flag back to the
-// params-filter value so its failures count toward the guard.
-func (c *Client) GetRecommendations(_ context.Context, _ *common.RecommendationParams) ([]common.Recommendation, error) {
-	return []common.Recommendation{}, nil
+// GetRecommendations returns Shared-scope Compute Savings Plan purchase
+// recommendations from the Cost Management Benefit Recommendations API
+// (api-version 2024-08-01) at this client's subscription scope. See
+// benefit_recommendations.go. Term and LookbackPeriod from params are honored;
+// an unsupported value is an error.
+func (c *Client) GetRecommendations(ctx context.Context, params *common.RecommendationParams) ([]common.Recommendation, error) {
+	return c.getBenefitRecommendations(ctx, params)
 }
 
 // GetExistingCommitments retrieves the Azure Savings Plans billed to this client's subscription.
