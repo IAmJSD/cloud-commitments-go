@@ -3,7 +3,6 @@ package recommendations
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/costexplorer"
@@ -33,15 +32,11 @@ func (c *Client) getSavingsPlansRecommendations(ctx context.Context, params *com
 	if err != nil {
 		return nil, fmt.Errorf("invalid lookback period for Savings Plans recommendation: %w", err)
 	}
-	scope, err := convertSavingsPlansAccountScope(params.SPAccountScope)
-	if err != nil {
-		return nil, err
-	}
 	results := make([]serviceResult, 0, len(planTypes))
 	for _, planType := range planTypes {
 		input := &costexplorer.GetSavingsPlansPurchaseRecommendationInput{
 			SavingsPlansType: planType, PaymentOption: payment, TermInYears: term,
-			LookbackPeriodInDays: lookback, AccountScope: scope,
+			LookbackPeriodInDays: lookback, AccountScope: types.AccountScopeLinked,
 		}
 		recs, fetchErr := c.fetchSPAllPages(ctx, input, params, planType)
 		if canceled := collectionCancellation(fetchErr); canceled != nil {
@@ -56,19 +51,6 @@ func (c *Client) getSavingsPlansRecommendations(ctx context.Context, params *com
 		return nil, err
 	}
 	return mergeServiceResults(results...)
-}
-
-// convertSavingsPlansAccountScope maps RecommendationParams.SPAccountScope to
-// the Cost Explorer scope. Empty is linked, the long-standing default; an
-// unknown value is an error rather than a silent fallback.
-func convertSavingsPlansAccountScope(s string) (types.AccountScope, error) {
-	switch strings.ToLower(s) {
-	case "", "linked":
-		return types.AccountScopeLinked, nil
-	case "payer":
-		return types.AccountScopePayer, nil
-	}
-	return "", fmt.Errorf("invalid Savings Plans account scope %q: want linked or payer", s)
 }
 
 func (c *Client) fetchSPAllPages(
