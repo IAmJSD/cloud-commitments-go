@@ -509,12 +509,14 @@ const (
 // subscription-scoped reservation (reservedResourceType) and Savings Plan
 // recommendations are commitment purchases; resource-level recommendations
 // such as resize or shutdown are not, and are ignored (ok=false, no error).
-// A reservedResourceType this collector cannot map is recorded as a skip.
+// An unmapped reservedResourceType is ignored (debug log), not a skip.
 func advisorPurchaseKind(ctx context.Context, ext map[string]*string) (common.CommitmentType, string, bool) {
 	service := serviceFromExtendedProperties(ext)
 	if service == "" {
 		if v := ext[advisorKeyRRT]; v != nil && *v != "" {
-			azrecs.RecordSkip(ctx, "advisor", fmt.Errorf("unsupported %s %q", advisorKeyRRT, *v))
+			// Advisor routinely returns reservations for services this
+			// collector does not price; they are not ours to convert.
+			logging.Debugf("azure advisor: ignoring %s %q", advisorKeyRRT, *v)
 		}
 		return "", "", false
 	}
@@ -643,38 +645,6 @@ func extInt(m map[string]*string, key string) (int, error) {
 	return n, nil
 }
 
-// extractServiceType determines the service type from an Advisor recommendation.
-// First checks ImpactedField (resource-scoped), then falls back to
-// ExtendedProperties (subscription-scoped reservations/savings plans).
-func extractServiceType(rec *armadvisor.ResourceRecommendationBase) string {
-	if rec.Properties == nil {
-		return ""
-	}
-	if svc := serviceFromImpactedField(rec.Properties.ImpactedField); svc != "" {
-		return svc
-	}
-	return serviceFromExtendedProperties(rec.Properties.ExtendedProperties)
-}
-
-// serviceFromImpactedField maps Azure resource namespace to service type.
-func serviceFromImpactedField(field *string) string {
-	if field == nil {
-		return ""
-	}
-	f := *field
-	switch {
-	case strings.Contains(f, "Microsoft.Compute"):
-		return string(common.ServiceCompute)
-	case strings.Contains(f, "Microsoft.Sql"):
-		return string(common.ServiceRelationalDB)
-	case strings.Contains(f, "Microsoft.Cache"):
-		return string(common.ServiceCache)
-	case strings.Contains(f, "Microsoft.DBforMySQL"), strings.Contains(f, "Microsoft.DBforPostgreSQL"):
-		return string(common.ServiceRelationalDB)
-	}
-	return ""
-}
-
 // serviceFromExtendedProperties resolves service type for subscription-scoped
 // recommendations where ImpactedField is "Microsoft.Subscriptions/subscriptions".
 func serviceFromExtendedProperties(ext map[string]*string) string {
@@ -693,7 +663,7 @@ func serviceFromExtendedProperties(ext map[string]*string) string {
 	}
 	if subcat, ok := ext["recommendationSubCategory"]; ok && subcat != nil {
 		if strings.EqualFold(*subcat, "SavingsPlan") {
-			return string(common.ServiceCompute)
+			return string(common.ServiceSavingsPlansAll)
 		}
 	}
 	return ""

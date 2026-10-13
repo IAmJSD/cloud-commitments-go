@@ -65,6 +65,7 @@ func TestConvertAdvisor_DerivesFieldsFromPayload(t *testing.T) {
 	}))
 	require.NotNil(t, sp)
 	assert.Equal(t, common.CommitmentSavingsPlan, sp.CommitmentType)
+	assert.Equal(t, common.ServiceSavingsPlansAll, sp.Service)
 	assert.Equal(t, "1yr", sp.Term)
 }
 
@@ -90,7 +91,6 @@ func TestConvertAdvisor_UnknownOrMissingValuesAreSkippedLoudly(t *testing.T) {
 		"missing qty":      {"qty": nil},
 		"zero qty":         {"qty": strPtr("0")},
 		"junk qty":         {"qty": strPtr("two")},
-		"unknown rrt":      {"reservedResourceType": strPtr("Quantum")},
 		"missing savings":  {"annualSavingsAmount": nil},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -153,4 +153,29 @@ func TestGetRecommendations_AdvisorSavingsPlanDedupedAgainstBenefitRecs(t *testi
 
 	got = run(nil, []common.Recommendation{sp("sub", "1yr", "advisor")})
 	assert.Len(t, got, 1, "Advisor SP advice is kept when the benefit source returns nothing")
+}
+
+func TestConvertAdvisor_UnmappedReservedResourceTypeIsIgnoredNotSkipped(t *testing.T) {
+	a := &RecommendationsClientAdapter{subscriptionID: "sub"}
+	ctx, skips := azrecs.WithSkipLog(context.Background())
+	got := a.convertAdvisorRecommendation(ctx, advisorRec(subscriptionScope, reservationExt(map[string]*string{"reservedResourceType": strPtr("CosmosDb")})))
+	assert.Nil(t, got)
+	assert.Empty(t, skips.Entries(), "a service we do not price must not make every subscription look partial")
+}
+
+func TestConvertAdvisor_RejectsBadSavingsAmounts(t *testing.T) {
+	a := &RecommendationsClientAdapter{subscriptionID: "sub"}
+	for name, v := range map[string]*string{
+		"nil": nil, "thousands separator": strPtr("1,234.00"), "empty": strPtr(""),
+		"NaN": strPtr("NaN"), "Inf": strPtr("Inf"), "-Inf": strPtr("-Inf"), "negative": strPtr("-1200"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, skips := azrecs.WithSkipLog(context.Background())
+			assert.Nil(t, a.convertAdvisorRecommendation(ctx, advisorRec(subscriptionScope, reservationExt(map[string]*string{"annualSavingsAmount": v}))))
+			assert.Len(t, skips.Entries(), 1)
+		})
+	}
+	zero := a.convertAdvisorRecommendation(context.Background(), advisorRec(subscriptionScope, reservationExt(map[string]*string{"annualSavingsAmount": strPtr("0")})))
+	require.NotNil(t, zero, "a real zero saving is kept")
+	assert.Equal(t, 0.0, zero.EstimatedSavings)
 }
