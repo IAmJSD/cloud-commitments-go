@@ -8,8 +8,8 @@ import "math"
 //   - A positive rec.BreakEvenMonths set by a provider wins.
 //   - No upfront (CommitmentCost == 0): (0, true). There is nothing to recover.
 //   - Otherwise upfront / gross monthly savings, where gross monthly savings is
-//     EstimatedSavings plus the upfront amortised over the term. EstimatedSavings
-//     is the net monthly figure (already after the amortised upfront), so using
+//     EstimatedSavings plus the upfront amortized over the term. EstimatedSavings
+//     is the net monthly figure (already after the amortized upfront), so using
 //     it alone would overstate the break-even and push all-upfront commitments
 //     past their own term.
 //   - Net savings so low that gross monthly savings is not positive: (+Inf, true).

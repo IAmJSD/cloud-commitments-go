@@ -19,7 +19,7 @@ func TestBreakEven(t *testing.T) {
 		{"no upfront is zero and known", Recommendation{CommitmentCost: 0, EstimatedSavings: 50, Term: "1yr"}, 0, true},
 		// OD 100/mo, 1yr all-upfront 720, net savings 40/mo: gross 100/mo, 7.2 months.
 		{"all upfront 1yr", Recommendation{CommitmentCost: 720, EstimatedSavings: 40, Term: "1yr"}, 7.2, true},
-		// 3yr partial: upfront 360, net 30/mo, amortised 10/mo, gross 40/mo -> 9 months.
+		// 3yr partial: upfront 360, net 30/mo, amortized 10/mo, gross 40/mo -> 9 months.
 		{"partial upfront 3yr", Recommendation{CommitmentCost: 360, EstimatedSavings: 30, Term: "3yr"}, 9, true},
 		{"term alias", Recommendation{CommitmentCost: 360, EstimatedSavings: 30, Term: "P3Y"}, 9, true},
 		{"never pays back", Recommendation{CommitmentCost: 120, EstimatedSavings: -10, Term: "1yr"}, math.Inf(1), true},
