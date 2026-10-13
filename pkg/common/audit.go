@@ -288,26 +288,37 @@ func NewAuditRecord(runID string, rec Recommendation, result PurchaseResult, sta
 		errMsg = result.Error.Error()
 	}
 	return AuditRecord{
-		RunID:             runID,
-		Provider:          rec.Provider,
-		AccountID:         rec.Account,
-		AccountName:       rec.AccountName,
-		Region:            rec.Region,
-		Service:           string(rec.Service),
-		ResourceType:      rec.ResourceType,
-		CommitmentType:    rec.CommitmentType,
-		Term:              termMonths(rec.Term),
-		Count:             rec.Count,
-		EstimatedCost:     rec.CommitmentCost,
-		EstimatedSavings:  rec.EstimatedSavings,
-		CommitmentID:      result.CommitmentID,
-		Status:            status,
-		ErrorMessage:      errMsg,
-		Timestamp:         time.Now().UTC(),
-		DryRun:            dryRun,
-		RawRecommendation: rec.RawRecommendation,
-		Source:            source,
+		RunID:                runID,
+		Provider:             rec.Provider,
+		AccountID:            rec.Account,
+		AccountName:          rec.AccountName,
+		Region:               rec.Region,
+		Service:              string(rec.Service),
+		ResourceType:         rec.ResourceType,
+		CommitmentType:       rec.CommitmentType,
+		Term:                 termMonths(rec.Term),
+		Count:                rec.Count,
+		EstimatedCost:        rec.CommitmentCost,
+		RecurringMonthlyCost: copyFloatPtr(rec.RecurringMonthlyCost),
+		EstimatedSavings:     rec.EstimatedSavings,
+		CommitmentID:         result.CommitmentID,
+		Status:               status,
+		ErrorMessage:         errMsg,
+		Timestamp:            time.Now().UTC(),
+		DryRun:               dryRun,
+		RawRecommendation:    rec.RawRecommendation,
+		Source:               source,
 	}
+}
+
+// copyFloatPtr returns a pointer to a copy of *p, or nil, so the audit record
+// does not alias the recommendation's value.
+func copyFloatPtr(p *float64) *float64 {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }
 
 // termMonths converts a term string ("1yr", "3yr") to months.

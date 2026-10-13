@@ -235,3 +235,21 @@ func TestTermMonths(t *testing.T) {
 		})
 	}
 }
+
+func TestNewAuditRecord_RecurringMonthlyCost(t *testing.T) {
+	recurring := 1968.81
+	rec := Recommendation{CommitmentCost: 0, RecurringMonthlyCost: &recurring}
+	ar := NewAuditRecord("run", rec, PurchaseResult{}, "skipped", true, PurchaseSourceCLI)
+	if assert.NotNil(t, ar.RecurringMonthlyCost) {
+		assert.Equal(t, 1968.81, *ar.RecurringMonthlyCost)
+	}
+	assert.NotSame(t, rec.RecurringMonthlyCost, ar.RecurringMonthlyCost)
+	line, err := json.Marshal(ar)
+	assert.NoError(t, err)
+	assert.Contains(t, string(line), `"recurring_monthly_cost":1968.81`)
+	assert.Contains(t, string(line), `"estimated_cost":0`)
+
+	unknown, err := json.Marshal(NewAuditRecord("run", Recommendation{}, PurchaseResult{}, "skipped", true, PurchaseSourceCLI))
+	assert.NoError(t, err)
+	assert.NotContains(t, string(unknown), "recurring_monthly_cost")
+}

@@ -27,7 +27,7 @@ func TestRenderTable_ColumnCount(t *testing.T) {
 	header := lines[0]
 	// Split on 2+ spaces (tabwriter aligns with spaces, not tabs after flush)
 	cols := strings.Fields(header)
-	assert.Equal(t, 12, len(cols), "expected 12 columns in header, got: %v", cols)
+	assert.Equal(t, 13, len(cols), "expected 13 columns in header, got: %v", cols)
 }
 
 func TestRenderTable_Empty(t *testing.T) {
@@ -85,4 +85,21 @@ func TestRenderSummary_WithFiltered(t *testing.T) {
 	)
 	output := RenderSummary(result)
 	assert.Contains(t, output, "Filtered: 2")
+}
+
+func TestRenderTable_RecurringMonthlyCost(t *testing.T) {
+	recurring := 1968.81
+	zero := 0.0
+	rows := []common.Recommendation{
+		{Provider: "aws", Service: "savings-plans-ec2instance", Term: "1yr", Count: 1, RecurringMonthlyCost: &recurring, CommitmentType: common.CommitmentSavingsPlan},
+		{Provider: "aws", Service: "savings-plans-compute", Term: "1yr", Count: 1, RecurringMonthlyCost: &zero, CommitmentType: common.CommitmentSavingsPlan},
+		{Provider: "aws", Service: "rds", Term: "1yr", Count: 1, CommitmentType: common.CommitmentReservedInstance},
+	}
+	output := RenderTable(makeResult(rows, nil))
+	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
+	assert.Contains(t, lines[0], "Recurring$/mo")
+	assert.Contains(t, lines[2], "$1968.81")
+	assert.Contains(t, lines[3], "$0.00")
+	fields := strings.Fields(lines[4])
+	assert.Equal(t, "-", fields[len(fields)-5], "an unknown recurring cost renders as -, not a known $0.00: %v", fields)
 }
