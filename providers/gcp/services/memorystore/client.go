@@ -22,8 +22,25 @@ import (
 	"github.com/LeanerCloud/cloud-commitments-go/providers/gcp/internal/skumatch"
 )
 
-// maxRecsPages caps GCP Recommender API iteration.
-const maxRecsPages = 20
+// recsPageSize is the page size requested from the Recommender API, and
+// maxRecsPages caps how many pages one listing may span. The iterator hands
+// out items, so the item cap is the product of the two.
+const (
+	recsPageSize = 100
+	maxRecsPages = 20
+	maxRecsItems = recsPageSize * maxRecsPages
+)
+
+// checkRecsCap fails loud when a successful Next() would exceed maxRecsItems.
+func checkRecsCap(itemIdx int, nextErr error) error {
+	if nextErr == nil && itemIdx >= maxRecsItems {
+		return fmt.Errorf("memorystore: GetRecommendations cap reached: more than %d recommendations (%d pages of %d)", maxRecsItems, maxRecsPages, recsPageSize)
+	}
+	return nil
+}
+
+// maxSKUPages caps Cloud Billing SKU listing pagination.
+const maxSKUPages = 200
 
 // RedisService interface for Redis operations.
 type RedisService interface {
@@ -100,7 +117,24 @@ type realBillingService struct {
 }
 
 func (r *realBillingService) ListSKUs(serviceID string) (*cloudbilling.ListSkusResponse, error) {
-	return r.service.Services.Skus.List(serviceID).Do()
+	merged := &cloudbilling.ListSkusResponse{}
+	pageToken := ""
+	for page := 0; page < maxSKUPages; page++ {
+		call := r.service.Services.Skus.List(serviceID)
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+		resp, err := call.Do()
+		if err != nil {
+			return nil, err
+		}
+		merged.Skus = append(merged.Skus, resp.Skus...)
+		if resp.NextPageToken == "" {
+			return merged, nil
+		}
+		pageToken = resp.NextPageToken
+	}
+	return nil, fmt.Errorf("%s: SKU listing for %s exceeded %d pages", "memorystore", serviceID, maxSKUPages)
 }
 
 // realRecommenderIterator wraps the real recommender iterator (10-L4: makes
@@ -168,20 +202,21 @@ func (c *Client) GetRecommendations(ctx context.Context, p *common.Recommendatio
 		c.projectID, c.region)
 
 	req := &recommenderpb.ListRecommendationsRequest{
-		Parent: parent,
+		Parent:   parent,
+		PageSize: recsPageSize,
 	}
 
 	it := recClient.ListRecommendations(ctx, req)
-	for pageIdx := 0; ; pageIdx++ {
+	for itemIdx := 0; ; itemIdx++ {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("context canceled during pagination: %w", err)
-		}
-		if pageIdx >= maxRecsPages {
-			return nil, fmt.Errorf("memorystore: GetRecommendations iteration cap (%d items) reached", maxRecsPages)
 		}
 		rec, err := it.Next()
 		if errors.Is(err, iterator.Done) {
 			break
+		}
+		if capErr := checkRecsCap(itemIdx, err); capErr != nil {
+			return nil, capErr
 		}
 		if err != nil {
 			// Iterator errors must propagate so callers don't silently act
