@@ -1125,7 +1125,8 @@ func (c *Client) convertGCPRecommendation(ctx context.Context, gcpRec *recommend
 // RecurringMonthlyCost on rec from the billing catalog. The recommendation is a
 // monthly CUD with no upfront payment, so CommitmentCost (the upfront amount)
 // stays 0 and the committed price is the monthly recurring cost. OnDemandCost is
-// the on-demand price over the term. A missing or invalid pricing entry is logged
+// the monthly on-demand price of the same resources, like the AWS and Azure
+// providers and the platform baseline. A missing or invalid pricing entry is logged
 // and leaves RecurringMonthlyCost nil (unknown, not zero) without discarding the
 // recommendation: the Recommender EstimatedSavings is still the authoritative
 // savings signal (issue #1022 C2).
@@ -1144,9 +1145,10 @@ func (c *Client) enrichRecWithPricing(ctx context.Context, rec *common.Recommend
 		log.Printf("computeengine: pricing unavailable for %s in %s (issue #1020): %v", rec.ResourceType, c.region, err)
 		return
 	}
-	monthly := pricing.CommitmentPrice / float64(termYears*12)
+	termMonths := float64(termYears * 12)
+	monthly := pricing.CommitmentPrice / termMonths
 	rec.RecurringMonthlyCost = &monthly
-	rec.OnDemandCost = pricing.OnDemandPrice
+	rec.OnDemandCost = pricing.OnDemandPrice / termMonths
 	rec.SavingsPercentage = pricing.SavingsPercentage
 }
 

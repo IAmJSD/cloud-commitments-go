@@ -127,3 +127,31 @@ func TestResourcesFromRecommendation_RequiresCountAndMemory(t *testing.T) {
 	_, err = resourcesFromRecommendation(newRec("n2-standard-8", 8, 0))
 	require.Error(t, err)
 }
+
+// Monthly figures for n2-standard-8 (8 vCPU, 32 GiB), live-shaped rates, per term.
+// A division by 12 instead of termYears*12 would triple the 3-year amounts.
+func TestEnrichRecWithPricing_MonthlyFiguresPerTerm(t *testing.T) {
+	cases := map[string]struct {
+		term                   string
+		commitHourly, odHourly float64
+	}{
+		"1yr": {"1yr", 8*0.019915 + 32*0.002669, 8*0.031611 + 32*0.004237},
+		"3yr": {"3yr", 8*0.014225 + 32*0.001907, 8*0.031611 + 32*0.004237},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			client, _ := NewClient(ctx, "p", "us-central1")
+			client.SetBillingService(&MockBillingService{skus: &cloudbilling.ListSkusResponse{Skus: n2AmericasSKUs()}})
+			rec := newRec("n2-standard-8", 8, 32)
+			rec.Term = tc.term
+
+			client.enrichRecWithPricing(ctx, &rec)
+
+			assert.Zero(t, rec.CommitmentCost)
+			require.NotNil(t, rec.RecurringMonthlyCost)
+			assert.InDelta(t, tc.commitHourly*730, *rec.RecurringMonthlyCost, 1e-6)
+			assert.InDelta(t, tc.odHourly*730, rec.OnDemandCost, 1e-6, "OnDemandCost is the monthly on-demand price")
+		})
+	}
+}
