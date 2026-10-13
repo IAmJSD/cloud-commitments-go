@@ -20,11 +20,17 @@ import (
 // drops accumulates per-reason drop counts for the end-of-run summary; pass
 // nil to skip tracking. logf receives WARNING lines for anomalous recs
 // (nil-safe; pass nil to disable logging).
+//
+// RI counts are rounded DOWN (int(Count*coverage/100)): coverage is an upper
+// bound on what is bought, and the discrete ratio keeps Count and money in
+// step. A rec whose count rounds to zero is dropped under
+// common.DropCoverageSizedToZero, distinct from the --target-coverage reasons.
 func ApplyCoverage(recs []common.Recommendation, coverage float64, logf Logf, drops *common.DropSummary) []common.Recommendation {
 	if coverage >= 100 {
 		return recs
 	}
 	if coverage <= 0 {
+		drops.Add(common.DropCoverageSizedToZero, len(recs))
 		return []common.Recommendation{}
 	}
 
@@ -73,8 +79,9 @@ func ApplyCoverage(recs []common.Recommendation, coverage float64, logf Logf, dr
 			result = append(result, adjusted)
 		} else {
 			// No nil guard: DropSummary.Add is nil-receiver safe, and every
-			// other drop site in this package relies on that.
-			drops.Add(common.DropTargetSizedToZero, 1)
+			// other drop site in this package relies on that. This is the
+			// --coverage percentage floor, not --target-coverage sizing.
+			drops.Add(common.DropCoverageSizedToZero, 1)
 		}
 	}
 	return result
