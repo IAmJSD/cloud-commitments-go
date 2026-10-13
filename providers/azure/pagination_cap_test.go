@@ -152,8 +152,8 @@ func TestGetRegions_PageCap(t *testing.T) {
 }
 
 func advisorPage(n int) armadvisor.RecommendationsClientListResponse {
-	field := "Microsoft.Compute/virtualMachines"
-	id := "/subscriptions/123/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/vm" + string(rune('a'+n))
+	field := "Microsoft.Subscriptions/subscriptions"
+	id := "/subscriptions/123/providers/Microsoft.Advisor/recommendations/rec" + string(rune('a'+n))
 	savings, currency := "1000.00", "USD"
 	return armadvisor.RecommendationsClientListResponse{ResourceRecommendationBaseListResult: armadvisor.ResourceRecommendationBaseListResult{
 		Value: []*armadvisor.ResourceRecommendationBase{{
@@ -161,8 +161,12 @@ func advisorPage(n int) armadvisor.RecommendationsClientListResponse {
 			Properties: &armadvisor.RecommendationProperties{
 				ImpactedField: &field,
 				ExtendedProperties: map[string]*string{
-					"annualSavingsAmount": &savings,
-					"savingsCurrency":     &currency,
+					"annualSavingsAmount":  &savings,
+					"savingsCurrency":      &currency,
+					"reservedResourceType": strPtr("VirtualMachines"),
+					"term":                 strPtr("P1Y"),
+					"sku":                  strPtr("Standard_D2s_v3"),
+					"qty":                  strPtr("1"),
 				},
 			},
 		}},
@@ -173,10 +177,10 @@ func TestCollectAdvisorRecommendations_PageCap(t *testing.T) {
 	adapter := &RecommendationsClientAdapter{subscriptionID: "test-subscription"}
 	params := common.RecommendationParams{}
 
-	t.Run("endless pager stops at the cap keeping partial results", func(t *testing.T) {
+	t.Run("endless pager stops at the cap with a truncation error and the partial results", func(t *testing.T) {
 		pager := &fakePager[armadvisor.RecommendationsClientListResponse]{limit: 10000, page: advisorPage}
 		recs, err := adapter.collectAdvisorRecommendations(context.Background(), params, pager)
-		require.NoError(t, err)
+		require.ErrorIs(t, err, errAdvisorTruncated)
 		assert.Equal(t, maxAdvisorPages, pager.calls)
 		assert.NotEmpty(t, recs)
 	})

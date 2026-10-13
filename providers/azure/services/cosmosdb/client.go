@@ -617,7 +617,7 @@ func (c *Client) fetchAzurePricing(ctx context.Context, filter string) (*AzureRe
 // subscription has zero Cosmos accounts, multiple Cosmos accounts with
 // different API types (ambiguous), or the listing fails.
 func (c *Client) convertAzureCosmosRecommendation(ctx context.Context, azureRec armconsumption.ReservationRecommendationClassification) *common.Recommendation {
-	f := azrecs.ExtractConsumptionOrSkip("cosmosdb", azureRec)
+	f := azrecs.ExtractConsumptionOrSkip(ctx, "cosmosdb", azureRec)
 	if f == nil {
 		return nil
 	}

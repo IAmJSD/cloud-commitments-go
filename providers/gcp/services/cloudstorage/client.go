@@ -13,6 +13,7 @@ import (
 	"google.golang.org/api/option"
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/gcp/internal/skulist"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/gcp/internal/skumatch"
 )
 
@@ -97,7 +98,11 @@ type realBillingService struct {
 }
 
 func (r *realBillingService) ListSKUs(serviceID string) (*cloudbilling.ListSkusResponse, error) {
-	return r.service.Services.Skus.List(serviceID).Do()
+	skus, err := skulist.All(context.Background(), r.service.Services.Skus.List(serviceID), skulist.DefaultMaxPages)
+	if err != nil {
+		return nil, fmt.Errorf("%s: list SKUs for %s: %w", "cloudstorage", serviceID, err)
+	}
+	return &cloudbilling.ListSkusResponse{Skus: skus}, nil
 }
 
 // GetServiceType returns the service type.

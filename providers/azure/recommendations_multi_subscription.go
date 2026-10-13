@@ -14,6 +14,7 @@ import (
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/logging"
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/provider"
+	azrecs "github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/recommendations"
 )
 
 // newSubscriptionRecommendationsClientFn builds the per-subscription
@@ -50,6 +51,20 @@ type SubscriptionFailure struct {
 // configuration problem -- apart from a transient per-subscription ARM failure
 // that a retry might clear.
 var ErrSubscriptionNotAccessible = errors.New("subscription is not accessible to the authenticated principal")
+
+// PartialResultError reports that a collection dropped recommendations it
+// could not scale or price (non-USD currency, unpriceable SKU, truncated
+// Advisor walk) while returning the rest. Use AsPartialResult to detect it.
+type PartialResultError = azrecs.PartialResultError
+
+// AsPartialResult returns the *PartialResultError in err's chain, or nil.
+func AsPartialResult(err error) *PartialResultError {
+	var partial *PartialResultError
+	if errors.As(err, &partial) {
+		return partial
+	}
+	return nil
+}
 
 // PartialSubscriptionFailureError reports that an org-wide fan-out completed
 // with some subscriptions queried successfully and others not.
@@ -344,7 +359,18 @@ func mergeSubscriptionResults(subs []subscriptionClient, results [][]common.Reco
 
 	out := make([]common.Recommendation, 0, total)
 	failed := make([]SubscriptionFailure, 0, len(subs)+len(unmatched))
+	var skipped []string
 	for i, err := range errs {
+		if partial := AsPartialResult(err); partial != nil {
+			// The subscription answered; some recommendations were dropped.
+			// Keep its recommendations and aggregate what was dropped.
+			out = append(out, results[i]...)
+			for _, s := range partial.Skipped {
+				skipped = append(skipped, subs[i].subscriptionID+": "+s)
+			}
+			logging.Warnf("Azure subscription %s recommendations incomplete: %v", subs[i].subscriptionID, err)
+			continue
+		}
 		if err != nil {
 			failed = append(failed, SubscriptionFailure{SubscriptionID: subs[i].subscriptionID, Err: err})
 			logging.Warnf("Azure subscription %s recommendations: %v", subs[i].subscriptionID, err)
@@ -362,6 +388,9 @@ func mergeSubscriptionResults(subs []subscriptionClient, results [][]common.Reco
 
 	attempted := len(subs) + len(unmatched)
 	if len(failed) == 0 {
+		if len(skipped) > 0 {
+			return out, &PartialResultError{Skipped: skipped}
+		}
 		return out, nil
 	}
 	if len(failed) == attempted {

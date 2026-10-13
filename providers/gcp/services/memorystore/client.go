@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	recommender "cloud.google.com/go/recommender/apiv1"
@@ -19,11 +20,26 @@ import (
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/gcp/internal/billingcurrency"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/gcp/internal/skulist"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/gcp/internal/skumatch"
 )
 
-// maxRecsPages caps GCP Recommender API iteration.
-const maxRecsPages = 20
+// recsPageSize is the page size requested from the Recommender API. The
+// iterator hands out items, so the cap is maxRecsPages pages of recsPageSize
+// items, i.e. maxRecsItems (2000) items in total.
+const (
+	recsPageSize = 100
+	maxRecsPages = 20
+	maxRecsItems = recsPageSize * maxRecsPages
+)
+
+// checkRecsCap fails loud when a successful Next() would exceed maxRecsItems.
+func checkRecsCap(itemIdx int, nextErr error) error {
+	if nextErr == nil && itemIdx >= maxRecsItems {
+		return fmt.Errorf("memorystore: GetRecommendations cap reached: more than %d recommendations (%d pages of %d)", maxRecsItems, maxRecsPages, recsPageSize)
+	}
+	return nil
+}
 
 // RedisService interface for Redis operations.
 type RedisService interface {
@@ -60,6 +76,8 @@ type RecommenderClient interface {
 
 // Client handles GCP Memorystore (Redis) commitments.
 type Client struct {
+	skuMu             sync.Mutex
+	skuCache          *cloudbilling.ListSkusResponse
 	ctx               context.Context
 	projectID         string
 	region            string
@@ -100,7 +118,11 @@ type realBillingService struct {
 }
 
 func (r *realBillingService) ListSKUs(serviceID string) (*cloudbilling.ListSkusResponse, error) {
-	return r.service.Services.Skus.List(serviceID).Do()
+	skus, err := skulist.All(context.Background(), r.service.Services.Skus.List(serviceID), skulist.DefaultMaxPages)
+	if err != nil {
+		return nil, fmt.Errorf("%s: list SKUs for %s: %w", "memorystore", serviceID, err)
+	}
+	return &cloudbilling.ListSkusResponse{Skus: skus}, nil
 }
 
 // realRecommenderIterator wraps the real recommender iterator (10-L4: makes
@@ -168,20 +190,21 @@ func (c *Client) GetRecommendations(ctx context.Context, p *common.Recommendatio
 		c.projectID, c.region)
 
 	req := &recommenderpb.ListRecommendationsRequest{
-		Parent: parent,
+		Parent:   parent,
+		PageSize: recsPageSize,
 	}
 
 	it := recClient.ListRecommendations(ctx, req)
-	for pageIdx := 0; ; pageIdx++ {
+	for itemIdx := 0; ; itemIdx++ {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("context canceled during pagination: %w", err)
-		}
-		if pageIdx >= maxRecsPages {
-			return nil, fmt.Errorf("memorystore: GetRecommendations iteration cap (%d items) reached", maxRecsPages)
 		}
 		rec, err := it.Next()
 		if errors.Is(err, iterator.Done) {
 			break
+		}
+		if capErr := checkRecsCap(itemIdx, err); capErr != nil {
+			return nil, capErr
 		}
 		if err != nil {
 			// Iterator errors must propagate so callers don't silently act
@@ -319,7 +342,7 @@ func (c *Client) getRedisPricing(ctx context.Context, tier, region string, termY
 		return nil, err
 	}
 
-	skus, err := billingSvc.ListSKUs("services/D559-82DA-3A56")
+	skus, err := c.listSKUs(billingSvc)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list SKUs: %w", err)
 	}
@@ -539,4 +562,20 @@ func (c *Client) convertGCPRecommendation(ctx context.Context, gcpRec *recommend
 	}
 
 	return rec
+}
+
+// listSKUs returns the service's SKU catalog, listing it once per client so
+// that pricing N recommendations costs one catalog read instead of N.
+func (c *Client) listSKUs(svc BillingService) (*cloudbilling.ListSkusResponse, error) {
+	c.skuMu.Lock()
+	defer c.skuMu.Unlock()
+	if c.skuCache != nil {
+		return c.skuCache, nil
+	}
+	skus, err := svc.ListSKUs("services/D559-82DA-3A56")
+	if err != nil {
+		return nil, err
+	}
+	c.skuCache = skus
+	return skus, nil
 }
