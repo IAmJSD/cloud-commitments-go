@@ -98,8 +98,15 @@ func TestRenderTable_RecurringMonthlyCost(t *testing.T) {
 	output := RenderTable(makeResult(rows, nil))
 	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
 	assert.Contains(t, lines[0], "Recurring$/mo")
-	assert.Contains(t, lines[2], "$1968.81")
-	assert.Contains(t, lines[3], "$0.00")
-	fields := strings.Fields(lines[4])
-	assert.Equal(t, "-", fields[len(fields)-5], "an unknown recurring cost renders as -, not a known $0.00: %v", fields)
+
+	// Est.Cost and Est.Savings are also $0.00 on these rows, so look at the
+	// Recurring$/mo cell itself: fifth field from the end
+	// (Recurring, Est.Savings, Savings%, Break-even, Commitment).
+	recurringCell := func(line string) string {
+		fields := strings.Fields(line)
+		return fields[len(fields)-5]
+	}
+	assert.Equal(t, "$1968.81", recurringCell(lines[2]))
+	assert.Equal(t, "$0.00", recurringCell(lines[3]), "a known zero recurring cost (all-upfront) renders as $0.00")
+	assert.Equal(t, "-", recurringCell(lines[4]), "an unknown recurring cost renders as -, not a known $0.00")
 }

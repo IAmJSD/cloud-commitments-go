@@ -253,3 +253,15 @@ func TestNewAuditRecord_RecurringMonthlyCost(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotContains(t, string(unknown), "recurring_monthly_cost")
 }
+
+func TestNewAuditRecord_RecurringMonthlyCostKnownZero(t *testing.T) {
+	zero := 0.0
+	rec := Recommendation{RecurringMonthlyCost: &zero}
+	ar := NewAuditRecord("run", rec, PurchaseResult{}, "skipped", true, PurchaseSourceCLI)
+	if assert.NotNil(t, ar.RecurringMonthlyCost, "a known 0 must stay distinguishable from unknown") {
+		assert.Equal(t, 0.0, *ar.RecurringMonthlyCost)
+	}
+	line, err := json.Marshal(ar)
+	assert.NoError(t, err)
+	assert.Contains(t, string(line), `"recurring_monthly_cost":0`)
+}
