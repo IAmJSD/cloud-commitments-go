@@ -1067,8 +1067,8 @@ func (c *Client) getOrCreateBillingService(ctx context.Context) (BillingService,
 }
 
 // convertGCPRecommendation converts a GCP Recommender recommendation to common format.
-// It also calls getComputePricing to fill CommitmentCost/OnDemandCost/SavingsPercentage/
-// BreakEvenMonths so the scorer can filter and rank GCP recommendations correctly
+// It also calls getComputePricing to fill RecurringMonthlyCost/OnDemandCost/SavingsPercentage
+// so the scorer can filter and rank GCP recommendations correctly
 // (issue #1022 C2). Pricing failures are logged but do not discard the recommendation:
 // EstimatedSavings from the Recommender payload is the authoritative savings signal.
 // Returns nil when the params.Term is unrecognized so the caller skips an
@@ -1118,28 +1118,17 @@ func (c *Client) convertGCPRecommendation(ctx context.Context, gcpRec *recommend
 
 	c.enrichRecWithPricing(ctx, rec)
 
-	// GCP Compute CUDs are monthly-payment commitments (PaymentOption is forced
-	// to "monthly" above), so the per-month charge is CommitmentCost /
-	// termMonths. enrichRecWithPricing performs the single billing lookup and
-	// populates CommitmentCost; reuse it here rather than issuing a second call.
-	// When the billing lookup failed CommitmentCost stays 0 and we leave
-	// RecurringMonthlyCost nil (unknown) so the frontend renders "—" rather than
-	// an incorrect explicit "$0" (nil means unavailable, 0 means known-zero fee).
-	if rec.CommitmentCost > 0 {
-		termYears := termYearsFromTerm(rec.Term)
-		monthly := rec.CommitmentCost / float64(termYears*12)
-		rec.RecurringMonthlyCost = &monthly
-	}
-
 	return rec, nil
 }
 
-// enrichRecWithPricing fills CommitmentCost, OnDemandCost, SavingsPercentage,
-// and BreakEvenMonths on rec by querying the billing catalog. Extracted from
-// convertGCPRecommendation to keep that function's cyclomatic complexity under
-// the gocyclo gate. A missing or invalid pricing entry is logged but does not
-// discard the recommendation -- the Recommender-derived EstimatedSavings is
-// still the authoritative savings signal (issue #1022 C2).
+// enrichRecWithPricing fills OnDemandCost, SavingsPercentage and
+// RecurringMonthlyCost on rec from the billing catalog. The recommendation is a
+// monthly CUD with no upfront payment, so CommitmentCost (the upfront amount)
+// stays 0 and the committed price is the monthly recurring cost. OnDemandCost is
+// the on-demand price over the term. A missing or invalid pricing entry is logged
+// and leaves RecurringMonthlyCost nil (unknown, not zero) without discarding the
+// recommendation: the Recommender EstimatedSavings is still the authoritative
+// savings signal (issue #1022 C2).
 func (c *Client) enrichRecWithPricing(ctx context.Context, rec *common.Recommendation) {
 	if rec.ResourceType == "" {
 		return
@@ -1155,19 +1144,10 @@ func (c *Client) enrichRecWithPricing(ctx context.Context, rec *common.Recommend
 		log.Printf("computeengine: pricing unavailable for %s in %s (issue #1020): %v", rec.ResourceType, c.region, err)
 		return
 	}
-	rec.CommitmentCost = pricing.CommitmentPrice
+	monthly := pricing.CommitmentPrice / float64(termYears*12)
+	rec.RecurringMonthlyCost = &monthly
 	rec.OnDemandCost = pricing.OnDemandPrice
 	rec.SavingsPercentage = pricing.SavingsPercentage
-	// BreakEvenMonths: months of accrued savings required to cover the
-	// commitment cost (conservative: treats the whole period cost as sunk,
-	// which is accurate for all-upfront and overestimates for monthly CUDs).
-	// monthlySavings = monthly spend difference between on-demand and CUD.
-	if pricing.OnDemandPrice > 0 && pricing.SavingsPercentage > 0 {
-		monthlySavings := pricing.OnDemandPrice * pricing.SavingsPercentage / 100.0 / float64(termYears*12)
-		if monthlySavings > 0 {
-			rec.BreakEvenMonths = pricing.CommitmentPrice / monthlySavings
-		}
-	}
 }
 
 // machineTypePathSegment precedes the machine type in a GCP resource path, e.g.

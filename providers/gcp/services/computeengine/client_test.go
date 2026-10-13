@@ -1179,8 +1179,8 @@ func TestComputeEngineClient_ConvertGCPRecommendation(t *testing.T) {
 	assert.Equal(t, 50.5, rec.EstimatedSavings)
 	assert.Equal(t, "monthly", rec.PaymentOption,
 		`GCP CUDs are billed monthly; PaymentOption must match ValidPaymentOptionsByProvider["gcp"]`)
-	// GCP Compute CUDs are monthly-billed and RecurringMonthlyCost is derived
-	// from CommitmentCost. No billing service is injected here, so the pricing
+	// GCP Compute CUDs are monthly-billed and RecurringMonthlyCost is priced from
+	// the billing catalog. No billing service is injected here, so the pricing
 	// lookup fails and the field stays nil (unknown) rather than an incorrect
 	// explicit 0 (nil means unavailable, 0 means a known-zero recurring fee).
 	assert.Nil(t, rec.RecurringMonthlyCost)
@@ -1348,7 +1348,11 @@ func TestConverterFillsPricingForScorer(t *testing.T) {
 	// C2: SavingsPercentage must be > 0 so a MinSavingsPct filter doesn't silently drop the rec.
 	require.Greater(t, rec.SavingsPercentage, float64(0),
 		"convertGCPRecommendation must set SavingsPercentage > 0 from billing pricing (issue #1022 C2)")
-	assert.Greater(t, rec.CommitmentCost, float64(0), "CommitmentCost must be > 0")
+	assert.Zero(t, rec.CommitmentCost, "a monthly CUD has no upfront payment, so CommitmentCost is 0 (platform computes upfront + monthly x term)")
+	require.NotNil(t, rec.RecurringMonthlyCost)
+	// 4 vCPU and 6 GiB at the 1-year N1 commitment rates, per month.
+	assert.InDelta(t, (4*0.019915+6*0.002669)*8760/12, *rec.RecurringMonthlyCost, 1e-6)
+	assert.Zero(t, rec.BreakEvenMonths, "no upfront payment, so there is nothing to break even on")
 	assert.Greater(t, rec.OnDemandCost, float64(0), "OnDemandCost must be > 0")
 
 	// Apply a non-trivial MinSavingsPct filter and confirm the rec passes.
