@@ -495,9 +495,9 @@ func (c *Client) fetchAzurePricing(ctx context.Context, filter string) (*AzureRe
 }
 
 // convertAzureSearchRecommendation converts Azure Search reservation recommendation to common format.
-func (c *Client) convertAzureSearchRecommendation(_ context.Context, azureRec armconsumption.ReservationRecommendationClassification) *common.Recommendation {
+func (c *Client) convertAzureSearchRecommendation(ctx context.Context, azureRec armconsumption.ReservationRecommendationClassification) *common.Recommendation {
 	// Extract fields from Azure recommendation using the shared converter
-	extracted := azrecs.ExtractConsumptionOrSkip("search", azureRec)
+	extracted := azrecs.ExtractConsumptionOrSkip(ctx, "search", azureRec)
 	if extracted == nil {
 		return nil
 	}

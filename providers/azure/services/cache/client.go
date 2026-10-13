@@ -599,7 +599,7 @@ func (c *Client) getRedisPricing(ctx context.Context, sku, region string, termYe
 // Premium-tier SKU; otherwise stays 0 (zero means "unknown", not
 // "definitely zero shards" — see the redisSKUEntry godoc).
 func (c *Client) convertAzureRedisRecommendation(ctx context.Context, azureRec armconsumption.ReservationRecommendationClassification) *common.Recommendation {
-	f := azrecs.ExtractConsumptionOrSkip("cache", azureRec)
+	f := azrecs.ExtractConsumptionOrSkip(ctx, "cache", azureRec)
 	if f == nil {
 		return nil
 	}

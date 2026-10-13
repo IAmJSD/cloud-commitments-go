@@ -177,7 +177,7 @@ func (c *Client) GetRecommendations(ctx context.Context, _ *common.Recommendatio
 // belong to the client's region (all of them when no region is set).
 func (c *Client) appendRegionRecommendations(ctx context.Context, pricer *recommendations.Pricer, recs []common.Recommendation, page []armconsumption.ReservationRecommendationClassification) ([]common.Recommendation, error) {
 	for _, rec := range page {
-		converted := c.convertSynapseRecommendation(rec)
+		converted := c.convertSynapseRecommendation(ctx, rec)
 		if converted == nil {
 			continue
 		}
@@ -488,8 +488,8 @@ func (c *Client) getSynapsePricing(ctx context.Context, sku, region string, term
 
 // convertSynapseRecommendation converts an Azure reservation recommendation
 // to the common Recommendation format.
-func (c *Client) convertSynapseRecommendation(azureRec armconsumption.ReservationRecommendationClassification) *common.Recommendation {
-	f := recommendations.ExtractConsumptionOrSkip("synapse", azureRec)
+func (c *Client) convertSynapseRecommendation(ctx context.Context, azureRec armconsumption.ReservationRecommendationClassification) *common.Recommendation {
+	f := recommendations.ExtractConsumptionOrSkip(ctx, "synapse", azureRec)
 	if f == nil {
 		return nil
 	}

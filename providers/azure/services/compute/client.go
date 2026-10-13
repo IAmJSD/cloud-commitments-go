@@ -756,7 +756,7 @@ func (c *Client) fetchAzurePricing(ctx context.Context, filter string) (*AzureRe
 // sources (consumption usage records, dedicated-host inventory) and
 // remain unpopulated — out of scope for this issue.
 func (c *Client) convertAzureVMRecommendation(ctx context.Context, azureRec armconsumption.ReservationRecommendationClassification) *common.Recommendation {
-	f := azrecs.ExtractConsumptionOrSkip("compute", azureRec)
+	f := azrecs.ExtractConsumptionOrSkip(ctx, "compute", azureRec)
 	if f == nil {
 		return nil
 	}
