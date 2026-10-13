@@ -25,6 +25,7 @@ import (
 	"google.golang.org/genproto/googleapis/type/money"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
@@ -1172,6 +1173,7 @@ func TestComputeEngineClient_GetRecommendations_WithMock(t *testing.T) {
 					Category: recommenderpb.Impact_COST,
 					Projection: &recommenderpb.Impact_CostProjection{
 						CostProjection: &recommenderpb.CostProjection{
+							Duration: durationpb.New(savingsWindow),
 							Cost: &money.Money{
 								Units:        -100,
 								Nanos:        0,
@@ -1278,6 +1280,7 @@ func TestComputeEngineClient_ConvertGCPRecommendation(t *testing.T) {
 			Category: recommenderpb.Impact_COST,
 			Projection: &recommenderpb.Impact_CostProjection{
 				CostProjection: &recommenderpb.CostProjection{
+					Duration: durationpb.New(savingsWindow),
 					Cost: &money.Money{
 						Units:        -50,
 						Nanos:        -500000000,
@@ -1342,6 +1345,7 @@ func realisticCUDRecommendation() *recommenderpb.Recommendation {
 			Category: recommenderpb.Impact_COST,
 			Projection: &recommenderpb.Impact_CostProjection{
 				CostProjection: &recommenderpb.CostProjection{
+					Duration: durationpb.New(savingsWindow),
 					Cost: &money.Money{
 						Units:        -200,
 						Nanos:        0,
@@ -1617,7 +1621,8 @@ func TestConvertGCPRecommendation_EmptyParamsDefaultsToMonthly(t *testing.T) {
 			Category: recommenderpb.Impact_COST,
 			Projection: &recommenderpb.Impact_CostProjection{
 				CostProjection: &recommenderpb.CostProjection{
-					Cost: &money.Money{Units: -100, CurrencyCode: "USD"},
+					Duration: durationpb.New(savingsWindow),
+					Cost:     &money.Money{Units: -100, CurrencyCode: "USD"},
 				},
 			},
 		},
@@ -2057,7 +2062,8 @@ func TestGetRecommendations_FiltersNonActiveStates(t *testing.T) {
 				Category: recommenderpb.Impact_COST,
 				Projection: &recommenderpb.Impact_CostProjection{
 					CostProjection: &recommenderpb.CostProjection{
-						Cost: &money.Money{Units: -100, CurrencyCode: "USD"},
+						Duration: durationpb.New(savingsWindow),
+						Cost:     &money.Money{Units: -100, CurrencyCode: "USD"},
 					},
 				},
 			},
@@ -2107,7 +2113,8 @@ func TestGetRecommendations_ActiveRecIncluded(t *testing.T) {
 					Category: recommenderpb.Impact_COST,
 					Projection: &recommenderpb.Impact_CostProjection{
 						CostProjection: &recommenderpb.CostProjection{
-							Cost: &money.Money{Units: -50, CurrencyCode: "USD"},
+							Duration: durationpb.New(savingsWindow),
+							Cost:     &money.Money{Units: -50, CurrencyCode: "USD"},
 						},
 					},
 				},
@@ -2367,7 +2374,8 @@ func commitmentOnlyCUDRecommendation() *recommenderpb.Recommendation {
 			Category: recommenderpb.Impact_COST,
 			Projection: &recommenderpb.Impact_CostProjection{
 				CostProjection: &recommenderpb.CostProjection{
-					Cost: &money.Money{Units: -200, CurrencyCode: "USD"},
+					Duration: durationpb.New(savingsWindow),
+					Cost:     &money.Money{Units: -200, CurrencyCode: "USD"},
 				},
 			},
 		},
