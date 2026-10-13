@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	compute "cloud.google.com/go/compute/apiv1"
@@ -29,7 +30,6 @@ import (
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/retry"
-	"github.com/LeanerCloud/cloud-commitments-go/providers/gcp/internal/skumatch"
 )
 
 // maxRecsPages caps GCP Recommender API iteration to avoid burning a Lambda
@@ -267,6 +267,9 @@ type Client struct {
 	machineTypesService MachineTypesService
 	billingService      BillingService
 	recommenderClient   RecommenderClient
+
+	skuMu    sync.Mutex
+	skuCache []*cloudbilling.Sku
 }
 
 // NewClient creates a new GCP Compute Engine client.
@@ -292,6 +295,9 @@ func (c *Client) SetMachineTypesService(svc MachineTypesService) {
 // SetBillingService sets the billing service (for testing).
 func (c *Client) SetBillingService(svc BillingService) {
 	c.billingService = svc
+	c.skuMu.Lock()
+	c.skuCache = nil
+	c.skuMu.Unlock()
 }
 
 // SetRecommenderClient sets the recommender client (for testing).
@@ -335,11 +341,27 @@ func (r *realMachineTypesService) Close() error {
 
 // realBillingService wraps the real cloudbilling.APIService.
 type realBillingService struct {
+	ctx     context.Context
 	service *cloudbilling.APIService
 }
 
+// ListSKUs returns every SKU of the service. The catalog is paged (5000 SKUs per
+// page, 33k for Compute Engine), so all pages are followed.
 func (r *realBillingService) ListSKUs(serviceID string) (*cloudbilling.ListSkusResponse, error) {
-	return r.service.Services.Skus.List(serviceID).Do()
+	all := &cloudbilling.ListSkusResponse{}
+	pages := 0
+	err := r.service.Services.Skus.List(serviceID).PageSize(skuPageSize).Pages(r.ctx, func(page *cloudbilling.ListSkusResponse) error {
+		pages++
+		if pages > maxSKUPages {
+			return fmt.Errorf("computeengine: billing SKU listing page cap (%d pages) reached", maxSKUPages)
+		}
+		all.Skus = append(all.Skus, page.Skus...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return all, nil
 }
 
 // realRecommenderIterator wraps the real recommender iterator.
@@ -960,7 +982,11 @@ func (c *Client) GetOfferingDetails(ctx context.Context, rec common.Recommendati
 		termYears = 3
 	}
 
-	pricing, err := c.getComputePricing(ctx, rec.ResourceType, c.region, termYears)
+	res, err := resourcesFromRecommendation(rec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pricing: %w", err)
+	}
+	pricing, err := c.getComputePricing(ctx, rec.ResourceType, c.region, termYears, res)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pricing: %w", err)
 	}
@@ -1042,52 +1068,6 @@ func (c *Client) GetValidResourceTypes(ctx context.Context) ([]string, error) {
 	return machineTypes, nil
 }
 
-// ComputePricing contains pricing information for Compute Engine.
-type ComputePricing struct {
-	HourlyRate        float64
-	CommitmentPrice   float64
-	OnDemandPrice     float64
-	Currency          string
-	SavingsPercentage float64
-}
-
-// getComputePricing gets pricing from GCP Cloud Billing Catalog API.
-// It returns an error when commitment pricing is absent from the catalog rather
-// than fabricating a price from a hardcoded discount factor (issue #1020).
-func (c *Client) getComputePricing(ctx context.Context, machineType, region string, termYears int) (*ComputePricing, error) {
-	svc, err := c.getOrCreateBillingService(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	skus, err := svc.ListSKUs("services/6F81-5844-456A")
-	if err != nil {
-		return nil, fmt.Errorf("failed to list SKUs: %w", err)
-	}
-
-	onDemandPrice, commitmentPrice, currency, err := extractComputePricingFromSKUs(skus.Skus, machineType, region)
-	if err != nil {
-		return nil, err
-	}
-	if onDemandPrice == 0 {
-		return nil, fmt.Errorf("no on-demand pricing found for machine type %s", machineType)
-	}
-	if commitmentPrice == 0 {
-		return nil, fmt.Errorf("no commitment pricing found for machine type %s in region %s: catalog has no CUD SKU; cannot compute savings percentage", machineType, region)
-	}
-
-	hoursInTerm := 8760.0 * float64(termYears)
-	savingsPercentage := calculateComputeSavingsPercentage(onDemandPrice, hoursInTerm, commitmentPrice)
-
-	return &ComputePricing{
-		HourlyRate:        commitmentPrice / hoursInTerm,
-		CommitmentPrice:   commitmentPrice,
-		OnDemandPrice:     onDemandPrice * hoursInTerm,
-		Currency:          currency,
-		SavingsPercentage: savingsPercentage,
-	}, nil
-}
-
 // getOrCreateBillingService returns the billing service, creating it if needed.
 func (c *Client) getOrCreateBillingService(ctx context.Context) (BillingService, error) {
 	if c.billingService != nil {
@@ -1099,71 +1079,7 @@ func (c *Client) getOrCreateBillingService(ctx context.Context) (BillingService,
 		return nil, fmt.Errorf("failed to create billing service: %w", err)
 	}
 
-	return &realBillingService{service: service}, nil
-}
-
-// extractComputePricingFromSKUs extracts on-demand and commitment pricing from SKU list.
-func extractComputePricingFromSKUs(skus []*cloudbilling.Sku, machineType, region string) (onDemand, commitment float64, currency string, err error) {
-	currency = "USD"
-
-	for _, sku := range skus {
-		if !skuMatchesMachineType(sku, machineType, region) {
-			continue
-		}
-
-		price, curr := extractComputePriceFromSKU(sku)
-		if price == 0 {
-			continue
-		}
-
-		if curr != "" {
-			currency = curr
-		}
-
-		slot, slotErr := skumatch.Slot(sku)
-		if slotErr != nil {
-			return 0, 0, "", slotErr
-		}
-		switch slot {
-		case skumatch.SlotCommitment:
-			commitment = price
-		case skumatch.SlotOnDemand:
-			onDemand = price
-		}
-	}
-
-	return onDemand, commitment, currency, nil
-}
-
-// extractComputePriceFromSKU extracts the unit price from a SKU.
-func extractComputePriceFromSKU(sku *cloudbilling.Sku) (price float64, currency string) {
-	if len(sku.PricingInfo) == 0 {
-		return 0, ""
-	}
-
-	pricingInfo := sku.PricingInfo[0]
-	if pricingInfo.PricingExpression == nil || len(pricingInfo.PricingExpression.TieredRates) == 0 {
-		return 0, ""
-	}
-
-	rate := pricingInfo.PricingExpression.TieredRates[0]
-	if rate.UnitPrice == nil {
-		return 0, ""
-	}
-
-	price = float64(rate.UnitPrice.Units) + float64(rate.UnitPrice.Nanos)/1e9
-	return price, rate.UnitPrice.CurrencyCode
-}
-
-// calculateComputeSavingsPercentage calculates the savings percentage.
-func calculateComputeSavingsPercentage(onDemandPrice, hoursInTerm, commitmentPrice float64) float64 {
-	onDemandTotal := onDemandPrice * hoursInTerm
-	return ((onDemandTotal - commitmentPrice) / onDemandTotal) * 100
-}
-
-// skuMatchesMachineType checks if a SKU matches the machine type and region.
-func skuMatchesMachineType(sku *cloudbilling.Sku, machineType, region string) bool {
-	return skumatch.HasToken(sku.Description, machineType) && skumatch.InRegion(sku, region)
+	return &realBillingService{ctx: ctx, service: service}, nil
 }
 
 // convertGCPRecommendation converts a GCP Recommender recommendation to common format.
@@ -1245,7 +1161,12 @@ func (c *Client) enrichRecWithPricing(ctx context.Context, rec *common.Recommend
 		return
 	}
 	termYears := termYearsFromTerm(rec.Term)
-	pricing, err := c.getComputePricing(ctx, rec.ResourceType, c.region, termYears)
+	res, err := resourcesFromRecommendation(*rec)
+	if err != nil {
+		log.Printf("computeengine: pricing unavailable for %s in %s: %v", rec.ResourceType, c.region, err)
+		return
+	}
+	pricing, err := c.getComputePricing(ctx, rec.ResourceType, c.region, termYears, res)
 	if err != nil {
 		log.Printf("computeengine: pricing unavailable for %s in %s (issue #1020): %v", rec.ResourceType, c.region, err)
 		return
