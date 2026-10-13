@@ -153,12 +153,28 @@ func (c *Client) GetRecommendations(ctx context.Context, params *common.Recommen
 		AccountScope:         types.AccountScopeLinked,
 	}
 
+	if isEC2Service(params.Service) {
+		input.ServiceSpecification = &types.ServiceSpecification{
+			EC2Specification: &types.EC2Specification{OfferingClass: ec2RecommendationOfferingClass},
+		}
+	}
+
 	allRecs, err := c.fetchRIAllPages(ctx, input, params.Service)
 	if err != nil {
 		return nil, err
 	}
 
 	return c.parseRecommendations(ctx, allRecs, *params)
+}
+
+// ec2RecommendationOfferingClass is the EC2 offering class the recommendation
+// is priced for. CE prices Standard when no specification is sent, but the EC2
+// purchase path defaults to Convertible (services/ec2 resolveOfferingClassType),
+// so the request names the class explicitly to match what is bought (go#375).
+const ec2RecommendationOfferingClass = types.OfferingClassConvertible
+
+func isEC2Service(s common.ServiceType) bool {
+	return s == common.ServiceEC2 || s == common.ServiceCompute
 }
 
 // fetchRIAllPages paginates over all pages of RI recommendations for a single

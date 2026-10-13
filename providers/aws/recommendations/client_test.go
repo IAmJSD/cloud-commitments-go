@@ -992,6 +992,41 @@ func TestSetRecLookbackPeriod_ReachesGetReservationPurchaseRecommendation(t *tes
 	}
 }
 
+// CE prices Standard unless EC2Specification is set; the purchase default is
+// Convertible, so EC2 requests must say so and other services must not carry
+// an EC2 specification (go#375).
+func TestGetRecommendations_EC2OfferingClassSpecification(t *testing.T) {
+	tests := []struct {
+		service common.ServiceType
+		want    bool
+	}{
+		{common.ServiceEC2, true},
+		{common.ServiceCompute, true},
+		{common.ServiceRDS, false},
+		{common.ServiceElastiCache, false},
+		{common.ServiceMemoryDB, false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.service), func(t *testing.T) {
+			mockAPI := &mockCostExplorerAPI{riRecommendations: &costexplorer.GetReservationPurchaseRecommendationOutput{}}
+			client := NewClientWithAPI(mockAPI, "us-east-1")
+			_, err := client.GetRecommendations(context.Background(), &common.RecommendationParams{
+				Service: tt.service, Term: "1yr", PaymentOption: "no-upfront", LookbackPeriod: "30d",
+			})
+			require.NoError(t, err)
+			require.Len(t, mockAPI.riCalls, 1)
+			spec := mockAPI.riCalls[0].ServiceSpecification
+			if !tt.want {
+				assert.Nil(t, spec)
+				return
+			}
+			require.NotNil(t, spec)
+			require.NotNil(t, spec.EC2Specification)
+			assert.Equal(t, types.OfferingClassConvertible, spec.EC2Specification.OfferingClass)
+		})
+	}
+}
+
 // GetAllRecommendations must query MemoryDB alongside the other RI services.
 func TestGetAllRecommendations_QueriesMemoryDB(t *testing.T) {
 	mockAPI := &mockCostExplorerAPI{
