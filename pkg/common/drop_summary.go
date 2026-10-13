@@ -11,6 +11,7 @@ import (
 const (
 	DropMinPoolSize           = "--min-pool-size"
 	DropExtendedSupport       = "--include-extended-support"
+	DropCoverageSizedToZero   = "--coverage-sized-to-zero"
 	DropTargetAlreadyMet      = "target-already-met"
 	DropTargetSizedToZero     = "target-sized-to-zero"
 	DropTargetInputInvalid    = "target-input-invalid"
