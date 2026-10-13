@@ -66,3 +66,43 @@ func EngineFromDetails(details ServiceDetails) string {
 	}
 	return NormalizeEngineName(engine)
 }
+
+// platformAliases maps the spellings operators type to the normalized EC2
+// platform. Normalization lowercases and drops the " (amazon vpc)" suffix that
+// Cost Explorer appends, so "Windows (Amazon VPC)" and "windows" agree.
+var platformAliases = map[string]string{
+	"linux": "linux/unix",
+	"unix":  "linux/unix",
+}
+
+// NormalizePlatformName normalizes an EC2 platform for filter comparison.
+func NormalizePlatformName(platform string) string {
+	p := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(platform)), " (amazon vpc)")
+	if alias, ok := platformAliases[p]; ok {
+		return alias
+	}
+	return p
+}
+
+// EngineFilterKey returns the value the --include-engines/--exclude-engines
+// filters compare against, and the normalizer to apply to each filter entry.
+// Databases and caches use their engine; compute (EC2) uses its platform,
+// which the CSV and table label "Engine". EngineFromDetails is deliberately
+// left alone: it feeds the dedupe key and Matches, and existing EC2
+// commitments carry no engine to match a platform against.
+// An empty key means the recommendation has no engine or platform.
+func EngineFilterKey(details ServiceDetails) (key string, normalize func(string) string) {
+	var platform string
+	switch d := details.(type) {
+	case *ComputeDetails:
+		if d == nil {
+			return "", NormalizeEngineName
+		}
+		platform = d.Platform
+	case ComputeDetails:
+		platform = d.Platform
+	default:
+		return EngineFromDetails(details), NormalizeEngineName
+	}
+	return NormalizePlatformName(platform), NormalizePlatformName
+}

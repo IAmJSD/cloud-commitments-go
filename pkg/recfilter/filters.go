@@ -75,25 +75,29 @@ func (f Filters) IncludesInstanceType(instanceType string) bool {
 // recommendation whose engine normalizes to "postgresql". NormalizeEngineName
 // lowercases anything it does not recognize, so unknown engines keep the
 // case-insensitive matching this had before.
+//
+// EC2 recommendations have no database engine; the filters match their
+// Platform (the value the CSV shows as "Engine"), so "Windows (Amazon VPC)",
+// "windows" and "WINDOWS" are equivalent (see common.EngineFilterKey).
 func (f Filters) IncludesEngine(rec *common.Recommendation) bool {
-	engine := common.EngineFromDetails(rec.Details)
+	engine, normalize := common.EngineFilterKey(rec.Details)
 	if engine == "" {
 		// No engine info: include by default unless there's an include list.
 		return len(f.IncludeEngines) == 0
 	}
 	engine = strings.ToLower(engine)
 
-	if len(f.IncludeEngines) > 0 && !matchesEngine(f.IncludeEngines, engine) {
+	if len(f.IncludeEngines) > 0 && !matchesEngine(f.IncludeEngines, engine, normalize) {
 		return false
 	}
-	return !matchesEngine(f.ExcludeEngines, engine)
+	return !matchesEngine(f.ExcludeEngines, engine, normalize)
 }
 
 // matchesEngine reports whether any filter entry normalizes to engine, which
 // the caller has already normalized.
-func matchesEngine(filters []string, engine string) bool {
+func matchesEngine(filters []string, engine string, normalize func(string) string) bool {
 	for _, e := range filters {
-		if common.NormalizeEngineName(e) == engine {
+		if normalize(e) == engine {
 			return true
 		}
 	}
