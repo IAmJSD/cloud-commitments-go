@@ -153,6 +153,7 @@ func TestGetRecommendations_AdvisorSavingsPlanDedupedAgainstBenefitRecs(t *testi
 
 	got = run(nil, []common.Recommendation{sp("sub", "1yr", "advisor")})
 	assert.Len(t, got, 1, "Advisor SP advice is kept when the benefit source returns nothing")
+}
 
 func TestGetRecommendations_CollectsSynapseForDataWarehouse(t *testing.T) {
 	overrideServiceClientFns(t, &fakeServiceClient{}, &fakeServiceClient{}, &fakeServiceClient{}, &fakeServiceClient{}, &fakeServiceClient{})

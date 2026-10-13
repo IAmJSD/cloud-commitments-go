@@ -300,6 +300,7 @@ func dropCoveredAdvisorSavingsPlans(advisor, sp []common.Recommendation) []commo
 		out = append(out, r)
 	}
 	return out
+}
 
 // advisorFn returns the injected Advisor collector, or the real one.
 func (r *RecommendationsClientAdapter) advisorFn() func(context.Context, common.RecommendationParams) ([]common.Recommendation, error) {
