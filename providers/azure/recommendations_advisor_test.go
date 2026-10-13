@@ -155,6 +155,21 @@ func TestGetRecommendations_AdvisorSavingsPlanDedupedAgainstBenefitRecs(t *testi
 	assert.Len(t, got, 1, "Advisor SP advice is kept when the benefit source returns nothing")
 }
 
+func TestGetRecommendations_CollectsSynapseForDataWarehouse(t *testing.T) {
+	overrideServiceClientFns(t, &fakeServiceClient{}, &fakeServiceClient{}, &fakeServiceClient{}, &fakeServiceClient{}, &fakeServiceClient{})
+	want := common.Recommendation{Provider: common.ProviderAzure, Service: common.ServiceDataWarehouse}
+	newSynapseClientFn = newFakeFn(&fakeServiceClient{recs: []common.Recommendation{want}})
+	a := &RecommendationsClientAdapter{cred: &mockAzureTokenCredential{}, subscriptionID: "sub", getAdvisorRecsFn: noopAdvisorFn}
+
+	recs, err := a.GetRecommendations(context.Background(), &common.RecommendationParams{})
+	require.NoError(t, err)
+	assert.Equal(t, []common.Recommendation{want}, recs)
+
+	recs, err = a.GetRecommendations(context.Background(), &common.RecommendationParams{Service: common.ServiceCompute})
+	require.NoError(t, err)
+	assert.Empty(t, recs, "synapse is skipped when another service is requested")
+}
+
 func TestConvertAdvisor_UnmappedReservedResourceTypeIsIgnoredNotSkipped(t *testing.T) {
 	a := &RecommendationsClientAdapter{subscriptionID: "sub"}
 	ctx, skips := azrecs.WithSkipLog(context.Background())

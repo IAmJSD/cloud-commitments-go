@@ -207,7 +207,9 @@ func overrideServiceClientFns(t *testing.T, compute, database, cache, cosmos, sp
 	origCache := newCacheClientFn
 	origCosmos := newCosmosDBClientFn
 	origSP := newSavingsPlansClientFn
+	origSynapse := newSynapseClientFn
 	t.Cleanup(func() {
+		newSynapseClientFn = origSynapse
 		newComputeClientFn = origCompute
 		newDatabaseClientFn = origDatabase
 		newCacheClientFn = origCache
@@ -219,6 +221,7 @@ func overrideServiceClientFns(t *testing.T, compute, database, cache, cosmos, sp
 	newCacheClientFn = newFakeFn(cache)
 	newCosmosDBClientFn = newFakeFn(cosmos)
 	newSavingsPlansClientFn = newFakeFn(sp)
+	newSynapseClientFn = newFakeFn(&fakeServiceClient{})
 }
 
 func TestRecommendationsClientAdapter_GetRecommendationsForService(t *testing.T) {
@@ -580,6 +583,7 @@ func TestGetRecommendations_Parallelism(t *testing.T) {
 	origDatabase := newDatabaseClientFn
 	origCache := newCacheClientFn
 	origCosmos := newCosmosDBClientFn
+	origSynapse := newSynapseClientFn
 	origSP := newSavingsPlansClientFn
 	t.Cleanup(func() {
 		newComputeClientFn = origCompute
@@ -587,6 +591,7 @@ func TestGetRecommendations_Parallelism(t *testing.T) {
 		newCacheClientFn = origCache
 		newCosmosDBClientFn = origCosmos
 		newSavingsPlansClientFn = origSP
+		newSynapseClientFn = origSynapse
 	})
 
 	rec := func(svc common.ServiceType) common.Recommendation {
@@ -599,6 +604,7 @@ func TestGetRecommendations_Parallelism(t *testing.T) {
 	newCacheClientFn = newFakeFn(&fakeServiceClient{sleepDur: fakeServiceSleep, recs: []common.Recommendation{rec(common.ServiceCache)}})
 	newCosmosDBClientFn = newFakeFn(&fakeServiceClient{sleepDur: fakeServiceSleep, recs: []common.Recommendation{rec(common.ServiceNoSQL)}})
 	newSavingsPlansClientFn = noopFake
+	newSynapseClientFn = newFakeFn(&fakeServiceClient{})
 
 	adapter := &RecommendationsClientAdapter{
 		cred:             &mockAzureTokenCredential{},
@@ -631,6 +637,7 @@ func TestGetRecommendations_OrderPreservation(t *testing.T) {
 	origDatabase := newDatabaseClientFn
 	origCache := newCacheClientFn
 	origCosmos := newCosmosDBClientFn
+	origSynapse := newSynapseClientFn
 	origSP := newSavingsPlansClientFn
 	t.Cleanup(func() {
 		newComputeClientFn = origCompute
@@ -638,6 +645,7 @@ func TestGetRecommendations_OrderPreservation(t *testing.T) {
 		newCacheClientFn = origCache
 		newCosmosDBClientFn = origCosmos
 		newSavingsPlansClientFn = origSP
+		newSynapseClientFn = origSynapse
 	})
 
 	makeRec := func(svc common.ServiceType) common.Recommendation {
@@ -652,6 +660,7 @@ func TestGetRecommendations_OrderPreservation(t *testing.T) {
 	newCacheClientFn = newFakeFn(&fakeServiceClient{sleepDur: 20 * time.Millisecond, recs: []common.Recommendation{makeRec(common.ServiceCache)}})
 	newCosmosDBClientFn = newFakeFn(&fakeServiceClient{sleepDur: 10 * time.Millisecond, recs: []common.Recommendation{makeRec(common.ServiceNoSQL)}})
 	newSavingsPlansClientFn = newFakeFn(&fakeServiceClient{})
+	newSynapseClientFn = newFakeFn(&fakeServiceClient{})
 
 	adapter := &RecommendationsClientAdapter{
 		cred:             &mockAzureTokenCredential{},
@@ -682,6 +691,7 @@ func TestGetRecommendations_ErrorIsolation(t *testing.T) {
 	origDatabase := newDatabaseClientFn
 	origCache := newCacheClientFn
 	origCosmos := newCosmosDBClientFn
+	origSynapse := newSynapseClientFn
 	origSP := newSavingsPlansClientFn
 	t.Cleanup(func() {
 		newComputeClientFn = origCompute
@@ -689,6 +699,7 @@ func TestGetRecommendations_ErrorIsolation(t *testing.T) {
 		newCacheClientFn = origCache
 		newCosmosDBClientFn = origCosmos
 		newSavingsPlansClientFn = origSP
+		newSynapseClientFn = origSynapse
 	})
 
 	makeRec := func(svc common.ServiceType) common.Recommendation {
@@ -701,6 +712,7 @@ func TestGetRecommendations_ErrorIsolation(t *testing.T) {
 	newCacheClientFn = newFakeFn(&fakeServiceClient{sleepDur: fakeServiceSleep, recs: []common.Recommendation{makeRec(common.ServiceCache)}})
 	newCosmosDBClientFn = newFakeFn(&fakeServiceClient{sleepDur: fakeServiceSleep, recs: []common.Recommendation{makeRec(common.ServiceNoSQL)}})
 	newSavingsPlansClientFn = newFakeFn(&fakeServiceClient{})
+	newSynapseClientFn = newFakeFn(&fakeServiceClient{})
 
 	adapter := &RecommendationsClientAdapter{
 		cred:             &mockAzureTokenCredential{},
