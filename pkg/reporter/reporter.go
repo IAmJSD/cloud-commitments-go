@@ -16,7 +16,7 @@ const (
 )
 
 // RenderTable returns a formatted table of recommendations that passed the scorer.
-// Columns: Cloud, Account, Region, Service, Type, Term, Count, Est. Cost, Est. Savings, Savings%, Break-even, Commitment.
+// Columns: Cloud, Account, Region, Service, Type, Term, Count, Est. Cost (upfront), Recurring$/mo (USD per month, - when unknown), Est. Savings, Savings%, Break-even, Commitment.
 func RenderTable(result scorer.ScoredResult) string {
 	if len(result.Passed) == 0 {
 		return "No recommendations passed the filters.\n"
@@ -24,8 +24,8 @@ func RenderTable(result scorer.ScoredResult) string {
 	var buf bytes.Buffer
 	w := tabwriter.NewWriter(&buf, tabMinWidth, 0, tabPadding, ' ', 0)
 
-	fmt.Fprintln(w, "Cloud\tAccount\tRegion\tService\tType\tTerm\tCount\tEst.Cost\tEst.Savings\tSavings%\tBreak-even\tCommitment")
-	fmt.Fprintln(w, "-----\t-------\t------\t-------\t----\t----\t-----\t--------\t-----------\t---------\t----------\t----------")
+	fmt.Fprintln(w, "Cloud\tAccount\tRegion\tService\tType\tTerm\tCount\tEst.Cost\tRecurring$/mo\tEst.Savings\tSavings%\tBreak-even\tCommitment")
+	fmt.Fprintln(w, "-----\t-------\t------\t-------\t----\t----\t-----\t--------\t-------------\t-----------\t---------\t----------\t----------")
 
 	for _rvc := range result.Passed {
 		rec := result.Passed[_rvc]
@@ -33,7 +33,11 @@ func RenderTable(result scorer.ScoredResult) string {
 		if rec.BreakEvenMonths > 0 {
 			breakEven = fmt.Sprintf("%.1f mo", rec.BreakEvenMonths)
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t$%.2f\t$%.2f\t%.1f%%\t%s\t%s\n",
+		recurring := "-"
+		if rec.RecurringMonthlyCost != nil {
+			recurring = fmt.Sprintf("$%.2f", *rec.RecurringMonthlyCost)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t$%.2f\t%s\t$%.2f\t%.1f%%\t%s\t%s\n",
 			rec.Provider,
 			rec.AccountName,
 			rec.Region,
@@ -42,6 +46,7 @@ func RenderTable(result scorer.ScoredResult) string {
 			rec.Term,
 			rec.Count,
 			rec.CommitmentCost,
+			recurring,
 			rec.EstimatedSavings,
 			rec.SavingsPercentage,
 			breakEven,
