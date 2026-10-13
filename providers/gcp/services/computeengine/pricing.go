@@ -16,12 +16,6 @@ const (
 	// computeServiceID is the Cloud Billing catalog service for Compute Engine.
 	computeServiceID = "services/6F81-5844-456A"
 
-	// skuPageSize is the largest page the catalog serves.
-	skuPageSize = 5000
-
-	// maxSKUPages caps catalog paging; Compute Engine is about 7 pages.
-	maxSKUPages = 50
-
 	hoursPerYear = 8760.0
 
 	usageUnitHour    = "h"

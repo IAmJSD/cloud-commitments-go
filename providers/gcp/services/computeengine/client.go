@@ -341,27 +341,11 @@ func (r *realMachineTypesService) Close() error {
 
 // realBillingService wraps the real cloudbilling.APIService.
 type realBillingService struct {
-	ctx     context.Context
 	service *cloudbilling.APIService
 }
 
-// ListSKUs returns every SKU of the service. The catalog is paged (5000 SKUs per
-// page, 33k for Compute Engine), so all pages are followed.
 func (r *realBillingService) ListSKUs(serviceID string) (*cloudbilling.ListSkusResponse, error) {
-	all := &cloudbilling.ListSkusResponse{}
-	pages := 0
-	err := r.service.Services.Skus.List(serviceID).PageSize(skuPageSize).Pages(r.ctx, func(page *cloudbilling.ListSkusResponse) error {
-		pages++
-		if pages > maxSKUPages {
-			return fmt.Errorf("computeengine: billing SKU listing page cap (%d pages) reached", maxSKUPages)
-		}
-		all.Skus = append(all.Skus, page.Skus...)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return all, nil
+	return r.service.Services.Skus.List(serviceID).Do()
 }
 
 // realRecommenderIterator wraps the real recommender iterator.
@@ -1079,7 +1063,7 @@ func (c *Client) getOrCreateBillingService(ctx context.Context) (BillingService,
 		return nil, fmt.Errorf("failed to create billing service: %w", err)
 	}
 
-	return &realBillingService{ctx: ctx, service: service}, nil
+	return &realBillingService{service: service}, nil
 }
 
 // convertGCPRecommendation converts a GCP Recommender recommendation to common format.

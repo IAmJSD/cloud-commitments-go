@@ -2,16 +2,11 @@ package computeengine
 
 import (
 	"context"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/api/cloudbilling/v1"
-	"google.golang.org/api/option"
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
 )
@@ -131,63 +126,4 @@ func TestResourcesFromRecommendation_RequiresCountAndMemory(t *testing.T) {
 	require.Error(t, err)
 	_, err = resourcesFromRecommendation(newRec("n2-standard-8", 8, 0))
 	require.Error(t, err)
-}
-
-// catalogServer serves nSKUs synthetic SKUs in pages of pageSize and records
-// the page tokens it was asked for.
-func catalogServer(t *testing.T, total, pageSize int, tokens *[]string) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := r.URL.Query().Get("pageToken")
-		*tokens = append(*tokens, token)
-		start := 0
-		if token != "" {
-			start, _ = strconv.Atoi(token)
-		}
-		end := min(start+pageSize, total)
-		body := `{"skus":[`
-		for i := start; i < end; i++ {
-			if i > start {
-				body += ","
-			}
-			body += fmt.Sprintf(`{"skuId":"sku-%d"}`, i)
-		}
-		body += `]`
-		if end < total {
-			body += fmt.Sprintf(`,"nextPageToken":"%d"`, end)
-		}
-		body += `}`
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(body))
-	}))
-}
-
-// The live Compute Engine catalog is 33,453 SKUs over 7 pages of 5,000; reading
-// only the first page left the commitment SKUs unseen.
-func TestRealBillingService_ListSKUsFollowsEveryPage(t *testing.T) {
-	var tokens []string
-	srv := catalogServer(t, 33453, 5000, &tokens)
-	defer srv.Close()
-
-	api, err := cloudbilling.NewService(context.Background(), option.WithEndpoint(srv.URL), option.WithoutAuthentication())
-	require.NoError(t, err)
-	svc := &realBillingService{ctx: context.Background(), service: api}
-
-	resp, err := svc.ListSKUs(computeServiceID)
-	require.NoError(t, err)
-	assert.Len(t, resp.Skus, 33453)
-	assert.Len(t, tokens, 7)
-}
-
-func TestRealBillingService_ListSKUsPageCap(t *testing.T) {
-	var tokens []string
-	srv := catalogServer(t, (maxSKUPages+1)*10, 10, &tokens)
-	defer srv.Close()
-
-	api, err := cloudbilling.NewService(context.Background(), option.WithEndpoint(srv.URL), option.WithoutAuthentication())
-	require.NoError(t, err)
-	svc := &realBillingService{ctx: context.Background(), service: api}
-
-	_, err = svc.ListSKUs(computeServiceID)
-	require.ErrorContains(t, err, "page cap")
 }
