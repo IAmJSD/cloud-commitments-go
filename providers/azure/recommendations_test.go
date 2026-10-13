@@ -207,7 +207,9 @@ func overrideServiceClientFns(t *testing.T, compute, database, cache, cosmos, sp
 	origCache := newCacheClientFn
 	origCosmos := newCosmosDBClientFn
 	origSP := newSavingsPlansClientFn
+	origSynapse := newSynapseClientFn
 	t.Cleanup(func() {
+		newSynapseClientFn = origSynapse
 		newComputeClientFn = origCompute
 		newDatabaseClientFn = origDatabase
 		newCacheClientFn = origCache
@@ -219,6 +221,7 @@ func overrideServiceClientFns(t *testing.T, compute, database, cache, cosmos, sp
 	newCacheClientFn = newFakeFn(cache)
 	newCosmosDBClientFn = newFakeFn(cosmos)
 	newSavingsPlansClientFn = newFakeFn(sp)
+	newSynapseClientFn = newFakeFn(&fakeServiceClient{})
 }
 
 func TestRecommendationsClientAdapter_GetRecommendationsForService(t *testing.T) {

@@ -22,6 +22,7 @@ import (
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/services/cosmosdb"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/services/database"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/services/savingsplans"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/services/synapse"
 )
 
 // serviceRecsGetter is the narrow interface satisfied by each per-service
@@ -58,6 +59,9 @@ var (
 	}
 	newSavingsPlansClientFn func(azcore.TokenCredential, string, string) serviceRecsGetter = func(cred azcore.TokenCredential, sub, region string) serviceRecsGetter {
 		return savingsplans.NewClient(cred, sub, region)
+	}
+	newSynapseClientFn func(azcore.TokenCredential, string, string) serviceRecsGetter = func(cred azcore.TokenCredential, sub, region string) serviceRecsGetter {
+		return synapse.NewClient(cred, sub, region)
 	}
 )
 
@@ -109,14 +113,14 @@ func NewRecommendationsClientAdapter(cred azcore.TokenCredential, subscriptionID
 // All six service calls run concurrently under errgroup. Each goroutine captures
 // its own error and returns nil to the group so that a single service failure
 // does not cancel sibling calls. Results are appended in a deterministic order
-// (compute → database → cache → cosmosdb → savingsplans → advisor) after all goroutines finish.
+// (compute → database → cache → cosmosdb → synapse → savingsplans → advisor) after all goroutines finish.
 func (r *RecommendationsClientAdapter) GetRecommendations(ctx context.Context, params *common.RecommendationParams) ([]common.Recommendation, error) {
 	if params == nil {
 		return nil, fmt.Errorf("params cannot be nil")
 	}
 	var (
-		computeRecs, dbRecs, cacheRecs, cosmosRecs, advisorRecs, spRecs []common.Recommendation
-		computeErr, dbErr, cacheErr, cosmosErr, advisorErr, spErr       error
+		computeRecs, dbRecs, cacheRecs, cosmosRecs, advisorRecs, spRecs, synapseRecs []common.Recommendation
+		computeErr, dbErr, cacheErr, cosmosErr, advisorErr, spErr, synapseErr        error
 	)
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -154,6 +158,7 @@ func (r *RecommendationsClientAdapter) GetRecommendations(ctx context.Context, p
 	includeCache := shouldIncludeService(*params, common.ServiceCache)
 	includeCosmos := shouldIncludeService(*params, common.ServiceNoSQL)
 	includeSP := shouldIncludeService(*params, common.ServiceSavingsPlansAll)
+	includeSynapse := shouldIncludeService(*params, common.ServiceDataWarehouse)
 
 	// Compute (VM) recommendations — subscription-wide.
 	if includeCompute {
@@ -187,6 +192,14 @@ func (r *RecommendationsClientAdapter) GetRecommendations(ctx context.Context, p
 		})
 	}
 
+	// Synapse (SqlDataWarehouse) recommendations — subscription-wide. Search and
+	// Managed Redis are deliberately not collected here: see #47.
+	if includeSynapse {
+		goService(&synapseErr, func() {
+			synapseRecs, synapseErr = newSynapseClientFn(r.cred, r.subscriptionID, "").GetRecommendations(gctx, params)
+		})
+	}
+
 	// Savings Plans — Azure has no stable public API for SP purchase
 	// recommendations (Benefits Recommendations API is still in preview).
 	// The call returns an empty slice so the service appears in the fan-out
@@ -205,10 +218,7 @@ func (r *RecommendationsClientAdapter) GetRecommendations(ctx context.Context, p
 	//
 	// getAdvisorRecsFn defaults to r.getAdvisorRecommendations and may be
 	// replaced per-adapter in tests to avoid real ARM network calls.
-	advisorFn := r.getAdvisorRecsFn
-	if advisorFn == nil {
-		advisorFn = r.getAdvisorRecommendations
-	}
+	advisorFn := r.advisorFn()
 	goService(&advisorErr, func() {
 		advisorRecs, advisorErr = collectAdvisorOrSkip(gctx, advisorFn, *params)
 	})
@@ -229,6 +239,7 @@ func (r *RecommendationsClientAdapter) GetRecommendations(ctx context.Context, p
 		serviceResult{"database", dbRecs, dbErr, includeDB},
 		serviceResult{"cache", cacheRecs, cacheErr, includeCache},
 		serviceResult{"cosmosdb", cosmosRecs, cosmosErr, includeCosmos},
+		serviceResult{"synapse", synapseRecs, synapseErr, includeSynapse},
 		// The savingsplans client is a stub that unconditionally returns
 		// ([], nil) until the Benefits Recommendations API stabilizes (see
 		// services/savingsplans Client.GetRecommendations). Counting its
@@ -289,6 +300,13 @@ func dropCoveredAdvisorSavingsPlans(advisor, sp []common.Recommendation) []commo
 		out = append(out, r)
 	}
 	return out
+
+// advisorFn returns the injected Advisor collector, or the real one.
+func (r *RecommendationsClientAdapter) advisorFn() func(context.Context, common.RecommendationParams) ([]common.Recommendation, error) {
+	if r.getAdvisorRecsFn != nil {
+		return r.getAdvisorRecsFn
+	}
+	return r.getAdvisorRecommendations
 }
 
 // serviceResult bundles a per-service collection outcome for the deterministic
@@ -310,7 +328,7 @@ type serviceResult struct {
 // mergeServiceResults logs per-service errors (matches the previous sequential
 // behavior where each error was logged inline via logging.Warnf) and appends
 // successful results in the order the slice is passed — callers must preserve
-// the canonical compute → database → cache → cosmosdb → savingsplans → advisor
+// the canonical compute → database → cache → cosmosdb → synapse → savingsplans → advisor
 // order so that order-sensitive consumers remain stable. The advisor entry's
 // error is logged via logging.Errorf to match the pre-parallelisation severity.
 //
