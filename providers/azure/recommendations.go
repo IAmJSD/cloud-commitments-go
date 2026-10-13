@@ -246,7 +246,7 @@ func (r *RecommendationsClientAdapter) GetRecommendations(ctx context.Context, p
 		// credential failure -- the same hazard the savingsplans exclusion
 		// prevents. When getAdvisorRecommendations is changed to propagate
 		// hard errors, flip this flag back to true.
-		serviceResult{"advisor", advisorRecs, advisorErr, false})
+		serviceResult{"advisor", dropCoveredAdvisorSavingsPlans(advisorRecs, spRecs), advisorErr, false})
 	return withSkips(merged, err, skips)
 }
 
@@ -262,6 +262,33 @@ func withSkips(recs []common.Recommendation, err error, skips *azrecs.SkipLog) (
 		return recs, &azrecs.PartialResultError{Skipped: skipped}
 	}
 	return recs, nil
+}
+
+// dropCoveredAdvisorSavingsPlans removes Advisor Savings Plan rows that the
+// savings-plan client (Benefit Recommendations API) already covers, matched on
+// (account, term). Advisor's row carries only a saving, no commitment amount,
+// so the Benefit Recommendations row is the better record of the same advice.
+// Matching on a key, not dropping all Advisor SP rows, keeps Advisor's advice
+// when that client returns nothing for an account and term.
+func dropCoveredAdvisorSavingsPlans(advisor, sp []common.Recommendation) []common.Recommendation {
+	type key struct{ account, term string }
+	covered := make(map[key]bool)
+	for _, r := range sp {
+		if r.CommitmentType == common.CommitmentSavingsPlan {
+			covered[key{r.Account, r.Term}] = true
+		}
+	}
+	if len(covered) == 0 {
+		return advisor
+	}
+	out := make([]common.Recommendation, 0, len(advisor))
+	for _, r := range advisor {
+		if r.CommitmentType == common.CommitmentSavingsPlan && covered[key{r.Account, r.Term}] {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // serviceResult bundles a per-service collection outcome for the deterministic

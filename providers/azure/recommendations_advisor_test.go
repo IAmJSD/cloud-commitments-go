@@ -128,3 +128,29 @@ func TestGetRecommendations_AdvisorTruncationIsSurfaced(t *testing.T) {
 	require.True(t, errors.As(err, &partial), "a capped Advisor walk must not look complete: %v", err)
 	assert.Contains(t, partial.Skipped[0], "pagination cap")
 }
+
+func TestGetRecommendations_AdvisorSavingsPlanDedupedAgainstBenefitRecs(t *testing.T) {
+	sp := func(account, term string, from string) common.Recommendation {
+		return common.Recommendation{Provider: common.ProviderAzure, Service: common.ServiceCompute,
+			CommitmentType: common.CommitmentSavingsPlan, Account: account, Term: term, Region: from}
+	}
+	benefit := sp("sub", "1yr", "benefit")
+	run := func(spRecs []common.Recommendation, advisor []common.Recommendation) []common.Recommendation {
+		overrideServiceClientFns(t, &fakeServiceClient{}, &fakeServiceClient{}, &fakeServiceClient{}, &fakeServiceClient{}, &fakeServiceClient{recs: spRecs})
+		a := &RecommendationsClientAdapter{cred: &mockAzureTokenCredential{}, subscriptionID: "sub",
+			getAdvisorRecsFn: func(context.Context, common.RecommendationParams) ([]common.Recommendation, error) {
+				return advisor, nil
+			}}
+		recs, err := a.GetRecommendations(context.Background(), &common.RecommendationParams{})
+		require.NoError(t, err)
+		return recs
+	}
+	advisorRI := common.Recommendation{CommitmentType: common.CommitmentReservedInstance, Account: "sub", Term: "1yr", Region: "advisor-ri"}
+
+	got := run([]common.Recommendation{benefit}, []common.Recommendation{sp("sub", "1yr", "advisor"), sp("sub", "3yr", "advisor"), advisorRI})
+	assert.ElementsMatch(t, []common.Recommendation{benefit, sp("sub", "3yr", "advisor"), advisorRI}, got,
+		"the covered (account, term) Advisor SP row is dropped; other terms and RI rows stay")
+
+	got = run(nil, []common.Recommendation{sp("sub", "1yr", "advisor")})
+	assert.Len(t, got, 1, "Advisor SP advice is kept when the benefit source returns nothing")
+}
