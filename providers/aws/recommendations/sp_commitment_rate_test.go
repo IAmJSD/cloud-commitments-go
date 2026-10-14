@@ -197,9 +197,10 @@ func TestGetSPCommitmentRate_SDKPageCompleteness(t *testing.T) {
 				t.Fatalf("rate = %g, err %v, want 0.7", rate, err)
 			}
 			wantTokens := []string{"", "next"}
-			if kind == "absent-first" {
+			switch kind {
+			case "absent-first":
 				wantTokens = wantTokens[:1]
-			} else if kind == "empty-middle" {
+			case "empty-middle":
 				wantTokens = append(wantTokens, "last")
 			}
 			if len(fixture.requests) != len(wantTokens) {
