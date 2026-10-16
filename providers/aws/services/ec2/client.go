@@ -3,6 +3,7 @@ package ec2
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -351,13 +352,6 @@ func parseEC2Scope(s string) (types.Scope, error) {
 // of timing out the Lambda budget (issue #688).
 const maxOfferingPages = 5
 
-// defaultEC2Platform is the EC2 RI product-description value for Linux/UNIX instances.
-// Used as a fallback in exchange-package helpers (FindConvertibleOffering,
-// ListTargetOfferings) where callers may legitimately omit the platform; never
-// used as a silent fallback on the purchase path (see M2/M3 in
-// 19-hardcoded-fallbacks-aws.md).
-const defaultEC2Platform = "Linux/UNIX"
-
 // convertEC2PaymentOption maps a rec payment-option slug to the AWS
 // DescribeReservedInstancesOfferings OfferingType enum value.
 func convertEC2PaymentOption(option string) (types.OfferingTypeValues, error) {
@@ -422,20 +416,9 @@ func buildEC2OfferingQuery(rec common.Recommendation, details *common.ComputeDet
 	if err != nil {
 		return ec2OfferingQuery{}, fmt.Errorf("EC2 recommendation for %s: %w", rec.ResourceType, err)
 	}
-	az := strings.TrimSpace(details.AvailabilityZone)
-	if scope == types.ScopeAvailabilityZone && az == "" {
-		return ec2OfferingQuery{}, fmt.Errorf(
-			"EC2 recommendation for %s has zonal scope but no AvailabilityZone: "+
-				"refusing to buy a zonal RI in an arbitrary AZ; re-fetch the recommendation",
-			rec.ResourceType,
-		)
-	}
-	if scope == types.ScopeRegional && az != "" {
-		return ec2OfferingQuery{}, fmt.Errorf(
-			"EC2 recommendation for %s has regional scope but AvailabilityZone %q: "+
-				"contradictory input; re-fetch the recommendation",
-			rec.ResourceType, az,
-		)
+	az, err := resolveExchangeZone(scope, details.AvailabilityZone)
+	if err != nil {
+		return ec2OfferingQuery{}, fmt.Errorf("EC2 recommendation for %s: %w", rec.ResourceType, err)
 	}
 	return ec2OfferingQuery{
 		instanceType:     types.InstanceType(rec.ResourceType),
@@ -445,6 +428,27 @@ func buildEC2OfferingQuery(rec common.Recommendation, details *common.ComputeDet
 		availabilityZone: az,
 		duration:         duration,
 	}, nil
+}
+
+// resolveExchangeZone returns the trimmed AZ to send for scope ("" for
+// regional). A zonal lookup without an AZ and a regional lookup with one are
+// both refused rather than guessed.
+func resolveExchangeZone(scope types.Scope, az string) (string, error) {
+	az = strings.TrimSpace(az)
+	if scope == types.ScopeAvailabilityZone && az == "" {
+		return "", errors.New("zonal RI offering needs an availability zone; re-fetch the recommendation")
+	}
+	if scope == types.ScopeRegional && az != "" {
+		return "", fmt.Errorf("regional RI offering must not name an availability zone (contradictory input); "+
+			"re-fetch the recommendation: got %q", az)
+	}
+	return az, nil
+}
+
+// offeringInZone reports whether o is in az; az == "" (regional) matches any
+// offering. A nil offering AZ never matches a named AZ.
+func offeringInZone(o types.ReservedInstancesOffering, az string) bool {
+	return az == "" || aws.ToString(o.AvailabilityZone) == az
 }
 
 // describeInputFromQuery builds the SDK request struct for one page of the
@@ -587,7 +591,7 @@ func scanEC2OfferingPage(offerings []types.ReservedInstancesOffering, q ec2Offer
 	wantType := q.wantOfferingType
 	for i := range offerings {
 		o := &offerings[i]
-		if q.availabilityZone != "" && aws.ToString(o.AvailabilityZone) != q.availabilityZone {
+		if !offeringInZone(*o, q.availabilityZone) {
 			log.Printf("EC2 findOffering skipping offering %s in AZ %q (want %q)",
 				aws.ToString(o.ReservedInstancesOfferingId), aws.ToString(o.AvailabilityZone), q.availabilityZone)
 			continue
@@ -822,53 +826,120 @@ type FindConvertibleOfferingParams struct {
 	ProductDescription string
 	Tenancy            string
 	Scope              string
-	Duration           int64
+	// AvailabilityZone is the source RI's AZ name: required for zonal scope and
+	// refused for regional scope.
+	AvailabilityZone string
+	Duration         int64
+}
+
+// parseExchangeLookup parses the tenancy and scope of an exchange lookup and
+// resolves its availability zone. Keeping the target in the source RI's AZ is
+// policy from #310/#289 (no silent AZ drift), not an AWS requirement.
+func parseExchangeLookup(tenancy, scope, az string) (types.Tenancy, types.Scope, string, error) {
+	t, err := parseEC2Tenancy(tenancy)
+	if err != nil {
+		return "", "", "", err
+	}
+	sc, err := parseEC2Scope(scope)
+	if err != nil {
+		return "", "", "", err
+	}
+	zone, err := resolveExchangeZone(sc, az)
+	if err != nil {
+		return "", "", "", err
+	}
+	return t, sc, zone, nil
 }
 
 // FindConvertibleOffering finds a convertible RI offering ID for the given parameters.
+// Offerings AWS returns that do not match the request are skipped, not trusted.
 func (c *Client) FindConvertibleOffering(ctx context.Context, params FindConvertibleOfferingParams) (string, error) {
-	tenancy, err := parseEC2Tenancy(params.Tenancy)
+	want, err := resolveFindWant(params)
 	if err != nil {
 		return "", err
 	}
-	scope, err := parseEC2Scope(params.Scope)
+	input := convertibleOfferingInput(want.instanceType, want.productDesc, want.scope, want.tenancy, want.az, want.duration)
+	skips := offeringSkips{}
+	for page := 1; page <= maxTargetOfferingPages; page++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		pageInput := *input
+		result, err := c.client.DescribeReservedInstancesOfferings(ctx, &pageInput)
+		if err != nil {
+			return "", fmt.Errorf("failed to describe convertible offerings: %w", err)
+		}
+		if id := firstMatchingOffering(result.ReservedInstancesOfferings, want, skips); id != "" {
+			return id, nil
+		}
+		if isLastEC2Page(result.NextToken) {
+			return "", fmt.Errorf("no convertible offering found for %s (%s, %s, %s, AZ %q)%s",
+				want.instanceType, want.productDesc, want.tenancy, want.scope, want.az, skips.note())
+		}
+		input.NextToken = result.NextToken
+	}
+	return "", fmt.Errorf("no convertible offering found for %s (%s, %s, %s, AZ %q) within %d pages: pagination cap reached%s",
+		want.instanceType, want.productDesc, want.tenancy, want.scope, want.az, maxTargetOfferingPages, skips.note())
+}
+
+// resolveFindWant validates params and builds the expectation the returned
+// offerings are checked against. Nothing is defaulted: a missing field errors.
+func resolveFindWant(params FindConvertibleOfferingParams) (offeringWant, error) {
+	tenancy, scope, az, err := parseExchangeLookup(params.Tenancy, params.Scope, params.AvailabilityZone)
 	if err != nil {
-		return "", err
+		return offeringWant{}, err
 	}
-	duration := params.Duration
-	if duration == 0 {
-		duration = OneYearSeconds
+	productDesc, duration, _, err := normalizeTargetOfferingsParams(ListTargetOfferingsParams{
+		ProductDescription: params.ProductDescription,
+		Duration:           params.Duration,
+	})
+	if err != nil {
+		return offeringWant{}, err
 	}
-	productDesc := params.ProductDescription
-	if productDesc == "" {
-		productDesc = defaultEC2Platform
+	instanceType := strings.TrimSpace(params.InstanceType)
+	if instanceType == "" {
+		return offeringWant{}, errors.New("convertible offering lookup needs an instance type")
 	}
+	return offeringWant{
+		instanceType: instanceType, productDesc: productDesc, tenancy: tenancy, scope: scope,
+		duration: duration, class: types.OfferingClassTypeConvertible, az: az,
+	}, nil
+}
 
-	filters := []types.Filter{
-		{Name: aws.String("instance-type"), Values: []string{params.InstanceType}},
-		{Name: aws.String("product-description"), Values: []string{productDesc}},
-		{Name: aws.String("scope"), Values: []string{string(scope)}},
-		{Name: aws.String("duration"), Values: []string{fmt.Sprintf("%d", duration)}},
+// firstMatchingOffering returns the id of the first offering matching want,
+// counting and logging each skipped one.
+func firstMatchingOffering(offerings []types.ReservedInstancesOffering, want offeringWant, skips offeringSkips) string {
+	for i := range offerings {
+		o := offerings[i]
+		reason := offeringMismatch(o, want)
+		if reason == "" {
+			return aws.ToString(o.ReservedInstancesOfferingId)
+		}
+		skips[reason]++
+		log.Printf("FindConvertibleOffering skipping offering %s: %s mismatch",
+			aws.ToString(o.ReservedInstancesOfferingId), reason)
 	}
+	return ""
+}
 
+// convertibleOfferingInput builds the first-page request for FindConvertibleOffering.
+func convertibleOfferingInput(instanceType, productDesc string, scope types.Scope, tenancy types.Tenancy, az string, duration int64) *ec2.DescribeReservedInstancesOfferingsInput {
 	input := &ec2.DescribeReservedInstancesOfferingsInput{
-		Filters:            filters,
+		Filters: []types.Filter{
+			{Name: aws.String("instance-type"), Values: []string{instanceType}},
+			{Name: aws.String("product-description"), Values: []string{productDesc}},
+			{Name: aws.String("scope"), Values: []string{string(scope)}},
+			{Name: aws.String("duration"), Values: []string{fmt.Sprintf("%d", duration)}},
+		},
 		InstanceTenancy:    tenancy,
 		OfferingClass:      types.OfferingClassTypeConvertible,
 		IncludeMarketplace: aws.Bool(false),
 		MaxResults:         aws.Int32(20),
 	}
-
-	result, err := c.client.DescribeReservedInstancesOfferings(ctx, input)
-	if err != nil {
-		return "", fmt.Errorf("failed to describe convertible offerings: %w", err)
+	if az != "" {
+		input.AvailabilityZone = aws.String(az)
 	}
-
-	if len(result.ReservedInstancesOfferings) == 0 {
-		return "", fmt.Errorf("no convertible offering found for %s (%s, %s, %s)", params.InstanceType, productDesc, tenancy, scope)
-	}
-
-	return aws.ToString(result.ReservedInstancesOfferings[0].ReservedInstancesOfferingId), nil
+	return input
 }
 
 // TargetOffering is one valid target offering for a convertible RI exchange.
@@ -891,6 +962,7 @@ type ListTargetOfferingsParams struct {
 	ProductDescription string
 	Tenancy            string
 	Scope              string
+	AvailabilityZone   string
 	Duration           int64
 	OfferingType       string
 }
@@ -900,36 +972,36 @@ type ListTargetOfferingsParams struct {
 // enough given the small number of convertible instance types AWS offers.
 const maxTargetOfferingPages = 10
 
-// normalizeTargetOfferingsParams fills defaults for a zero Duration or
-// ProductDescription and converts the OfferingType string to the AWS SDK enum.
+// normalizeTargetOfferingsParams validates the request and converts the
+// OfferingType string to the AWS SDK enum. ProductDescription and Duration have
+// no default: guessing a platform or term would search the wrong offerings.
+// An empty OfferingType means "all payment options" and stays unset.
 // Extracted from ListTargetOfferings to keep the main function's cyclomatic
 // complexity under the project threshold of 10.
-func normalizeTargetOfferingsParams(p ListTargetOfferingsParams) (productDesc string, duration int64, offeringType types.OfferingTypeValues) {
-	duration = p.Duration
-	if duration == 0 {
-		duration = OneYearSeconds
+func normalizeTargetOfferingsParams(p ListTargetOfferingsParams) (productDesc string, duration int64, offeringType types.OfferingTypeValues, err error) {
+	if strings.TrimSpace(p.ProductDescription) == "" {
+		return "", 0, "", errors.New("product description is required for an offering lookup")
 	}
-	productDesc = p.ProductDescription
-	if productDesc == "" {
-		productDesc = defaultEC2Platform
+	if p.Duration <= 0 {
+		return "", 0, "", fmt.Errorf("duration must be a positive number of seconds, got %d", p.Duration)
 	}
-	// OfferingType: typed field when non-empty; empty string means "all
-	// payment options" (the caller didn't specify). Leave unset so AWS
-	// returns all payment variants, giving the user maximum choice.
 	if p.OfferingType != "" {
-		if ot, err := convertEC2PaymentOption(p.OfferingType); err == nil {
-			offeringType = ot
+		if offeringType, err = convertEC2PaymentOption(p.OfferingType); err != nil {
+			return "", 0, "", err
 		}
 	}
-	return
+	return p.ProductDescription, p.Duration, offeringType, nil
 }
 
 // appendTargetOfferings maps the SDK result page into TargetOffering values
-// and appends them to out. Extracted from ListTargetOfferings to keep it
-// under the gocyclo threshold.
-func appendTargetOfferings(out []TargetOffering, offerings []types.ReservedInstancesOffering, scope string) []TargetOffering {
+// and appends the ones matching want to out, counting the rest in skips.
+func appendTargetOfferings(out []TargetOffering, offerings []types.ReservedInstancesOffering, want offeringWant, skips offeringSkips) []TargetOffering {
 	for i := range offerings {
 		o := &offerings[i]
+		if reason := offeringMismatch(*o, want); reason != "" {
+			skips[reason]++
+			continue
+		}
 		id := aws.ToString(o.ReservedInstancesOfferingId)
 		if id == "" {
 			continue
@@ -948,11 +1020,49 @@ func appendTargetOfferings(out []TargetOffering, offerings []types.ReservedInsta
 			FixedPrice:          float64(aws.ToFloat32(o.FixedPrice)),
 			UsagePrice:          float64(aws.ToFloat32(o.UsagePrice)),
 			CurrencyCode:        string(o.CurrencyCode),
-			Scope:               scope,
+			Scope:               string(want.scope),
 			NormalizationFactor: exchange.NormalizationFactorForSize(size),
 		})
 	}
 	return out
+}
+
+// resolveListWant validates params and builds the expectation the returned
+// offerings are checked against. InstanceType stays unset: every instance type
+// is a candidate target.
+func resolveListWant(params ListTargetOfferingsParams) (offeringWant, error) {
+	tenancy, scope, az, err := parseExchangeLookup(params.Tenancy, params.Scope, params.AvailabilityZone)
+	if err != nil {
+		return offeringWant{}, err
+	}
+	productDesc, duration, offeringType, err := normalizeTargetOfferingsParams(params)
+	if err != nil {
+		return offeringWant{}, err
+	}
+	return offeringWant{
+		productDesc: productDesc, tenancy: tenancy, scope: scope, duration: duration,
+		class: types.OfferingClassTypeConvertible, offeringType: offeringType, az: az,
+	}, nil
+}
+
+// listOfferingsInput builds one page request for ListTargetOfferings.
+func listOfferingsInput(want offeringWant, nextToken *string) *ec2.DescribeReservedInstancesOfferingsInput {
+	input := &ec2.DescribeReservedInstancesOfferingsInput{
+		ProductDescription: types.RIProductDescription(want.productDesc),
+		InstanceTenancy:    want.tenancy,
+		MinDuration:        aws.Int64(want.duration),
+		MaxDuration:        aws.Int64(want.duration),
+		OfferingClass:      want.class,
+		OfferingType:       want.offeringType,
+		IncludeMarketplace: aws.Bool(false),
+		MaxResults:         aws.Int32(100),
+		NextToken:          nextToken,
+		Filters:            []types.Filter{{Name: aws.String("scope"), Values: []string{string(want.scope)}}},
+	}
+	if want.az != "" {
+		input.AvailabilityZone = aws.String(want.az)
+	}
+	return input
 }
 
 // ListTargetOfferings returns convertible RI offerings that are valid exchange
@@ -961,45 +1071,30 @@ func appendTargetOfferings(out []TargetOffering, offerings []types.ReservedInsta
 // typed primary fields (OfferingClass, OfferingType, Duration, ProductDescription,
 // InstanceTenancy) instead of Filters[]-heavy style to avoid the empty-page
 // pagination bug documented in issue #688. Scope has no typed field and stays
-// in Filters[] as before.
+// in Filters[] as before. Returned offerings are re-checked against the request
+// and mismatches are dropped.
 //
 // InstanceType is intentionally left unset so AWS returns all instance types
 // matching the other constraints -- that is exactly the "valid targets" set for
 // a convertible RI exchange.
 func (c *Client) ListTargetOfferings(ctx context.Context, params ListTargetOfferingsParams) ([]TargetOffering, error) {
-	tenancy, err := parseEC2Tenancy(params.Tenancy)
+	want, err := resolveListWant(params)
 	if err != nil {
 		return nil, err
 	}
-	scope, err := parseEC2Scope(params.Scope)
-	if err != nil {
-		return nil, err
-	}
-	productDesc, duration, offeringType := normalizeTargetOfferingsParams(params)
 
 	var out []TargetOffering
 	var nextToken *string
+	skips := offeringSkips{}
 	for page := 1; page <= maxTargetOfferingPages; page++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		input := &ec2.DescribeReservedInstancesOfferingsInput{
-			ProductDescription: types.RIProductDescription(productDesc),
-			InstanceTenancy:    tenancy,
-			MinDuration:        aws.Int64(duration),
-			MaxDuration:        aws.Int64(duration),
-			OfferingClass:      types.OfferingClassTypeConvertible,
-			OfferingType:       offeringType,
-			IncludeMarketplace: aws.Bool(false),
-			MaxResults:         aws.Int32(100),
-			NextToken:          nextToken,
-			Filters:            []types.Filter{{Name: aws.String("scope"), Values: []string{string(scope)}}},
-		}
-		result, err := c.client.DescribeReservedInstancesOfferings(ctx, input)
+		result, err := c.client.DescribeReservedInstancesOfferings(ctx, listOfferingsInput(want, nextToken))
 		if err != nil {
 			return nil, fmt.Errorf("describe target offerings: %w", err)
 		}
-		out = appendTargetOfferings(out, result.ReservedInstancesOfferings, string(scope))
+		out = appendTargetOfferings(out, result.ReservedInstancesOfferings, want, skips)
 		if isLastEC2Page(result.NextToken) {
 			break
 		}
@@ -1010,6 +1105,9 @@ func (c *Client) ListTargetOfferings(ctx context.Context, params ListTargetOffer
 			log.Printf("ListTargetOfferings: pagination cap (%d pages) reached, returning %d offerings",
 				maxTargetOfferingPages, len(out))
 		}
+	}
+	if n := skips.total(); n > 0 {
+		log.Printf("ListTargetOfferings: skipped %d mismatching offerings: %s", n, skips)
 	}
 	return out, nil
 }
