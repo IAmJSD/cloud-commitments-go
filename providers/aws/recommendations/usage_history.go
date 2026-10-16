@@ -3,6 +3,7 @@ package recommendations
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -122,59 +123,222 @@ func applyPeriodsToDayMap(periods []types.CoverageByTime, dayPct map[string]floa
 	return anyData
 }
 
-// tupleKey is the map key for a unique (serviceFilter, region, resourceType) triple.
-type tupleKey struct{ service, region, resourceType string }
+// regionKey identifies one (CE service filter, region) pair. Every
+// recommendation sharing a regionKey can be served by the same region-wide
+// GetReservationCoverage query grouped by INSTANCE_TYPE.
+type regionKey struct{ service, region string }
 
-// groupRecsByTuple builds an ordered unique list of tuples and an index map
-// from each tuple to the recommendation indices that share it.
-func groupRecsByTuple(recs []common.Recommendation) (order []tupleKey, recsByTuple map[tupleKey][]int) {
-	order = make([]tupleKey, 0)
-	seen := make(map[tupleKey]struct{})
-	recsByTuple = make(map[tupleKey][]int)
+// regionBucket holds the distinct resource types requested for one regionKey
+// (in first-seen order) and the recommendation indices for each type.
+type regionBucket struct {
+	key        regionKey
+	types      []string
+	recsByType map[string][]int
+}
+
+// groupRecsByRegion builds an ordered list of (service, region) buckets, each
+// listing its distinct resource types and the recommendation indices that
+// share each (service, region, resourceType) tuple.
+func groupRecsByRegion(recs []common.Recommendation) []*regionBucket {
+	buckets := make([]*regionBucket, 0)
+	byKey := make(map[regionKey]*regionBucket)
 	for i := range recs {
 		r := &recs[i]
 		sf := getServiceStringForCostExplorer(r.Service)
 		if sf == "" || r.Region == "" || r.ResourceType == "" {
 			continue
 		}
-		k := tupleKey{sf, r.Region, r.ResourceType}
-		if _, ok := seen[k]; !ok {
-			seen[k] = struct{}{}
-			order = append(order, k)
+		k := regionKey{sf, r.Region}
+		b, ok := byKey[k]
+		if !ok {
+			b = &regionBucket{key: k, recsByType: make(map[string][]int)}
+			byKey[k] = b
+			buckets = append(buckets, b)
 		}
-		recsByTuple[k] = append(recsByTuple[k], i)
+		if _, seen := b.recsByType[r.ResourceType]; !seen {
+			b.types = append(b.types, r.ResourceType)
+		}
+		b.recsByType[r.ResourceType] = append(b.recsByType[r.ResourceType], i)
 	}
-	return order, recsByTuple
+	return buckets
 }
 
 // AttachDailyUsageHistory enriches each recommendation in recs with a
-// UsageHistory slice sourced from GetDailyUsagePcts. It batches by unique
-// (serviceFilter, region, resourceType) so a 20-rec list for the same SKU
-// fires only one CE call. Errors from individual tuples are logged and
-// skipped so a single CE failure doesn't drop the whole collection.
+// UsageHistory slice of daily RI-coverage percentages. Recs are batched by
+// (serviceFilter, region) so the number of Cost Explorer requests scales with
+// regions, not with distinct SKUs:
+//
+//   - A bucket with at most usageHistoryLookbackDays distinct resource types
+//     issues one DAILY query per type (GetDailyUsagePcts).
+//   - A larger bucket issues one region-wide query per day grouped by
+//     INSTANCE_TYPE (getDailyUsagePctsByType) and fans the per-type series
+//     out to every rec. CE rejects DAILY granularity combined with GroupBy,
+//     so a single grouped request cannot return a daily series; one grouped
+//     request per day is the smallest batch CE can express.
+//
+// Either way a bucket costs at most min(types, usageHistoryLookbackDays)
+// requests (plus extra pages). Errors are logged and skipped so a single CE
+// failure doesn't drop the whole collection; a failed fetch leaves
+// UsageHistory nil rather than reporting zero coverage.
 //
 // SavingsPlans have no per-instance-type coverage breakdown in CE, so recs
 // whose Service resolves to the empty coverage-filter string are silently
 // skipped.
 func (c *Client) AttachDailyUsageHistory(ctx context.Context, recs []common.Recommendation) {
-	order, recsByTuple := groupRecsByTuple(recs)
-	for _, k := range order {
+	for _, b := range groupRecsByRegion(recs) {
 		if ctx.Err() != nil {
 			return
 		}
-		pcts, err := c.GetDailyUsagePcts(ctx, k.service, k.resourceType, k.region)
+		if len(b.types) > usageHistoryLookbackDays {
+			c.attachBucketGrouped(ctx, recs, b)
+			continue
+		}
+		c.attachBucketPerType(ctx, recs, b)
+	}
+}
+
+// attachBucketPerType fetches one DAILY coverage series per resource type.
+func (c *Client) attachBucketPerType(ctx context.Context, recs []common.Recommendation, b *regionBucket) {
+	for _, rt := range b.types {
+		if ctx.Err() != nil {
+			return
+		}
+		pcts, err := c.GetDailyUsagePcts(ctx, b.key.service, rt, b.key.region)
 		if err != nil {
-			logging.Warnf("usage_history: failed to fetch daily coverage for %s/%s/%s: %v", k.service, k.resourceType, k.region, err)
+			logging.Warnf("usage_history: failed to fetch daily coverage for %s/%s/%s: %v", b.key.service, rt, b.key.region, err)
 			continue
 		}
 		// pcts==nil means no CE data for this tuple; leave UsageHistory nil.
 		if pcts == nil {
 			continue
 		}
-		for _, idx := range recsByTuple[k] {
+		for _, idx := range b.recsByType[rt] {
 			recs[idx].UsageHistory = pcts
 		}
 	}
+}
+
+// attachBucketGrouped fetches the whole bucket with per-day grouped queries.
+// Any failure leaves every rec in the bucket without UsageHistory, since a
+// partial window would otherwise show the failed days as 0% coverage.
+func (c *Client) attachBucketGrouped(ctx context.Context, recs []common.Recommendation, b *regionBucket) {
+	series, err := c.getDailyUsagePctsByType(ctx, b.key.service, b.key.region, b.types)
+	if err != nil {
+		logging.Warnf("usage_history: failed to fetch daily coverage for %s/%s (%d instance types): %v", b.key.service, b.key.region, len(b.types), err)
+		return
+	}
+	for _, rt := range b.types {
+		pcts := series[rt]
+		if pcts == nil {
+			continue
+		}
+		for _, idx := range b.recsByType[rt] {
+			recs[idx].UsageHistory = pcts
+		}
+	}
+}
+
+// getDailyUsagePctsByType returns, for each of resourceTypes, the same
+// series GetDailyUsagePcts would return for that type: usageHistoryLookbackDays
+// points ordered oldest-to-newest, with 0 for days CE omits, and no entry
+// (nil) for a type CE has no data for at all. It issues one region-wide
+// GetReservationCoverage request per day (plus pages) grouped by
+// INSTANCE_TYPE, because CE does not accept DAILY granularity with GroupBy.
+func (c *Client) getDailyUsagePctsByType(ctx context.Context, serviceFilter, region string, resourceTypes []string) (map[string][]float64, error) {
+	if serviceFilter == "" || region == "" || len(resourceTypes) == 0 {
+		return nil, nil
+	}
+	end := time.Now().UTC()
+	start := end.AddDate(0, 0, -usageHistoryLookbackDays)
+
+	// CE reports instanceType attributes lower-cased by extractGroupAttributes;
+	// index the requested types the same way.
+	acc := groupedDayAccumulator{dayPct: make(map[string]map[string]float64), byLower: make(map[string][]string), withData: make(map[string]bool)}
+	for _, rt := range resourceTypes {
+		acc.dayPct[rt], _ = newDayWindow(start)
+		lower := strings.ToLower(rt)
+		acc.byLower[lower] = append(acc.byLower[lower], rt)
+	}
+	for i := 0; i < usageHistoryLookbackDays; i++ {
+		if err := c.fetchGroupedDayCoverage(ctx, serviceFilter, region, start.AddDate(0, 0, i), &acc); err != nil {
+			return nil, err
+		}
+	}
+	out := make(map[string][]float64, len(acc.withData))
+	for rt := range acc.withData {
+		out[rt] = orderedDaySlice(start, acc.dayPct[rt])
+	}
+	return out, nil
+}
+
+// groupedDayAccumulator collects per-type daily percentages from grouped
+// coverage responses.
+type groupedDayAccumulator struct {
+	dayPct   map[string]map[string]float64 // resourceType -> day -> pct
+	byLower  map[string][]string           // lower-cased type -> requested types
+	withData map[string]bool               // types with at least one data point
+}
+
+// fetchGroupedDayCoverage pages through one region-wide, single-day
+// GetReservationCoverage request grouped by INSTANCE_TYPE.
+func (c *Client) fetchGroupedDayCoverage(ctx context.Context, serviceFilter, region string, day time.Time, acc *groupedDayAccumulator) error {
+	input := &costexplorer.GetReservationCoverageInput{
+		TimePeriod: &types.DateInterval{
+			Start: aws.String(day.Format("2006-01-02")),
+			End:   aws.String(day.AddDate(0, 0, 1).Format("2006-01-02")),
+		},
+		GroupBy: []types.GroupDefinition{
+			{Type: types.GroupDefinitionTypeDimension, Key: aws.String(string(types.DimensionInstanceType))},
+		},
+		Filter:  serviceRegionFilter(serviceFilter, region),
+		Metrics: []string{"Hour"},
+	}
+	var token *string
+	for {
+		input.NextPageToken = token
+		result, err := c.fetchCoveragePage(ctx, input)
+		if err != nil {
+			return fmt.Errorf("failed to get daily coverage for %s/%s on %s: %w", serviceFilter, region, day.Format("2006-01-02"), err)
+		}
+		acc.addPeriods(result.CoveragesByTime)
+		if result.NextPageToken == nil || *result.NextPageToken == "" {
+			return nil
+		}
+		token = result.NextPageToken
+	}
+}
+
+// addPeriods applies each group's coverage percentage to the requested
+// types it matches, skipping periods without a start date and groups without
+// a CoverageHoursPercentage, exactly as applyPeriodsToDayMap does for Totals.
+func (a *groupedDayAccumulator) addPeriods(periods []types.CoverageByTime) {
+	for _, period := range periods {
+		if period.TimePeriod == nil || period.TimePeriod.Start == nil {
+			continue
+		}
+		day := aws.ToString(period.TimePeriod.Start)
+		for _, group := range period.Groups {
+			pct, ok := groupCoveragePct(group)
+			if !ok {
+				continue
+			}
+			instType, _ := extractGroupAttributes(group.Attributes)
+			for _, rt := range a.byLower[instType] {
+				a.dayPct[rt][day] = pct
+				a.withData[rt] = true
+			}
+		}
+	}
+}
+
+// groupCoveragePct returns the group's parsed CoverageHoursPercentage, or
+// false when CE omitted it.
+func groupCoveragePct(group types.ReservationCoverageGroup) (float64, bool) {
+	if group.Coverage == nil || group.Coverage.CoverageHours == nil ||
+		group.Coverage.CoverageHours.CoverageHoursPercentage == nil {
+		return 0, false
+	}
+	return parseFloat(aws.ToString(group.Coverage.CoverageHours.CoverageHoursPercentage)), true
 }
 
 func dailyUsageFilter(serviceFilter, resourceType, region string) *types.Expression {
