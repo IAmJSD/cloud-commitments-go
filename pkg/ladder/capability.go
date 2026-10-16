@@ -64,8 +64,11 @@ type LadderCapability interface {
 	// it up, and MUST refuse (not submit) an amount outside the provider's
 	// accepted range, including one that floors to zero. Callers converting
 	// a *big.Rat amount to float64 must not round it up either.
-	//   - AWS Savings Plans: truncated to 5 decimal places; amounts outside
-	//     [0.001, 1000000] USD/hr are refused before any API call.
+	//   - AWS Savings Plans: the raw amount is range-checked first (outside
+	//     [0.001, 1000000] USD/hr, NaN, Inf or <= 0 is refused before any
+	//     API call), then truncated to 5 decimal places.
+	//   - AWS convertible RIs: purchased as a whole instance count
+	//     (rec.Count > 0), so there is no dollar amount to floor.
 	//   - Azure, GCP: no LadderCapability implementation yet; each must
 	//     document and enforce its precision here when one is added.
 	PurchaseLayer(ctx context.Context, layer LayerType, rec common.Recommendation, opts common.PurchaseOptions) (common.PurchaseResult, error)
