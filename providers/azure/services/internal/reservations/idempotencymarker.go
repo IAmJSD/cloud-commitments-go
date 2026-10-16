@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
+	"unicode/utf8"
 )
 
 // The Reservations API does not define tags on a reservation order: neither
@@ -52,7 +53,7 @@ func withIdempotencyMarker(displayName, token string) string {
 	for len(name) > room {
 		cut := strings.LastIndexByte(name, '-')
 		if cut <= 0 {
-			name = name[:room]
+			name = truncateToRuneBoundary(name, room)
 			break
 		}
 		name = strings.TrimRight(name[:cut], "-")
@@ -61,6 +62,19 @@ func withIdempotencyMarker(displayName, token string) string {
 		return marker
 	}
 	return name + "-" + marker
+}
+
+// truncateToRuneBoundary returns the longest prefix of s that is at most
+// maxBytes long and does not split a multibyte UTF-8 rune.
+func truncateToRuneBoundary(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // applyIdempotencyDisplayName rewrites body.properties.displayName to carry

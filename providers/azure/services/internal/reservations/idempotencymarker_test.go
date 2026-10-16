@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -149,4 +150,31 @@ func TestApplyPurchaseTags_DisplayNameMarker(t *testing.T) {
 func TestApplyPurchaseTags_NoTokenLeavesDisplayNameAlone(t *testing.T) {
 	name := vmDisplayName(time.Now(), []byte{1, 2, 3, 4})
 	assert.Equal(t, name, buildTaggedDisplayName(t, name, ""))
+}
+
+// TestWithIdempotencyMarker_TruncatesAtRuneBoundary covers a long display
+// name with no '-' whose hard truncation point falls inside a multibyte
+// rune: the cut must back off to the rune start so the name stays valid
+// UTF-8 (JSON encoding would otherwise widen it past the byte limit).
+func TestWithIdempotencyMarker_TruncatesAtRuneBoundary(t *testing.T) {
+	const token = "tok-290"
+	marker := idempotencyDisplayNameMarker(token)
+	room := azureDisplayNameMaxLen - len(marker) - 1
+
+	// 'é' is two bytes; placing it at room-1 puts the cut between its bytes.
+	name := strings.Repeat("x", room-1) + "é" + strings.Repeat("y", 10)
+	got := withIdempotencyMarker(name, token)
+
+	assert.True(t, utf8.ValidString(got), "result must be valid UTF-8: %q", got)
+	assert.LessOrEqual(t, len(got), azureDisplayNameMaxLen)
+	assert.Equal(t, strings.Repeat("x", room-1)+"-"+marker, got)
+	assert.True(t, displayNameCarriesToken(got, token))
+}
+
+func TestTruncateToRuneBoundary(t *testing.T) {
+	assert.Equal(t, "abc", truncateToRuneBoundary("abc", 5))
+	assert.Equal(t, "ab", truncateToRuneBoundary("abc", 2))
+	assert.Equal(t, "a", truncateToRuneBoundary("aé", 2))
+	assert.Equal(t, "aé", truncateToRuneBoundary("aéb", 3))
+	assert.Equal(t, "", truncateToRuneBoundary("€", 2))
 }
