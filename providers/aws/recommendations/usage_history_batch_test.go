@@ -30,6 +30,7 @@ type coverageFixture struct {
 	pageSize int                                      // grouped groups per page; 0 = single page
 	data     map[string]map[string]map[string]*string // region -> type -> day -> pct
 	failDay  string                                   // grouped request for this day returns an error
+	stuckTok string                                   // when set, every grouped page returns this NextPageToken
 
 	mu      sync.Mutex
 	calls   map[string]int // region -> requests
@@ -110,6 +111,9 @@ func (f *coverageFixture) groupedResponse(w http.ResponseWriter, input *costexpl
 	if f.pageSize > 0 && offset+f.pageSize < end {
 		end = offset + f.pageSize
 		next = aws.String(fmt.Sprintf("page-%d", end))
+	}
+	if f.stuckTok != "" {
+		next = aws.String(f.stuckTok)
 	}
 	period := types.CoverageByTime{TimePeriod: &types.DateInterval{Start: aws.String(day)}, Groups: groups[offset:end]}
 	return map[string]any{"CoveragesByTime": []types.CoverageByTime{period}, "NextPageToken": next}
@@ -319,4 +323,20 @@ func TestAttachDailyUsageHistory_GroupedErrorLeavesBucketNil(t *testing.T) {
 	_, err := newFixtureClient(t, f).getDailyUsagePctsByType(context.Background(), ec2CoverageService, "us-east-1", bigNames)
 	require.Error(t, err)
 	assert.True(t, strings.Contains(err.Error(), "DataUnavailableException"), err.Error())
+}
+
+func TestFetchGroupedDayCoverage_RepeatedPageTokenFails(t *testing.T) {
+	t.Parallel()
+	data, _ := manyTypeFixture(9)
+	f := &coverageFixture{t: t, data: map[string]map[string]map[string]*string{"us-east-1": data}, stuckTok: "page-0"}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	day, err := time.Parse("2006-01-02", usageWindowDays()[0])
+	require.NoError(t, err)
+
+	err = newFixtureClient(t, f).fetchGroupedDayCoverage(ctx, ec2CoverageService, "us-east-1", day, &groupedDayAccumulator{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "repeated page token")
+	_, grouped := f.counts("us-east-1")
+	assert.Equal(t, 2, grouped, "stops at the first repeated token")
 }

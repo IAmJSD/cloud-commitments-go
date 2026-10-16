@@ -304,6 +304,11 @@ func (c *Client) fetchGroupedDayCoverage(ctx context.Context, serviceFilter, reg
 		if result.NextPageToken == nil || *result.NextPageToken == "" {
 			return nil
 		}
+		// A token that doesn't advance would repeat the same rate-limited
+		// request until ctx is canceled.
+		if token != nil && *token == *result.NextPageToken {
+			return fmt.Errorf("failed to get daily coverage for %s/%s on %s: repeated page token", serviceFilter, region, day.Format("2006-01-02"))
+		}
 		token = result.NextPageToken
 	}
 }
