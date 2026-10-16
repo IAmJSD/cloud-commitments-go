@@ -58,6 +58,16 @@ type LadderCapability interface {
 	// the float64 cost fields of common.Recommendation. This is a documented
 	// precision seam; exact-decimal plumbing through the purchase path is
 	// addressed in a later PR.
+	//
+	// Provider commitment precision (go#354): implementations MUST floor the
+	// commitment to the provider's precision before submission, never round
+	// it up, and MUST refuse (not submit) an amount outside the provider's
+	// accepted range, including one that floors to zero. Callers converting
+	// a *big.Rat amount to float64 must not round it up either.
+	//   - AWS Savings Plans: truncated to 5 decimal places; amounts outside
+	//     [0.001, 1000000] USD/hr are refused before any API call.
+	//   - Azure, GCP: no LadderCapability implementation yet; each must
+	//     document and enforce its precision here when one is added.
 	PurchaseLayer(ctx context.Context, layer LayerType, rec common.Recommendation, opts common.PurchaseOptions) (common.PurchaseResult, error)
 
 	// ReshapeBuffer exchanges or modifies buffer-layer commitments to improve
