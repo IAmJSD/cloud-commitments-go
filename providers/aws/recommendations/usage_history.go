@@ -292,24 +292,20 @@ func (c *Client) fetchGroupedDayCoverage(ctx context.Context, serviceFilter, reg
 		Filter:  serviceRegionFilter(serviceFilter, region),
 		Metrics: []string{"Hour"},
 	}
-	var token *string
-	for {
+	return paginateCE(ctx, maxCoveragePages, "grouped daily coverage", func(token *string) (*string, error) {
 		input.NextPageToken = token
 		result, err := c.fetchCoveragePage(ctx, input)
 		if err != nil {
-			return fmt.Errorf("failed to get daily coverage for %s/%s on %s: %w", serviceFilter, region, day.Format("2006-01-02"), err)
+			return nil, fmt.Errorf("failed to get daily coverage for %s/%s on %s: %w", serviceFilter, region, day.Format("2006-01-02"), err)
 		}
 		acc.addPeriods(result.CoveragesByTime)
-		if result.NextPageToken == nil || *result.NextPageToken == "" {
-			return nil
+		// Fail fast on a token that doesn't advance; paginateCE's cap catches
+		// longer cycles and endless fresh tokens.
+		if next := aws.ToString(result.NextPageToken); next != "" && next == aws.ToString(token) {
+			return nil, fmt.Errorf("failed to get daily coverage for %s/%s on %s: repeated page token", serviceFilter, region, day.Format("2006-01-02"))
 		}
-		// A token that doesn't advance would repeat the same rate-limited
-		// request until ctx is canceled.
-		if token != nil && *token == *result.NextPageToken {
-			return fmt.Errorf("failed to get daily coverage for %s/%s on %s: repeated page token", serviceFilter, region, day.Format("2006-01-02"))
-		}
-		token = result.NextPageToken
-	}
+		return result.NextPageToken, nil
+	})
 }
 
 // addPeriods applies each group's coverage percentage to the requested

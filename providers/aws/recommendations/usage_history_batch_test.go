@@ -30,7 +30,7 @@ type coverageFixture struct {
 	pageSize int                                      // grouped groups per page; 0 = single page
 	data     map[string]map[string]map[string]*string // region -> type -> day -> pct
 	failDay  string                                   // grouped request for this day returns an error
-	stuckTok string                                   // when set, every grouped page returns this NextPageToken
+	nextTok  func(sent string) string                 // when set, grouped pages carry no groups and this NextPageToken
 
 	mu      sync.Mutex
 	calls   map[string]int // region -> requests
@@ -100,6 +100,10 @@ func (f *coverageFixture) groupedResponse(w http.ResponseWriter, input *costexpl
 		_, _ = w.Write([]byte(`{"__type":"DataUnavailableException","message":"no coverage available"}`))
 		return nil
 	}
+	if f.nextTok != nil {
+		period := types.CoverageByTime{TimePeriod: &types.DateInterval{Start: aws.String(day)}}
+		return map[string]any{"CoveragesByTime": []types.CoverageByTime{period}, "NextPageToken": f.nextTok(aws.ToString(input.NextPageToken))}
+	}
 	groups := f.dayGroups(region, day)
 	offset := 0
 	if tok := aws.ToString(input.NextPageToken); tok != "" {
@@ -111,9 +115,6 @@ func (f *coverageFixture) groupedResponse(w http.ResponseWriter, input *costexpl
 	if f.pageSize > 0 && offset+f.pageSize < end {
 		end = offset + f.pageSize
 		next = aws.String(fmt.Sprintf("page-%d", end))
-	}
-	if f.stuckTok != "" {
-		next = aws.String(f.stuckTok)
 	}
 	period := types.CoverageByTime{TimePeriod: &types.DateInterval{Start: aws.String(day)}, Groups: groups[offset:end]}
 	return map[string]any{"CoveragesByTime": []types.CoverageByTime{period}, "NextPageToken": next}
@@ -325,18 +326,68 @@ func TestAttachDailyUsageHistory_GroupedErrorLeavesBucketNil(t *testing.T) {
 	assert.True(t, strings.Contains(err.Error(), "DataUnavailableException"), err.Error())
 }
 
-func TestFetchGroupedDayCoverage_RepeatedPageTokenFails(t *testing.T) {
-	t.Parallel()
+// fetchOneGroupedDay runs one grouped day against tokens served by nextTok
+// and returns the grouped request count and the error.
+func fetchOneGroupedDay(t *testing.T, nextTok func(string) string) (int, error) {
+	t.Helper()
 	data, _ := manyTypeFixture(9)
-	f := &coverageFixture{t: t, data: map[string]map[string]map[string]*string{"us-east-1": data}, stuckTok: "page-0"}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	f := &coverageFixture{t: t, data: map[string]map[string]map[string]*string{"us-east-1": data}, nextTok: nextTok}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	day, err := time.Parse("2006-01-02", usageWindowDays()[0])
 	require.NoError(t, err)
-
 	err = newFixtureClient(t, f).fetchGroupedDayCoverage(ctx, ec2CoverageService, "us-east-1", day, &groupedDayAccumulator{})
+	_, grouped := f.counts("us-east-1")
+	return grouped, err
+}
+
+func TestFetchGroupedDayCoverage_RepeatedPageTokenFails(t *testing.T) {
+	t.Parallel()
+	grouped, err := fetchOneGroupedDay(t, func(string) string { return "same" })
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "repeated page token")
-	_, grouped := f.counts("us-east-1")
 	assert.Equal(t, 2, grouped, "stops at the first repeated token")
+}
+
+func TestFetchGroupedDayCoverage_EndlessFreshTokensHitCap(t *testing.T) {
+	t.Parallel()
+	grouped, err := fetchOneGroupedDay(t, func(sent string) string {
+		n := 0
+		if sent != "" {
+			_, err := fmt.Sscanf(sent, "page-%d", &n)
+			require.NoError(t, err)
+		}
+		return fmt.Sprintf("page-%d", n+1)
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), fmt.Sprintf("pagination cap reached after %d pages", maxCoveragePages))
+	assert.Equal(t, maxCoveragePages, grouped, "requests stop at the cap")
+}
+
+func TestFetchGroupedDayCoverage_TokenCycleHitsCap(t *testing.T) {
+	t.Parallel()
+	grouped, err := fetchOneGroupedDay(t, func(sent string) string {
+		if sent == "A" {
+			return "B"
+		}
+		return "A"
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pagination cap reached")
+	assert.Equal(t, maxCoveragePages, grouped, "an A, B, A, B cycle stops at the cap")
+}
+
+func TestAttachDailyUsageHistory_EndlessGroupedTokensLeaveBucketNil(t *testing.T) {
+	t.Parallel()
+	data, names := manyTypeFixture(9)
+	f := &coverageFixture{t: t, data: map[string]map[string]map[string]*string{"us-east-1": data}, nextTok: func(sent string) string { return sent + "x" }}
+	recs := recsFor("us-east-1", names)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	newFixtureClient(t, f).AttachDailyUsageHistory(ctx, recs)
+	for _, r := range recs {
+		assert.Nil(t, r.UsageHistory, "%s: a capped fetch must not be reported as coverage", r.ResourceType)
+	}
+	_, grouped := f.counts("us-east-1")
+	assert.Equal(t, maxCoveragePages, grouped, "fetch stops at the cap on the first day")
 }
