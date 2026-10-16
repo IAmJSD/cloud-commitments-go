@@ -3,6 +3,7 @@ package ec2
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -422,20 +423,9 @@ func buildEC2OfferingQuery(rec common.Recommendation, details *common.ComputeDet
 	if err != nil {
 		return ec2OfferingQuery{}, fmt.Errorf("EC2 recommendation for %s: %w", rec.ResourceType, err)
 	}
-	az := strings.TrimSpace(details.AvailabilityZone)
-	if scope == types.ScopeAvailabilityZone && az == "" {
-		return ec2OfferingQuery{}, fmt.Errorf(
-			"EC2 recommendation for %s has zonal scope but no AvailabilityZone: "+
-				"refusing to buy a zonal RI in an arbitrary AZ; re-fetch the recommendation",
-			rec.ResourceType,
-		)
-	}
-	if scope == types.ScopeRegional && az != "" {
-		return ec2OfferingQuery{}, fmt.Errorf(
-			"EC2 recommendation for %s has regional scope but AvailabilityZone %q: "+
-				"contradictory input; re-fetch the recommendation",
-			rec.ResourceType, az,
-		)
+	az, err := resolveExchangeZone(scope, details.AvailabilityZone)
+	if err != nil {
+		return ec2OfferingQuery{}, fmt.Errorf("EC2 recommendation for %s: %w", rec.ResourceType, err)
 	}
 	return ec2OfferingQuery{
 		instanceType:     types.InstanceType(rec.ResourceType),
@@ -445,6 +435,27 @@ func buildEC2OfferingQuery(rec common.Recommendation, details *common.ComputeDet
 		availabilityZone: az,
 		duration:         duration,
 	}, nil
+}
+
+// resolveExchangeZone returns the trimmed AZ to send for scope ("" for
+// regional). A zonal lookup without an AZ and a regional lookup with one are
+// both refused rather than guessed.
+func resolveExchangeZone(scope types.Scope, az string) (string, error) {
+	az = strings.TrimSpace(az)
+	if scope == types.ScopeAvailabilityZone && az == "" {
+		return "", errors.New("zonal RI offering needs an availability zone; re-fetch the recommendation")
+	}
+	if scope == types.ScopeRegional && az != "" {
+		return "", fmt.Errorf("regional RI offering must not name an availability zone (contradictory input); "+
+			"re-fetch the recommendation: got %q", az)
+	}
+	return az, nil
+}
+
+// offeringInZone reports whether o is in az; az == "" (regional) matches any
+// offering. A nil offering AZ never matches a named AZ.
+func offeringInZone(o types.ReservedInstancesOffering, az string) bool {
+	return az == "" || aws.ToString(o.AvailabilityZone) == az
 }
 
 // describeInputFromQuery builds the SDK request struct for one page of the
@@ -587,7 +598,7 @@ func scanEC2OfferingPage(offerings []types.ReservedInstancesOffering, q ec2Offer
 	wantType := q.wantOfferingType
 	for i := range offerings {
 		o := &offerings[i]
-		if q.availabilityZone != "" && aws.ToString(o.AvailabilityZone) != q.availabilityZone {
+		if !offeringInZone(*o, q.availabilityZone) {
 			log.Printf("EC2 findOffering skipping offering %s in AZ %q (want %q)",
 				aws.ToString(o.ReservedInstancesOfferingId), aws.ToString(o.AvailabilityZone), q.availabilityZone)
 			continue
@@ -822,7 +833,10 @@ type FindConvertibleOfferingParams struct {
 	ProductDescription string
 	Tenancy            string
 	Scope              string
-	Duration           int64
+	// AvailabilityZone is the source RI's AZ name: required for zonal scope and
+	// refused for regional scope.
+	AvailabilityZone string
+	Duration         int64
 }
 
 // FindConvertibleOffering finds a convertible RI offering ID for the given parameters.
@@ -835,40 +849,71 @@ func (c *Client) FindConvertibleOffering(ctx context.Context, params FindConvert
 	if err != nil {
 		return "", err
 	}
-	duration := params.Duration
-	if duration == 0 {
-		duration = OneYearSeconds
+	// Keeping the target in the source RI's AZ is policy from #310/#289 (no
+	// silent AZ drift), not an AWS requirement of exchanges.
+	az, err := resolveExchangeZone(scope, params.AvailabilityZone)
+	if err != nil {
+		return "", err
 	}
-	productDesc := params.ProductDescription
-	if productDesc == "" {
-		productDesc = defaultEC2Platform
+	productDesc, duration, _ := normalizeTargetOfferingsParams(ListTargetOfferingsParams{
+		ProductDescription: params.ProductDescription,
+		Duration:           params.Duration,
+	})
+	input := convertibleOfferingInput(params.InstanceType, productDesc, scope, tenancy, az, duration)
+	for page := 1; page <= maxTargetOfferingPages; page++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		pageInput := *input
+		result, err := c.client.DescribeReservedInstancesOfferings(ctx, &pageInput)
+		if err != nil {
+			return "", fmt.Errorf("failed to describe convertible offerings: %w", err)
+		}
+		if id := firstOfferingInZone(result.ReservedInstancesOfferings, az); id != "" {
+			return id, nil
+		}
+		if isLastEC2Page(result.NextToken) {
+			return "", fmt.Errorf("no convertible offering found for %s (%s, %s, %s, AZ %q)",
+				params.InstanceType, productDesc, tenancy, scope, az)
+		}
+		input.NextToken = result.NextToken
 	}
+	return "", fmt.Errorf("no convertible offering found for %s (%s, %s, %s, AZ %q) within %d pages: pagination cap reached",
+		params.InstanceType, productDesc, tenancy, scope, az, maxTargetOfferingPages)
+}
 
-	filters := []types.Filter{
-		{Name: aws.String("instance-type"), Values: []string{params.InstanceType}},
-		{Name: aws.String("product-description"), Values: []string{productDesc}},
-		{Name: aws.String("scope"), Values: []string{string(scope)}},
-		{Name: aws.String("duration"), Values: []string{fmt.Sprintf("%d", duration)}},
-	}
-
+// convertibleOfferingInput builds the first-page request for FindConvertibleOffering.
+func convertibleOfferingInput(instanceType, productDesc string, scope types.Scope, tenancy types.Tenancy, az string, duration int64) *ec2.DescribeReservedInstancesOfferingsInput {
 	input := &ec2.DescribeReservedInstancesOfferingsInput{
-		Filters:            filters,
+		Filters: []types.Filter{
+			{Name: aws.String("instance-type"), Values: []string{instanceType}},
+			{Name: aws.String("product-description"), Values: []string{productDesc}},
+			{Name: aws.String("scope"), Values: []string{string(scope)}},
+			{Name: aws.String("duration"), Values: []string{fmt.Sprintf("%d", duration)}},
+		},
 		InstanceTenancy:    tenancy,
 		OfferingClass:      types.OfferingClassTypeConvertible,
 		IncludeMarketplace: aws.Bool(false),
 		MaxResults:         aws.Int32(20),
 	}
-
-	result, err := c.client.DescribeReservedInstancesOfferings(ctx, input)
-	if err != nil {
-		return "", fmt.Errorf("failed to describe convertible offerings: %w", err)
+	if az != "" {
+		input.AvailabilityZone = aws.String(az)
 	}
+	return input
+}
 
-	if len(result.ReservedInstancesOfferings) == 0 {
-		return "", fmt.Errorf("no convertible offering found for %s (%s, %s, %s)", params.InstanceType, productDesc, tenancy, scope)
+// firstOfferingInZone returns the ID of the first offering in az, or "" when
+// none matches.
+func firstOfferingInZone(offerings []types.ReservedInstancesOffering, az string) string {
+	for i := range offerings {
+		o := offerings[i]
+		if offeringInZone(o, az) {
+			return aws.ToString(o.ReservedInstancesOfferingId)
+		}
+		log.Printf("FindConvertibleOffering skipping offering %s in AZ %q (want %q)",
+			aws.ToString(o.ReservedInstancesOfferingId), aws.ToString(o.AvailabilityZone), az)
 	}
-
-	return aws.ToString(result.ReservedInstancesOfferings[0].ReservedInstancesOfferingId), nil
+	return ""
 }
 
 // TargetOffering is one valid target offering for a convertible RI exchange.
@@ -891,6 +936,7 @@ type ListTargetOfferingsParams struct {
 	ProductDescription string
 	Tenancy            string
 	Scope              string
+	AvailabilityZone   string
 	Duration           int64
 	OfferingType       string
 }
@@ -927,9 +973,12 @@ func normalizeTargetOfferingsParams(p ListTargetOfferingsParams) (productDesc st
 // appendTargetOfferings maps the SDK result page into TargetOffering values
 // and appends them to out. Extracted from ListTargetOfferings to keep it
 // under the gocyclo threshold.
-func appendTargetOfferings(out []TargetOffering, offerings []types.ReservedInstancesOffering, scope string) []TargetOffering {
+func appendTargetOfferings(out []TargetOffering, offerings []types.ReservedInstancesOffering, scope, az string) []TargetOffering {
 	for i := range offerings {
 		o := &offerings[i]
+		if !offeringInZone(*o, az) {
+			continue
+		}
 		id := aws.ToString(o.ReservedInstancesOfferingId)
 		if id == "" {
 			continue
@@ -975,6 +1024,10 @@ func (c *Client) ListTargetOfferings(ctx context.Context, params ListTargetOffer
 	if err != nil {
 		return nil, err
 	}
+	az, err := resolveExchangeZone(scope, params.AvailabilityZone)
+	if err != nil {
+		return nil, err
+	}
 	productDesc, duration, offeringType := normalizeTargetOfferingsParams(params)
 
 	var out []TargetOffering
@@ -995,11 +1048,14 @@ func (c *Client) ListTargetOfferings(ctx context.Context, params ListTargetOffer
 			NextToken:          nextToken,
 			Filters:            []types.Filter{{Name: aws.String("scope"), Values: []string{string(scope)}}},
 		}
+		if az != "" {
+			input.AvailabilityZone = aws.String(az)
+		}
 		result, err := c.client.DescribeReservedInstancesOfferings(ctx, input)
 		if err != nil {
 			return nil, fmt.Errorf("describe target offerings: %w", err)
 		}
-		out = appendTargetOfferings(out, result.ReservedInstancesOfferings, string(scope))
+		out = appendTargetOfferings(out, result.ReservedInstancesOfferings, string(scope), az)
 		if isLastEC2Page(result.NextToken) {
 			break
 		}
