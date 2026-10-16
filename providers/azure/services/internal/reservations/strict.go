@@ -31,13 +31,22 @@ func StrictCommitment(r *armreservations.ReservationResponse, subscriptionID str
 	if commitment == nil {
 		return nil, nil
 	}
-	if err := validateReservationScope(r.Properties, commitment.CommitmentID, subscriptionID, labels, now); err != nil {
+	// The expiry-today check runs on every row: a Succeeded reservation
+	// expiring today converts to Expired but may still be live.
+	if err := validateExpiryLifecycle(r.Properties, commitment.CommitmentID, subscriptionID, labels, now); err != nil {
 		return nil, err
 	}
-	if !isTerminalCommitmentState(commitment.State) {
-		if err := validateLiveReservationFields(r, commitment.CommitmentID, subscriptionID, labels); err != nil {
-			return nil, err
-		}
+	// A terminal reservation no longer counts as coverage, so its applied
+	// scope and field completeness cannot affect the duplicate guard; failing
+	// on it would block purchases for the subscription indefinitely (#315).
+	if isTerminalCommitmentState(commitment.State) {
+		return commitment, nil
+	}
+	if err := validateAppliedScope(r.Properties, commitment.CommitmentID, subscriptionID, labels); err != nil {
+		return nil, err
+	}
+	if err := validateLiveReservationFields(r, commitment.CommitmentID, subscriptionID, labels); err != nil {
+		return nil, err
 	}
 	return commitment, nil
 }
@@ -87,13 +96,21 @@ func validateLiveReservationFields(r *armreservations.ReservationResponse, reser
 	return nil
 }
 
-func validateReservationScope(props *armreservations.Properties, reservationID, subscriptionID string, labels StrictLabels, now time.Time) error {
+// validateAppliedScope rejects a live reservation that cannot be attributed
+// to this subscription alone (Shared, missing or unknown applied scope type).
+func validateAppliedScope(props *armreservations.Properties, reservationID, subscriptionID string, labels StrictLabels) error {
 	if props.AppliedScopeType == nil {
 		return fmt.Errorf("%s: cannot attribute %s reservation %q to subscription %q: missing applied scope type", labels.Service, labels.Resource, reservationID, subscriptionID)
 	}
 	if *props.AppliedScopeType != armreservations.AppliedScopeTypeSingle {
 		return fmt.Errorf("%s: cannot attribute %s reservation %q to subscription %q: applied scope type %q is not Single", labels.Service, labels.Resource, reservationID, subscriptionID, *props.AppliedScopeType)
 	}
+	return nil
+}
+
+// validateExpiryLifecycle rejects a Succeeded reservation whose date-only
+// expiryDate is the current UTC date: it may or may not still be live.
+func validateExpiryLifecycle(props *armreservations.Properties, reservationID, subscriptionID string, labels StrictLabels, now time.Time) error {
 	if props.ProvisioningState != nil && *props.ProvisioningState == armreservations.ProvisioningStateSucceeded &&
 		props.ExpiryDate != nil && props.ExpiryDate.UTC().Format(time.DateOnly) == now.UTC().Format(time.DateOnly) {
 		return fmt.Errorf("%s: cannot determine lifecycle for %s reservation %q in subscription %q: reservations API date-only expiryDate %s falls on the current UTC date",
