@@ -383,6 +383,7 @@ func TestClient_ValidateOffering(t *testing.T) {
 					OfferingType:                types.OfferingTypeValuesPartialUpfront,
 					ProductDescription:          types.RIProductDescriptionLinuxUnix,
 					InstanceTenancy:             types.TenancyDefault,
+					OfferingClass:               types.OfferingClassTypeConvertible,
 				},
 			},
 		}, nil)
@@ -423,6 +424,7 @@ func TestClient_PurchaseCommitment(t *testing.T) {
 					OfferingType:                types.OfferingTypeValuesPartialUpfront,
 					ProductDescription:          types.RIProductDescriptionLinuxUnix,
 					InstanceTenancy:             types.TenancyDefault,
+					OfferingClass:               types.OfferingClassTypeConvertible,
 					FixedPrice:                  aws.Float32(100.0),
 				},
 			},
@@ -467,7 +469,7 @@ func TestClient_PurchaseCommitment_UpfrontCost(t *testing.T) {
 			m.On("DescribeReservedInstancesOfferings", mock.Anything, mock.Anything).Return(&ec2.DescribeReservedInstancesOfferingsOutput{
 				ReservedInstancesOfferings: []types.ReservedInstancesOffering{{ReservedInstancesOfferingId: aws.String("offer"),
 					InstanceType: types.InstanceTypeT3Micro, Duration: aws.Int64(94608000), OfferingType: types.OfferingTypeValuesPartialUpfront,
-					ProductDescription: types.RIProductDescriptionLinuxUnix, InstanceTenancy: types.TenancyDefault, FixedPrice: tt.price}},
+					ProductDescription: types.RIProductDescriptionLinuxUnix, InstanceTenancy: types.TenancyDefault, OfferingClass: types.OfferingClassTypeConvertible, FixedPrice: tt.price}},
 			}, nil).Once()
 			m.On("PurchaseReservedInstancesOffering", mock.Anything, mock.MatchedBy(func(in *ec2.PurchaseReservedInstancesOfferingInput) bool {
 				return int(aws.ToInt32(in.InstanceCount)) == tt.count
@@ -514,6 +516,7 @@ func TestClient_PurchaseCommitment_StampsPurchaseAutomationTag(t *testing.T) {
 				OfferingType:                types.OfferingTypeValuesAllUpfront,
 				ProductDescription:          types.RIProductDescriptionLinuxUnix,
 				InstanceTenancy:             types.TenancyDefault,
+				OfferingClass:               types.OfferingClassTypeConvertible,
 			}},
 		}, nil)
 
@@ -569,6 +572,7 @@ func TestClient_GetOfferingDetails(t *testing.T) {
 					InstanceType:                types.InstanceTypeT3Micro,
 					ProductDescription:          types.RIProductDescriptionLinuxUnix,
 					InstanceTenancy:             types.TenancyDefault,
+					OfferingClass:               types.OfferingClassTypeConvertible,
 					OfferingType:                types.OfferingTypeValuesPartialUpfront,
 					Duration:                    aws.Int64(94608000),
 					UsagePrice:                  aws.Float32(0.05),
@@ -760,6 +764,10 @@ func TestFindOfferingID_WrongVariantRejected(t *testing.T) {
 				{
 					ReservedInstancesOfferingId: aws.String("wrong-offering"),
 					InstanceType:                types.InstanceTypeT4gNano,
+					Duration:                    aws.Int64(OneYearSeconds),
+					ProductDescription:          types.RIProductDescriptionLinuxUnix,
+					InstanceTenancy:             types.TenancyDefault,
+					OfferingClass:               types.OfferingClassTypeConvertible,
 					OfferingType:                types.OfferingTypeValuesAllUpfront, // mismatch
 				},
 			},
@@ -770,6 +778,7 @@ func TestFindOfferingID_WrongVariantRejected(t *testing.T) {
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "no offerings found")
 		assert.Contains(t, err.Error(), "t4g.nano")
+		assert.Contains(t, err.Error(), "offering-type=1")
 	}
 }
 
@@ -798,6 +807,10 @@ func TestFindOfferingID_HappyPath(t *testing.T) {
 				{
 					ReservedInstancesOfferingId: aws.String("offering-ok"),
 					InstanceType:                types.InstanceTypeT4gNano,
+					Duration:                    aws.Int64(OneYearSeconds),
+					ProductDescription:          types.RIProductDescriptionLinuxUnix,
+					InstanceTenancy:             types.TenancyDefault,
+					OfferingClass:               types.OfferingClassTypeConvertible,
 					OfferingType:                types.OfferingTypeValuesNoUpfront,
 				},
 			},
@@ -915,6 +928,7 @@ func TestClient_PurchaseCommitment_NameTagInCreateTagsRequest(t *testing.T) {
 				OfferingType:                types.OfferingTypeValuesNoUpfront,
 				ProductDescription:          types.RIProductDescriptionLinuxUnix,
 				InstanceTenancy:             types.TenancyDefault,
+				OfferingClass:               types.OfferingClassTypeConvertible,
 			}},
 		}, nil)
 
@@ -1296,6 +1310,9 @@ func TestFindOfferingID_OfferingClassReachesSDKCall(t *testing.T) {
 			{
 				ReservedInstancesOfferingId: aws.String("offering-std-123"),
 				InstanceType:                types.InstanceTypeM5Large,
+				Duration:                    aws.Int64(OneYearSeconds),
+				ProductDescription:          types.RIProductDescriptionLinuxUnix,
+				InstanceTenancy:             types.TenancyDefault,
 				OfferingType:                types.OfferingTypeValuesAllUpfront,
 			},
 		},
@@ -1328,9 +1345,13 @@ func TestFindOfferingID_OfferingClassReachesSDKCall(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
+			o := offeringOutput.ReservedInstancesOfferings[0]
+			o.OfferingClass = tc.wantOfferingClass
 			cap := &capturingMockEC2Client{}
 			cap.On("DescribeReservedInstancesOfferings", mock.Anything, mock.Anything).
-				Return(offeringOutput, nil).Once()
+				Return(&ec2.DescribeReservedInstancesOfferingsOutput{
+					ReservedInstancesOfferings: []types.ReservedInstancesOffering{o},
+				}, nil).Once()
 
 			client := &Client{client: cap, region: "us-east-1"}
 
@@ -1544,24 +1565,25 @@ var validTenancyScopeCases = []struct {
 
 // captureOfferingsInput returns a mock that records the request it receives
 // and answers with a single offering.
-func captureOfferingsInput(offeringID, az string, got **ec2.DescribeReservedInstancesOfferingsInput) *MockEC2Client {
-	var offeringAZ *string
-	if az != "" {
-		offeringAZ = aws.String(az)
-	}
+func captureOfferingsInput(offeringID, az string, got **ec2.DescribeReservedInstancesOfferingsInput, mut ...func(*types.ReservedInstancesOffering)) *MockEC2Client {
 	mockEC2 := &MockEC2Client{}
 	mockEC2.On("DescribeReservedInstancesOfferings", mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
 			*got = args.Get(1).(*ec2.DescribeReservedInstancesOfferingsInput)
 		}).
 		Return(&ec2.DescribeReservedInstancesOfferingsOutput{
-			ReservedInstancesOfferings: []types.ReservedInstancesOffering{{
-				ReservedInstancesOfferingId: aws.String(offeringID),
-				InstanceType:                types.InstanceTypeM5Large,
-				AvailabilityZone:            offeringAZ,
-			}},
+			ReservedInstancesOfferings: []types.ReservedInstancesOffering{fullOffering(offeringID, az, mut...)},
 		}, nil).Once()
 	return mockEC2
+}
+
+// matchTenancyScope makes the captured offering carry the tenancy and scope
+// the request is expected to resolve to.
+func matchTenancyScope(tenancy types.Tenancy, scope string) func(*types.ReservedInstancesOffering) {
+	return func(o *types.ReservedInstancesOffering) {
+		o.InstanceTenancy = tenancy
+		o.Scope = types.Scope(scope)
+	}
 }
 
 func filterValues(filters []types.Filter, name string) []string {
@@ -1579,7 +1601,7 @@ func TestFindConvertibleOffering_TenancyScopeVariants_SendEnumValues(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var got *ec2.DescribeReservedInstancesOfferingsInput
-			client := &Client{client: captureOfferingsInput("offering-"+tc.name, tc.az, &got), region: "us-east-1"}
+			client := &Client{client: captureOfferingsInput("offering-"+tc.name, tc.az, &got, matchTenancyScope(tc.wantTenancy, tc.wantScope)), region: "us-east-1"}
 
 			id, err := client.FindConvertibleOffering(context.Background(), FindConvertibleOfferingParams{
 				InstanceType:       "m5.large",
@@ -1611,7 +1633,7 @@ func TestListTargetOfferings_TenancyScopeVariants_SendEnumValues(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var got *ec2.DescribeReservedInstancesOfferingsInput
-			client := &Client{client: captureOfferingsInput("offering-"+tc.name, tc.az, &got), region: "us-east-1"}
+			client := &Client{client: captureOfferingsInput("offering-"+tc.name, tc.az, &got, matchTenancyScope(tc.wantTenancy, tc.wantScope)), region: "us-east-1"}
 
 			offerings, err := client.ListTargetOfferings(context.Background(), ListTargetOfferingsParams{
 				ProductDescription: "Linux/UNIX",
@@ -1663,6 +1685,7 @@ func TestPurchaseCommitment_ExistingCommitmentFlag(t *testing.T) {
 			OfferingType:                types.OfferingTypeValuesAllUpfront,
 			ProductDescription:          types.RIProductDescriptionLinuxUnix,
 			InstanceTenancy:             types.TenancyDefault,
+			OfferingClass:               types.OfferingClassTypeConvertible,
 			FixedPrice:                  aws.Float32(100.0),
 		}},
 	}
@@ -1741,15 +1764,9 @@ func zonalRec(az string) common.Recommendation {
 }
 
 func azOffering(id, az string) types.ReservedInstancesOffering {
-	o := types.ReservedInstancesOffering{
-		ReservedInstancesOfferingId: aws.String(id),
-		InstanceType:                types.InstanceTypeM5Large,
-		OfferingType:                types.OfferingTypeValuesAllUpfront,
-	}
-	if az != "" {
-		o.AvailabilityZone = aws.String(az)
-	}
-	return o
+	return fullOffering(id, az, func(o *types.ReservedInstancesOffering) {
+		o.OfferingType = types.OfferingTypeValuesAllUpfront
+	})
 }
 
 // Issue #289: the query builder must refuse zonal scope without an AZ and
@@ -1808,14 +1825,14 @@ func TestScanEC2OfferingPage_AvailabilityZone(t *testing.T) {
 		azOffering("in-1b", "us-east-1b"),
 	}
 	zonal := ec2OfferingQuery{availabilityZone: "us-east-1b", wantOfferingType: types.OfferingTypeValuesAllUpfront}
-	got := scanEC2OfferingPage(offerings, zonal)
+	got := scanEC2OfferingPage(offerings, zonal, offeringSkips{})
 	require.NotNil(t, got)
 	assert.Equal(t, "in-1b", aws.ToString(got.ReservedInstancesOfferingId))
 
-	assert.Nil(t, scanEC2OfferingPage(offerings[:2], zonal), "no 1b offering must yield nil, not a 1a buy")
+	assert.Nil(t, scanEC2OfferingPage(offerings[:2], zonal, offeringSkips{}), "no 1b offering must yield nil, not a 1a buy")
 
 	regional := ec2OfferingQuery{wantOfferingType: types.OfferingTypeValuesAllUpfront}
-	got = scanEC2OfferingPage(offerings, regional)
+	got = scanEC2OfferingPage(offerings, regional, offeringSkips{})
 	require.NotNil(t, got)
 	assert.Equal(t, "nil-az", aws.ToString(got.ReservedInstancesOfferingId))
 }
@@ -1893,13 +1910,25 @@ func TestOfferingInZone(t *testing.T) {
 	assert.True(t, offeringInZone(o1b, ""))
 }
 
-func zonedOffering(id, az string) types.ReservedInstancesOffering {
+// fullOffering returns an offering that fully matches zonalFindParams and
+// zonalListParams (regional scope when az is empty); mut tweaks one dimension.
+func fullOffering(id, az string, mut ...func(*types.ReservedInstancesOffering)) types.ReservedInstancesOffering {
 	o := types.ReservedInstancesOffering{
 		ReservedInstancesOfferingId: aws.String(id),
 		InstanceType:                types.InstanceTypeM5Large,
+		ProductDescription:          types.RIProductDescriptionLinuxUnix,
+		InstanceTenancy:             types.TenancyDefault,
+		Scope:                       types.ScopeRegional,
+		Duration:                    aws.Int64(OneYearSeconds),
+		OfferingClass:               types.OfferingClassTypeConvertible,
+		OfferingType:                types.OfferingTypeValuesNoUpfront,
 	}
 	if az != "" {
 		o.AvailabilityZone = aws.String(az)
+		o.Scope = types.ScopeAvailabilityZone
+	}
+	for _, m := range mut {
+		m(&o)
 	}
 	return o
 }
@@ -1938,7 +1967,7 @@ func TestFindConvertibleOffering_Zonal_SendsAZAndPicksMatchingOffering(t *testin
 	t.Parallel()
 	var got []*ec2.DescribeReservedInstancesOfferingsInput
 	m := pagedOfferingsMock(&got, []types.ReservedInstancesOffering{
-		zonedOffering("off-1a", "us-east-1a"), zonedOffering("off-nil", ""), zonedOffering("off-1b", "us-east-1b"),
+		fullOffering("off-1a", "us-east-1a"), fullOffering("off-nil", ""), fullOffering("off-1b", "us-east-1b"),
 	})
 	client := &Client{client: m, region: "us-east-1"}
 
@@ -1955,7 +1984,7 @@ func TestFindConvertibleOffering_Zonal_NoMatchingAZ_Errors(t *testing.T) {
 	t.Parallel()
 	var got []*ec2.DescribeReservedInstancesOfferingsInput
 	m := pagedOfferingsMock(&got, []types.ReservedInstancesOffering{
-		zonedOffering("off-1a", "us-east-1a"), zonedOffering("off-nil", ""),
+		fullOffering("off-1a", "us-east-1a"), fullOffering("off-nil", ""),
 	})
 	client := &Client{client: m, region: "us-east-1"}
 
@@ -1971,8 +2000,8 @@ func TestFindConvertibleOffering_Zonal_MatchOnSecondPage_FollowsNextToken(t *tes
 	t.Parallel()
 	var got []*ec2.DescribeReservedInstancesOfferingsInput
 	m := pagedOfferingsMock(&got,
-		[]types.ReservedInstancesOffering{zonedOffering("off-1a", "us-east-1a")},
-		[]types.ReservedInstancesOffering{zonedOffering("off-1b", "us-east-1b")},
+		[]types.ReservedInstancesOffering{fullOffering("off-1a", "us-east-1a")},
+		[]types.ReservedInstancesOffering{fullOffering("off-1b", "us-east-1b")},
 	)
 	client := &Client{client: m, region: "us-east-1"}
 
@@ -1990,8 +2019,8 @@ func TestFindConvertibleOffering_Zonal_NoMatchAcrossPages_Errors(t *testing.T) {
 	t.Parallel()
 	var got []*ec2.DescribeReservedInstancesOfferingsInput
 	m := pagedOfferingsMock(&got,
-		[]types.ReservedInstancesOffering{zonedOffering("off-1a", "us-east-1a")},
-		[]types.ReservedInstancesOffering{zonedOffering("off-1c", "us-east-1c")},
+		[]types.ReservedInstancesOffering{fullOffering("off-1a", "us-east-1a")},
+		[]types.ReservedInstancesOffering{fullOffering("off-1c", "us-east-1c")},
 	)
 	client := &Client{client: m, region: "us-east-1"}
 
@@ -2009,7 +2038,7 @@ func TestFindConvertibleOffering_Zonal_PageCapReached_Errors(t *testing.T) {
 	var got []*ec2.DescribeReservedInstancesOfferingsInput
 	pages := make([][]types.ReservedInstancesOffering, maxTargetOfferingPages+1)
 	for i := range pages {
-		pages[i] = []types.ReservedInstancesOffering{zonedOffering("off-1a", "us-east-1a")}
+		pages[i] = []types.ReservedInstancesOffering{fullOffering("off-1a", "us-east-1a")}
 	}
 	m := pagedOfferingsMock(&got, pages...)
 	client := &Client{client: m, region: "us-east-1"}
@@ -2051,7 +2080,7 @@ func TestFindConvertibleOffering_ZoneMisuse_ErrorsBeforeAPICall(t *testing.T) {
 func TestFindConvertibleOffering_Regional_DoesNotSendAZ(t *testing.T) {
 	t.Parallel()
 	var got []*ec2.DescribeReservedInstancesOfferingsInput
-	m := pagedOfferingsMock(&got, []types.ReservedInstancesOffering{zonedOffering("off-reg", "")})
+	m := pagedOfferingsMock(&got, []types.ReservedInstancesOffering{fullOffering("off-reg", "")})
 	client := &Client{client: m, region: "us-east-1"}
 	p := zonalFindParams("")
 	p.Scope = "Region"
@@ -2068,8 +2097,8 @@ func TestListTargetOfferings_Zonal_SendsAZAndFiltersOfferings(t *testing.T) {
 	t.Parallel()
 	var got []*ec2.DescribeReservedInstancesOfferingsInput
 	m := pagedOfferingsMock(&got,
-		[]types.ReservedInstancesOffering{zonedOffering("off-1a", "us-east-1a"), zonedOffering("off-nil", "")},
-		[]types.ReservedInstancesOffering{zonedOffering("off-1b", "us-east-1b")},
+		[]types.ReservedInstancesOffering{fullOffering("off-1a", "us-east-1a"), fullOffering("off-nil", "")},
+		[]types.ReservedInstancesOffering{fullOffering("off-1b", "us-east-1b")},
 	)
 	client := &Client{client: m, region: "us-east-1"}
 
@@ -2111,7 +2140,7 @@ func TestListTargetOfferings_ZoneMisuse_ErrorsBeforeAPICall(t *testing.T) {
 func TestListTargetOfferings_Regional_DoesNotSendAZ(t *testing.T) {
 	t.Parallel()
 	var got []*ec2.DescribeReservedInstancesOfferingsInput
-	m := pagedOfferingsMock(&got, []types.ReservedInstancesOffering{zonedOffering("off-reg", "")})
+	m := pagedOfferingsMock(&got, []types.ReservedInstancesOffering{fullOffering("off-reg", "")})
 	client := &Client{client: m, region: "us-east-1"}
 	p := zonalListParams("")
 	p.Scope = "Region"
@@ -2122,4 +2151,219 @@ func TestListTargetOfferings_Regional_DoesNotSendAZ(t *testing.T) {
 	require.Len(t, offerings, 1)
 	require.Len(t, got, 1)
 	assert.Nil(t, got[0].AvailabilityZone)
+}
+
+// offeringMismatchRows are single-dimension mismatches vs zonalFindParams("").
+// Each fails on the pre-#233 code, which returned the first offering in zone.
+var offeringMismatchRows = []struct {
+	name string
+	mut  func(*types.ReservedInstancesOffering)
+}{
+	{"tenancy", func(o *types.ReservedInstancesOffering) { o.InstanceTenancy = types.TenancyDedicated }},
+	{"class", func(o *types.ReservedInstancesOffering) { o.OfferingClass = types.OfferingClassTypeStandard }},
+	{"duration", func(o *types.ReservedInstancesOffering) { o.Duration = aws.Int64(3 * OneYearSeconds) }},
+	{"product", func(o *types.ReservedInstancesOffering) { o.ProductDescription = types.RIProductDescriptionWindows }},
+	{"duration-nil", func(o *types.ReservedInstancesOffering) { o.Duration = nil }},
+}
+
+func regionalFindParams() FindConvertibleOfferingParams {
+	p := zonalFindParams("")
+	p.Scope = "Region"
+	return p
+}
+
+func regionalListParams() ListTargetOfferingsParams {
+	p := zonalListParams("")
+	p.Scope = "Region"
+	return p
+}
+
+func TestFindConvertibleOffering_SkipsMismatchingOfferings(t *testing.T) {
+	t.Parallel()
+	for _, tc := range offeringMismatchRows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got []*ec2.DescribeReservedInstancesOfferingsInput
+			m := pagedOfferingsMock(&got,
+				[]types.ReservedInstancesOffering{fullOffering("bad", "", tc.mut)},
+				[]types.ReservedInstancesOffering{fullOffering("good", "")},
+			)
+			client := &Client{client: m, region: "us-east-1"}
+
+			id, err := client.FindConvertibleOffering(context.Background(), regionalFindParams())
+
+			require.NoError(t, err)
+			assert.Equal(t, "good", id)
+			assert.Len(t, got, 2)
+		})
+	}
+}
+
+func TestFindConvertibleOffering_AllMismatching_ErrorsWithSkipCounts(t *testing.T) {
+	t.Parallel()
+	var got []*ec2.DescribeReservedInstancesOfferingsInput
+	page := make([]types.ReservedInstancesOffering, 0, 4)
+	for _, tc := range offeringMismatchRows[:4] {
+		page = append(page, fullOffering("bad-"+tc.name, "", tc.mut))
+	}
+	client := &Client{client: pagedOfferingsMock(&got, page), region: "us-east-1"}
+
+	id, err := client.FindConvertibleOffering(context.Background(), regionalFindParams())
+
+	require.Error(t, err)
+	assert.Empty(t, id)
+	assert.Contains(t, err.Error(), "4 offerings skipped: class=1, duration=1, product=1, tenancy=1")
+}
+
+func TestFindConvertibleOffering_LenientAndLegacyMatches(t *testing.T) {
+	t.Parallel()
+	legacy := regionalFindParams()
+	legacy.Tenancy = "shared"
+	vpcWant := regionalFindParams()
+	vpcWant.ProductDescription = "Linux/UNIX (Amazon VPC)"
+	for name, tc := range map[string]struct {
+		params FindConvertibleOfferingParams
+		mut    func(*types.ReservedInstancesOffering)
+	}{
+		"legacy shared tenancy": {legacy, nil},
+		"offering VPC suffix": {regionalFindParams(), func(o *types.ReservedInstancesOffering) {
+			o.ProductDescription = types.RIProductDescriptionLinuxUnixAmazonVpc
+		}},
+		"request VPC suffix":         {vpcWant, nil},
+		"offering scope unset":       {regionalFindParams(), func(o *types.ReservedInstancesOffering) { o.Scope = "" }},
+		"offering instance type nil": {regionalFindParams(), func(o *types.ReservedInstancesOffering) { o.InstanceType = "" }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var got []*ec2.DescribeReservedInstancesOfferingsInput
+			var muts []func(*types.ReservedInstancesOffering)
+			if tc.mut != nil {
+				muts = append(muts, tc.mut)
+			}
+			m := pagedOfferingsMock(&got, []types.ReservedInstancesOffering{fullOffering("ok", "", muts...)})
+			client := &Client{client: m, region: "us-east-1"}
+
+			id, err := client.FindConvertibleOffering(context.Background(), tc.params)
+
+			require.NoError(t, err)
+			assert.Equal(t, "ok", id)
+		})
+	}
+}
+
+func TestListTargetOfferings_DropsMismatchingOfferings(t *testing.T) {
+	t.Parallel()
+	for _, tc := range offeringMismatchRows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got []*ec2.DescribeReservedInstancesOfferingsInput
+			m := pagedOfferingsMock(&got, []types.ReservedInstancesOffering{
+				fullOffering("bad", "", tc.mut), fullOffering("good", ""),
+			})
+			client := &Client{client: m, region: "us-east-1"}
+
+			offerings, err := client.ListTargetOfferings(context.Background(), regionalListParams())
+
+			require.NoError(t, err)
+			require.Len(t, offerings, 1)
+			assert.Equal(t, "good", offerings[0].OfferingID)
+		})
+	}
+}
+
+func TestListTargetOfferings_AllSkipped_ReturnsEmptyNoError(t *testing.T) {
+	t.Parallel()
+	var got []*ec2.DescribeReservedInstancesOfferingsInput
+	m := pagedOfferingsMock(&got, []types.ReservedInstancesOffering{
+		fullOffering("bad", "", offeringMismatchRows[0].mut),
+	})
+	client := &Client{client: m, region: "us-east-1"}
+
+	offerings, err := client.ListTargetOfferings(context.Background(), regionalListParams())
+
+	require.NoError(t, err)
+	assert.Empty(t, offerings)
+}
+
+func TestListTargetOfferings_OfferingTypeComparedOnlyWhenRequested(t *testing.T) {
+	t.Parallel()
+	allUpfront := func(o *types.ReservedInstancesOffering) { o.OfferingType = types.OfferingTypeValuesAllUpfront }
+	for name, tc := range map[string]struct {
+		optionType string
+		wantLen    int
+	}{
+		"empty request keeps all": {"", 1},
+		"matching request keeps":  {"all-upfront", 1},
+		"other request drops":     {"no-upfront", 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var got []*ec2.DescribeReservedInstancesOfferingsInput
+			m := pagedOfferingsMock(&got, []types.ReservedInstancesOffering{fullOffering("o", "", allUpfront)})
+			client := &Client{client: m, region: "us-east-1"}
+			p := regionalListParams()
+			p.OfferingType = tc.optionType
+
+			offerings, err := client.ListTargetOfferings(context.Background(), p)
+
+			require.NoError(t, err)
+			assert.Len(t, offerings, tc.wantLen)
+		})
+	}
+}
+
+func TestListTargetOfferings_InvalidOfferingType_ErrorsBeforeAPICall(t *testing.T) {
+	t.Parallel()
+	m := matchingOfferingMock()
+	client := &Client{client: m, region: "us-east-1"}
+	p := regionalListParams()
+	p.OfferingType = "monthly"
+
+	_, err := client.ListTargetOfferings(context.Background(), p)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported EC2 payment option")
+	m.AssertNotCalled(t, "DescribeReservedInstancesOfferings", mock.Anything, mock.Anything)
+}
+
+// Missing term or platform must error, not be searched under a guessed default.
+func TestOfferingLookups_MissingFields_ErrorBeforeAPICall(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		mutate  func(product *string, duration *int64, instanceType *string)
+		forFind bool
+		wantErr string
+	}{
+		"zero duration":      {func(_ *string, d *int64, _ *string) { *d = 0 }, false, "duration"},
+		"negative duration":  {func(_ *string, d *int64, _ *string) { *d = -1 }, false, "duration"},
+		"empty product":      {func(p *string, _ *int64, _ *string) { *p = "" }, false, "product description"},
+		"whitespace product": {func(p *string, _ *int64, _ *string) { *p = "  " }, false, "product description"},
+		"empty instance":     {func(_ *string, _ *int64, i *string) { *i = " " }, true, "instance type"},
+	} {
+		for _, find := range []bool{true, false} {
+			if tc.forFind && !find {
+				continue
+			}
+			t.Run(fmt.Sprintf("%s find=%v", name, find), func(t *testing.T) {
+				t.Parallel()
+				product, duration, instance := "Linux/UNIX", int64(OneYearSeconds), "m5.large"
+				tc.mutate(&product, &duration, &instance)
+				m := matchingOfferingMock()
+				client := &Client{client: m, region: "us-east-1"}
+				var err error
+				if find {
+					p := regionalFindParams()
+					p.ProductDescription, p.Duration, p.InstanceType = product, duration, instance
+					_, err = client.FindConvertibleOffering(context.Background(), p)
+				} else {
+					p := regionalListParams()
+					p.ProductDescription, p.Duration = product, duration
+					_, err = client.ListTargetOfferings(context.Background(), p)
+				}
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				m.AssertNotCalled(t, "DescribeReservedInstancesOfferings", mock.Anything, mock.Anything)
+			})
+		}
+	}
 }

@@ -45,12 +45,11 @@ type ExtractedFields struct {
 	LookBackDays int
 	// Scope is populated from the API response ("Shared" or a subscription ID)
 	// but is not yet threaded into the purchase body. All service clients
-	// currently hardcode "appliedScopeType": "Shared", which is correct because
+	// currently send armreservations.AppliedScopeTypeShared, which is correct because
 	// the recommendation filter in recommendations.go already asserts
 	// "properties/scope eq 'Shared'" — only Shared-scope recommendations are
 	// ever requested. This field is retained for future wiring if single-
-	// subscription scoped recommendations are ever requested. See finding M1/M2
-	// in docs/code-review/09-provider-azure.md.
+	// subscription scoped recommendations are ever requested.
 	Scope string
 	// RecurringMonthlyCost is the covered/effective cost over Azure's lookback
 	// window, set by plain Extract only (from TotalCostWithReservedInstances, or
