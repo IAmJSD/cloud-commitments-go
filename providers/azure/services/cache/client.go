@@ -100,6 +100,9 @@ func NewClient(cred azcore.TokenCredential, subscriptionID, region string) *Clie
 }
 
 // NewClientWithHTTP creates a new Azure Cache client with a custom HTTP client (for testing).
+// httpClient is used as-is and bypasses the SSRF dial guard of
+// httpclient.New(): metadata, NAT64/6to4 and unspecified addresses are
+// dialable unless the caller's client blocks them itself.
 func NewClientWithHTTP(cred azcore.TokenCredential, subscriptionID, region string, httpClient HTTPClient) *Client {
 	return &Client{
 		cred:           cred,
