@@ -471,10 +471,26 @@ func (c *Client) lookupEngineName(engine string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if strings.HasPrefix(name, "oracle") || strings.HasPrefix(name, "sqlserver") || strings.HasPrefix(name, "sql-server") {
+	if isLicensedEngine(name) {
 		return "", fmt.Errorf("engine %q: license model is not known; refusing to guess", engine)
 	}
 	return name, nil
+}
+
+// licensedEnginePrefixes are the lower-cased engine spellings whose offerings
+// carry a license model. "sql server" (with a space) is the Cost Explorer
+// spelling, which normalizeEngineName passes through as-is (issue #302).
+var licensedEnginePrefixes = []string{"oracle", "sqlserver", "sql-server", "sql server"}
+
+// isLicensedEngine reports whether a normalized engine name is Oracle or SQL
+// Server in any spelling.
+func isLicensedEngine(name string) bool {
+	for _, prefix := range licensedEnginePrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // offeringDuration returns the term as the API's duration string and as seconds
