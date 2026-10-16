@@ -25,6 +25,10 @@
 //   - cudly-idempotency-token=<deterministic hex> -- the (execution, rec)
 //     identity from common.DeriveIdempotencyToken.
 //
+// The API does not define tags on reservation orders (issue #290), so the
+// token is also carried as a marker in properties.displayName, and the lookup
+// below matches on either.
+//
 // Before invoking the two-step flow, DoIdempotentPurchaseTwoStep lists existing
 // reservation orders and short-circuits when one already carries the same
 // idempotency token, so a re-driven purchase of a stranded execution (issue
@@ -190,13 +194,19 @@ func ReservationOrdersListURL() string {
 // value is empty. When both are empty, no tags map is added (preserving the
 // untagged shape some legacy CLI test paths expect).
 //
-// The tags are sent verbatim in the calculatePrice + purchase request bodies
-// and are persisted by Azure onto the resulting reservation order so the
-// idempotency tag can be read back by FindReservationOrderByIdempotencyToken
-// on a re-drive.
+// The tags are sent verbatim in the calculatePrice + purchase request bodies,
+// but the Reservations API does not define tags on a purchase request or a
+// reservation order (issue #290), so Azure may drop them. When a token is
+// present the idempotency identity is therefore also written into
+// properties.displayName, a field both models define, as a deterministic
+// marker that FindReservationOrderByIdempotencyToken matches on a re-drive
+// (see idempotencymarker.go).
 func ApplyPurchaseTags(body map[string]interface{}, source, idempotencyToken string) {
 	if source == "" && idempotencyToken == "" {
 		return
+	}
+	if idempotencyToken != "" {
+		applyIdempotencyDisplayName(body, idempotencyToken)
 	}
 	tags := map[string]string{}
 	if source != "" {
@@ -440,7 +450,9 @@ type reservationOrdersListResponse struct {
 		// reservationOrderId during calculatePrice and what DoPurchaseTwoStep
 		// returns on success.
 		Name string `json:"name"`
-		// Tags carries any tags stamped on the order at purchase time.
+		// Tags carries any tags stamped on the order at purchase time. The
+		// API model defines none (issue #290); kept so an order Azure did
+		// return tagged still matches.
 		Tags map[string]string `json:"tags"`
 		// Properties.ProvisioningState lets us skip terminal-failed orders so a
 		// canceled/failed reservation with the same idempotency tag does not
@@ -450,6 +462,10 @@ type reservationOrdersListResponse struct {
 		// not just succeeded ones).
 		Properties struct {
 			ProvisioningState string `json:"provisioningState"`
+			// DisplayName carries the idempotency marker written by
+			// ApplyPurchaseTags (armreservations.ReservationOrderProperties
+			// defines it, unlike tags).
+			DisplayName string `json:"displayName"`
 		} `json:"properties"`
 	} `json:"value"`
 	NextLink string `json:"nextLink"`
@@ -517,14 +533,20 @@ func dispositionOf(state armreservations.ProvisioningState) orderDisposition {
 	return disposition
 }
 
+// maxOrderPages caps the reservation-order listing walk. Listings are one
+// entry per purchase on the tenant (tens to low hundreds), so 50 pages is far
+// above any real tenant; reaching it means a server bug, reported as an error.
+const maxOrderPages = 50
+
 // FindReservationOrderByIdempotencyToken lists reservation orders visible to
 // the bearer token and returns the reservation order ID (GUID) of the FIRST
 // order tagged with the supplied idempotency token. Returns ("", false, nil)
 // when no matching order is found and ("", false, err) on a transport / 4xx /
 // decode failure.
 //
-// Pagination follows nextLink; the entire listing is walked because Azure has
-// no server-side tag filter on this endpoint. Reservation order listings are
+// Pagination follows nextLink, guarded by a seen-URL set and the maxOrderPages
+// cap (an error, never a truncated "not found"). The entire listing is walked
+// because Azure has no server-side tag filter on this endpoint. Reservation order listings are
 // small (one entry per purchase ever made on the tenant, typically tens to low
 // hundreds), so the full walk is cheap and runs only on purchase paths where
 // an idempotency token is supplied (i.e. never on the CLI legacy path).
@@ -539,7 +561,15 @@ func FindReservationOrderByIdempotencyToken(ctx context.Context, httpClient HTTP
 	}
 
 	nextURL := ReservationOrdersListURL()
-	for nextURL != "" {
+	seen := map[string]struct{}{}
+	for pageIdx := 0; nextURL != ""; pageIdx++ {
+		if pageIdx >= maxOrderPages {
+			return "", false, fmt.Errorf("reservation orders listing exceeds the %d-page cap (nextLink still set)", maxOrderPages)
+		}
+		if _, ok := seen[nextURL]; ok {
+			return "", false, fmt.Errorf("reservation orders listing returned a self-referential nextLink (page %d)", pageIdx)
+		}
+		seen[nextURL] = struct{}{}
 		page, err := fetchReservationOrdersPage(ctx, httpClient, nextURL, bearerToken)
 		if err != nil {
 			return "", false, err
@@ -590,13 +620,15 @@ func fetchReservationOrdersPage(ctx context.Context, httpClient HTTPClient, page
 	return &page, nil
 }
 
-// matchReservationOrderInPage scans one decoded page for an order tagged with
-// the idempotency token and applies reservationOrderDispositions. Extracted
-// from FindReservationOrderByIdempotencyToken to keep the function under the
+// matchReservationOrderInPage scans one decoded page for an order carrying
+// the idempotency token, in its tag or its display-name marker (issue #290),
+// and applies reservationOrderDispositions. Extracted from
+// FindReservationOrderByIdempotencyToken to keep the function under the
 // gocyclo:10 threshold enforced by the pre-commit hook.
 func matchReservationOrderInPage(page *reservationOrdersListResponse, idempotencyToken string) (orderID string, found bool, err error) {
 	for _, order := range page.Value {
-		if order.Tags[common.IdempotencyTagKey] != idempotencyToken {
+		if order.Tags[common.IdempotencyTagKey] != idempotencyToken &&
+			!displayNameCarriesToken(order.Properties.DisplayName, idempotencyToken) {
 			continue
 		}
 		state := armreservations.ProvisioningState(order.Properties.ProvisioningState)
