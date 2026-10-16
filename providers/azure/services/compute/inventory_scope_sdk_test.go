@@ -367,3 +367,22 @@ func TestGetExistingCommitmentsSDKSharedExpiryTodayStillFails(t *testing.T) {
 	require.ErrorContains(t, err, "date-only expiryDate")
 	require.Nil(t, inventory)
 }
+
+// A Split parent is exempt from the scope check only because its children
+// are listed as their own rows. A live Shared child of that split must still
+// fail closed, so the exemption cannot hide unattributable live coverage.
+func TestGetExistingCommitmentsSDKSplitParentLiveSharedChildStillFails(t *testing.T) {
+	now := time.Now().UTC()
+	splitParent := sdkReservationChild(sdkChild{
+		id: "split-parent", resourceType: "VirtualMachines", scopeType: `"Shared"`, scopes: `null`,
+		region: "eastus", state: string(armreservations.ProvisioningStateSplit), quantity: 2,
+	}, now.AddDate(-1, 0, 0), now.AddDate(1, 0, 0))
+	liveSharedChild := sdkReservationChild(sdkChild{
+		id: "split-child", resourceType: "VirtualMachines", scopeType: `"Shared"`, scopes: `null`,
+		region: "eastus", state: "Succeeded", quantity: 1,
+	}, now, now.AddDate(1, 0, 0))
+	client := sdkInventoryClient(t, "sub-a", inventorySDKTransport{child: splitParent + "," + liveSharedChild})
+	inventory, err := client.GetExistingCommitments(context.Background())
+	require.ErrorContains(t, err, "cannot attribute")
+	require.Nil(t, inventory)
+}

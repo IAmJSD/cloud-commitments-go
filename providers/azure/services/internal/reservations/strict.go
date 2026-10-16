@@ -61,6 +61,14 @@ func reservationLabel(r *armreservations.ReservationResponse) string {
 // isTerminalCommitmentState reports lifecycle states that no longer count as
 // coverage. It works on the converted state so a Succeeded reservation with a
 // past expiry is terminal too.
+//
+// Retired (Split/Merged parents) skips the scope check on the assumption,
+// shared with #317's field-completeness gate, that Azure lists the resulting
+// child reservations as separate rows, so each live child is scope-checked
+// on its own. That is an API-shape assumption not verifiable offline; if a
+// live child were ever omitted from the listing, its coverage would be
+// missing rather than misattributed, so the duplicate guard would err toward
+// buying, not toward a false "already covered".
 func isTerminalCommitmentState(s common.CommitmentState) bool {
 	switch s {
 	case common.CommitmentStateCanceled, common.CommitmentStateExpired,
