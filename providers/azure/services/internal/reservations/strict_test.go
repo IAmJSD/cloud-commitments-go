@@ -59,5 +59,36 @@ func TestStrictCommitment_ErrorTextUsesLabels(t *testing.T) {
 	r = strictFixture("VirtualMachines")
 	r.Properties.AppliedScopeType = &shared
 	_, err = StrictCommitment(r, "sub-a", common.ServiceCompute, armreservations.ReservedResourceTypeVirtualMachines, testLabels, now)
-	require.EqualError(t, err, `svc: cannot attribute X reservation "res-1" to subscription "sub-a": applied scope type "Shared" is not Single`)
+	require.EqualError(t, err, `svc: cannot attribute X reservation "res-1" to subscription "sub-a": Shared scope without a subscription billingScopeId`)
+
+	r = strictFixture("VirtualMachines")
+	unknown := armreservations.AppliedScopeType("ManagementGroup")
+	r.Properties.AppliedScopeType = &unknown
+	_, err = StrictCommitment(r, "sub-a", common.ServiceCompute, armreservations.ReservedResourceTypeVirtualMachines, testLabels, now)
+	require.EqualError(t, err, `svc: cannot attribute X reservation "res-1" to subscription "sub-a": unsupported applied scope type "ManagementGroup"`)
+}
+
+// Issue #293: a Shared reservation is owned by the subscription named in its
+// billingScopeId, the subscription CUDly purchases under.
+func TestStrictCommitment_SharedScopeAttributedToBillingSubscription(t *testing.T) {
+	now := time.Now()
+	shared := armreservations.AppliedScopeTypeShared
+	r := strictFixture("VirtualMachines")
+	r.Properties.AppliedScopeType = &shared
+	r.Properties.AppliedScopes = nil
+	r.Properties.BillingScopeID = strPtr("/subscriptions/SUB-A")
+
+	c, err := StrictCommitment(r, "sub-a", common.ServiceCompute, armreservations.ReservedResourceTypeVirtualMachines, testLabels, now)
+	require.NoError(t, err)
+	require.NotNil(t, c)
+	assert.Equal(t, "sub-a", c.Account)
+	assert.Equal(t, 2, c.Count)
+
+	c, err = StrictCommitment(r, "sub-b", common.ServiceCompute, armreservations.ReservedResourceTypeVirtualMachines, testLabels, now)
+	require.NoError(t, err)
+	assert.Nil(t, c, "a Shared reservation bought by another subscription is not this subscription's commitment")
+
+	r.Properties.BillingScopeID = strPtr("/subscriptions/")
+	_, err = StrictCommitment(r, "sub-a", common.ServiceCompute, armreservations.ReservedResourceTypeVirtualMachines, testLabels, now)
+	require.ErrorContains(t, err, "Shared scope without a subscription billingScopeId")
 }

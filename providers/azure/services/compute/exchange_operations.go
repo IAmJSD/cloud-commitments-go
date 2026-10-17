@@ -129,6 +129,22 @@ type ExchangeTarget struct {
 	// BillingScopeID is the subscription or billing account that will be
 	// charged. Required by the Azure exchange API.
 	BillingScopeID string
+
+	// BillingPlan is how the purchased reservation is paid for. Optional:
+	// unset ("") means armreservations.ReservationBillingPlanUpfront, the
+	// plan every exchange used before this field existed, so existing
+	// callers send the same request as before. Any other value must be one
+	// of armreservations.PossibleReservationBillingPlanValues() ("Upfront"
+	// or "Monthly", exact spelling); anything else is a validation error,
+	// never a silent fallback to Upfront.
+	//
+	// Azure does not require the plan to match the returned reservations':
+	// a monthly-billed reservation can be exchanged for an upfront one and
+	// vice versa (the new reservation's total commitment must still cover
+	// the returned remaining commitment). The plan is fixed by the
+	// CalculateExchange session; ExecuteExchange sends only the session ID,
+	// so the executed exchange is billed with the plan that was priced.
+	BillingPlan armreservations.ReservationBillingPlan
 }
 
 // CalculateExchangeCallerFunc is the narrow LRO-invoker interface that
@@ -167,7 +183,7 @@ func (c *Client) buildCalculateExchangeCaller() (CalculateExchangeCallerFunc, er
 	if c.calculateExchangeCaller != nil {
 		return c.calculateExchangeCaller, nil
 	}
-	client, err := armreservations.NewCalculateExchangeClient(c.cred, nil)
+	client, err := armreservations.NewCalculateExchangeClient(c.cred, c.exchangeClientOptions)
 	if err != nil {
 		return nil, fmt.Errorf("azure: create CalculateExchange client: %w", err)
 	}
@@ -190,7 +206,7 @@ func (c *Client) buildDoExchangeCaller() (DoExchangeCallerFunc, error) {
 	if c.doExchangeCaller != nil {
 		return c.doExchangeCaller, nil
 	}
-	client, err := armreservations.NewExchangeClient(c.cred, nil)
+	client, err := armreservations.NewExchangeClient(c.cred, c.exchangeClientOptions)
 	if err != nil {
 		return nil, fmt.Errorf("azure: create Exchange client: %w", err)
 	}
@@ -219,10 +235,12 @@ func (c *Client) buildDoExchangeCaller() (DoExchangeCallerFunc, error) {
 // same applied scope as the others (Shared, or Single with its scopes); the
 // purchased reservations get that scope. Every
 // target must have a non-empty SKU/Location/BillingScopeID, Quantity >= 1,
-// and a Term from PossibleReservationTermValues(). There is no coercion of
-// invalid values (no clamping quantity to 1, no defaulting an unrecognized
-// term) -- a caller mistake here is a validation error, not a silently
-// different exchange than the one requested.
+// a Term from PossibleReservationTermValues(), and a BillingPlan that is
+// either unset (Upfront) or one of PossibleReservationBillingPlanValues().
+// There is no coercion of invalid values (no clamping quantity to 1, no
+// defaulting an unrecognized term or billing plan) -- a caller mistake here
+// is a validation error, not a silently different exchange than the one
+// requested.
 //
 // Returns an error only when validation or the API call itself fails; a
 // priced-but-policy-rejected combination is a successful call whose
@@ -417,8 +435,34 @@ func validateExchangeTargets(targets []ExchangeTarget) error {
 		if !isValidReservationTerm(t.Term) {
 			return fmt.Errorf("azure: CalculateExchange: targets[%d].term %q is not a supported reservation term", i, t.Term)
 		}
+		if !isValidBillingPlan(billingPlanOrDefault(t.BillingPlan)) {
+			return fmt.Errorf("azure: CalculateExchange: targets[%d].billing_plan %q is not a supported billing plan", i, t.BillingPlan)
+		}
 	}
 	return nil
+}
+
+// billingPlanOrDefault maps an unset billing plan to Upfront, the plan every
+// exchange used before ExchangeTarget.BillingPlan existed. Any set value is
+// returned unchanged, so an unrecognized one still fails isValidBillingPlan
+// instead of being silently priced as Upfront.
+func billingPlanOrDefault(plan armreservations.ReservationBillingPlan) armreservations.ReservationBillingPlan {
+	if plan == "" {
+		return armreservations.ReservationBillingPlanUpfront
+	}
+	return plan
+}
+
+// isValidBillingPlan reports whether plan is one of the SDK's typed enum
+// values (exact spelling), rather than accepting any string the caller
+// happens to pass.
+func isValidBillingPlan(plan armreservations.ReservationBillingPlan) bool {
+	for _, p := range armreservations.PossibleReservationBillingPlanValues() {
+		if p == plan {
+			return true
+		}
+	}
+	return false
 }
 
 // isValidReservationTerm reports whether term is one of the SDK's typed
@@ -436,7 +480,8 @@ func isValidReservationTerm(term armreservations.ReservationTerm) bool {
 // SDK request shape, using typed SDK enum constants throughout
 // (feedback_sdk_enum_string_literals) rather than raw strings. Every target
 // inherits the sources' applied scope, which validateExchangeSources has
-// checked is present and shared by all sources.
+// checked is present and shared by all sources, and carries its own billing
+// plan (Upfront when unset), which validateExchangeTargets has checked.
 func buildCalculateExchangeRequest(sources []ExchangeableReservation, targets []ExchangeTarget) armreservations.CalculateExchangeRequest {
 	scope := sources[0]
 	toReturn := make([]*armreservations.ReservationToReturn, 0, len(sources))
@@ -464,7 +509,7 @@ func buildCalculateExchangeRequest(sources []ExchangeableReservation, targets []
 			Properties: &armreservations.PurchaseRequestProperties{
 				AppliedScopeType:     to.Ptr(scope.AppliedScopeType),
 				AppliedScopes:        appliedScopes,
-				BillingPlan:          to.Ptr(armreservations.ReservationBillingPlanUpfront),
+				BillingPlan:          to.Ptr(billingPlanOrDefault(tgt.BillingPlan)),
 				BillingScopeID:       to.Ptr(tgt.BillingScopeID),
 				Quantity:             to.Ptr(tgt.Quantity),
 				Renew:                to.Ptr(false),
