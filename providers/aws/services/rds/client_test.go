@@ -1316,9 +1316,14 @@ func TestFindOfferingID_NoMatchReportsPagesFetched(t *testing.T) {
 
 // TestFindOfferingID_LicensedEnginesRefusedBeforeAPICall: Oracle and SQL Server
 // offerings are listed as "oracle-se2(li)" / "oracle-se2(byol)", so the license
-// model must be known; the lookup refuses without calling the API.
+// model must be known; the lookup refuses without calling the API. "SQL Server"
+// is the Cost Explorer spelling (with a space) and must be refused the same way
+// rather than fail later as "no offerings found" (issue #302).
 func TestFindOfferingID_LicensedEnginesRefusedBeforeAPICall(t *testing.T) {
-	for _, engine := range []string{"oracle-se2", "oracle-ee", "sqlserver-se", "sqlserver-web", "sql-server-ex"} {
+	for _, engine := range []string{
+		"oracle-se2", "oracle-ee", "sqlserver-se", "sqlserver-web", "sql-server-ex",
+		"SQL Server", "sql server", "SQL Server Enterprise",
+	} {
 		t.Run(engine, func(t *testing.T) {
 			mockRDS := &MockRDSClient{}
 			t.Cleanup(func() { mockRDS.AssertExpectations(t) })
