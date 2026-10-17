@@ -321,12 +321,8 @@ func extractStoragePriceFromSKU(sku *cloudbilling.Sku) (price float64, currency 
 	}
 
 	pricingInfo := sku.PricingInfo[0]
-	if pricingInfo.PricingExpression == nil || len(pricingInfo.PricingExpression.TieredRates) == 0 {
-		return 0, "", nil
-	}
-
-	rate := pricingInfo.PricingExpression.TieredRates[0]
-	if rate.UnitPrice == nil {
+	rate := skumatch.PaidRate(pricingInfo.PricingExpression)
+	if rate == nil {
 		return 0, "", nil
 	}
 
