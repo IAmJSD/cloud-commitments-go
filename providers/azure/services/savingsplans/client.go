@@ -197,9 +197,9 @@ func (c *Client) appendOwnedPlans(dst []common.Commitment, plans []*armbillingbe
 		}
 		switch disposition {
 		case planOwned:
-			commitment, err := convertSavingsPlan(sp, c.subscriptionID)
-			if err != nil {
-				return nil, 0, fmt.Errorf("row %d: %w", i+1, err)
+			commitment, convErr := convertSavingsPlan(sp, c.subscriptionID)
+			if convErr != nil {
+				return nil, 0, fmt.Errorf("row %d: %w", i+1, convErr)
 			}
 			dst = append(dst, *commitment)
 		case planSkippedSingle:
