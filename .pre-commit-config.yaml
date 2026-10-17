@@ -64,11 +64,8 @@ repos:
         name: Check for merge conflicts
       - id: detect-private-key
         name: Detect private keys
-        # Audit (PR5): internal/credentials/resolver.go contains zero
-        # private-key-shaped patterns (verified by grep). The exclusion
-        # was a historical artifact; removing it tightens the gate
-        # without breaking any legitimate code.
-        exclude: '(_test\.go|frontend/src/index\.html)$'
+        # Test files are scanned too: no _test.go file contains a PEM
+        # private key, so the old exclude only hid future leaks.
       - id: check-case-conflict
         name: Check for case conflicts
 
@@ -179,11 +176,8 @@ repos:
         # providers/azure, providers/gcp). Fast: never whole-repo, always
         # per-changed-package. CI owns the authoritative per-module scan.
         #
-        # gosec v2.28.0 is auto-installed to
-        # ~/.cache/pre-commit-gosec/v2.28.0/gosec on first use.
-        #
-        # Exclusion rationale and flag list live in scripts/gosec-hook.sh.
-        # Keep in sync with the exclude= flags there.
+        # Version, toolchain and rule set (no excludes) live in
+        # scripts/run-gosec.sh, shared with `make security-scan-go` and CI.
         entry: bash scripts/gosec-hook.sh
         language: system
         pass_filenames: true
@@ -284,5 +278,6 @@ repos:
         stages: [pre-push]
 
 # Global configuration
+default_install_hook_types: [pre-commit, pre-push]
 default_stages: [pre-commit, pre-push]
 fail_fast: false
