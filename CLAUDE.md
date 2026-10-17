@@ -14,7 +14,7 @@ Repository: `LeanerCloud/cloud-commitments-go`.
 
 ## Planning (ALWAYS follow this process)
 
-- **EVERY TIME** you create or update a plan, you MUST enter a review loop: thoroughly review the plan and fix any issues found. Repeat until 3 consecutive review passes find no issues. Do NOT skip this step — it is mandatory for all plans, no exceptions.
+- **EVERY TIME** you create or update a plan, you MUST enter a review loop: thoroughly review the plan and fix any issues found. Repeat until 3 consecutive review passes find no issues. Do NOT skip this step; it is mandatory for all plans, no exceptions.
 - In each loop iteration, print a summary of found issues before and after fixing them.
 
 ## File Organization
@@ -74,13 +74,131 @@ surfaced bugs found while working here go into this repository's GitHub
 issues instead. See `CONTRIBUTING.md` under "Known Issues Sweep" for the
 full convention (including the cross-component sweep in the platform repo).
 
-## Post-push CI watcher (MANDATORY — even for one-line fix commits)
+## Issue assignment: claim before you work (MANDATORY)
+
+Several people (and their agents) work through this repo's issue queue in
+parallel. GitHub issue assignment is the lock that keeps two of them from
+fixing the same thing. The `~/.claude/agent-comms/` bus below only
+coordinates agents on one machine; assignment is what coordinates people.
+
+1. **Pick work in priority order.** Take the highest-priority open issue
+   that nobody owns: priority/p0 through p3, then no priority label.
+   Within a level, prefer higher urgency/*, then higher impact/*, then
+   issues that unblock others, then smaller effort/*. Break remaining ties
+   oldest first. Skip status/blocked, status/needs-info, status/wontdo, and
+   anything assigned, claimed or already covered by an open PR.
+
+   ```bash
+   for p in p0 p1 p2 p3; do
+     echo "== priority/$p"
+     gh issue list --repo LeanerCloud/cloud-commitments-go --label "priority/$p" --limit 1000 \
+       --search "no:assignee -label:status/blocked -label:status/needs-info -label:status/wontdo sort:created-asc" \
+       --json number,title --jq '.[] | "#\(.number) \(.title)"'
+   done
+   echo "== no priority label"
+   gh issue list --repo LeanerCloud/cloud-commitments-go --limit 1000 \
+     --search "no:assignee -label:status/blocked -label:status/needs-info -label:status/wontdo sort:created-asc -label:priority/p0 -label:priority/p1 -label:priority/p2 -label:priority/p3" \
+     --json number,title --jq '.[] | "#\(.number) \(.title)"'
+   ```
+
+   GitHub search returns at most 1000 results whatever `--limit` says, and
+   truncates silently. If a query returns exactly 1000, split it into
+   non-overlapping windows (for example add `created:<2026-07-01` and
+   `created:>=2026-07-01`) and run each. Issues with no `priority/*` label
+   come after `p3`. The query only sees assignees, so open the issue and
+   check its comments for a claim (step 2) too. Before claiming, also check
+   that no open PR already addresses it:
+   `gh pr list --repo LeanerCloud/cloud-commitments-go --limit 1000 --search "<issue number> in:body"`
+   (split it the same way if it returns 1000).
+
+2. **Claim it before writing any code.** Post a claim comment, and also
+   assign yourself if you have write access. Claims, takeovers and releases
+   are all comments starting with a fixed marker (`Claiming:`,
+   `Taking over:` or `Released:`), because comment timestamps are what
+   decide who claimed first; `gh issue view` cannot show when someone was
+   assigned. Agents that share one GitHub login can't tell their claims
+   apart by author, so each ends every marker with its worker id, shown as
+   `[<worker-id>]` below (leave it out if the login is yours alone), and
+   compares claims by worker id; same-machine agents can also use the bus
+   below.
+
+   ```bash
+   gh issue comment <N> --repo LeanerCloud/cloud-commitments-go \
+     --body "Claiming: working on this [<worker-id>]"
+   gh issue edit <N> --repo LeanerCloud/cloud-commitments-go \
+     --add-assignee @me   # needs write access
+   ```
+
+   Then list the assignees and markers and work out who holds the issue:
+
+   ```bash
+   gh issue view <N> --repo LeanerCloud/cloud-commitments-go --json assignees,comments \
+     --jq '"assignees: \([.assignees[].login] | join(", "))",
+           (.comments[] | select((.body | test("^(Claiming|Taking over|Released):"))
+                                 or (.body | test("claimed by"; "i")))
+            | "\(.createdAt) \(.author.login): \(.body | split("\n")[0])")'
+   ```
+
+   A claim is active when its owner's latest marker is `Claiming:` or
+   `Taking over:`; a later `Released:` from them ends it. The earliest
+   active claim wins. If that is not you, release it and pick another
+   issue (your latest marker is what counts):
+
+   ```bash
+   gh issue comment <N> --repo LeanerCloud/cloud-commitments-go \
+     --body "Released: claimed by someone else first [<worker-id>]"
+   gh issue edit <N> --repo LeanerCloud/cloud-commitments-go --remove-assignee @me
+   ```
+
+   Skip the `--remove-assignee` when another worker on your shared login
+   still holds an active claim: the assignment is that worker's too, and
+   removing it would make the issue look unowned.
+
+   An assignment with no marker comment (for example a maintainer
+   assigning someone) still means the issue is taken, and so does an older
+   free-form claim comment such as `claimed by <worker>`.
+
+3. **Respect other people's claims.** An issue with an active claim or an
+   assignee belongs to that person. Do not work on it, even if it looks
+   stale. A maintainer's assignment or a maintainer's `Taking over:`
+   overrides any claim; everyone else uses the flow below. If the issue
+   has had no activity and no linked PR for 7 days, ask on the issue,
+   mentioning the owner. Take it over once they agree or release it. If
+   they have not replied after 3 more days, post
+   `Taking over: no reply since <date> [<worker-id>]`. That marker is your
+   claim and supersedes only the stale owner's claim: when you work out
+   the earliest active claim as in step 2, ignore the stale owner, but any
+   other active claim posted before your takeover still wins. Then move
+   the assignment to yourself (or ask a maintainer to, if you lack write
+   access):
+
+   ```bash
+   gh issue edit <N> --repo LeanerCloud/cloud-commitments-go \
+     --add-assignee @me --remove-assignee <old-owner>
+   ```
+
+4. **Link the PR.** Put `Closes #<N>` in the PR body so the issue and PR
+   stay connected (and the PR labeling rule below can find the issue).
+
+5. **Release what you drop.** If you stop working on an issue without a
+   PR, post `Released: <where you got to> [<worker-id>]` as a new comment
+   and unassign yourself (unless another worker on your shared login
+   still holds an active claim)
+   (`gh issue edit <N> --repo LeanerCloud/cloud-commitments-go --remove-assignee @me`), so the next
+   person can pick it up. If the issue turns out to be already fixed, say
+   which PR or commit fixed it and ask a maintainer to close it.
+
+Work that is not tracked by an issue yet (for example a larger UI or
+integration effort) gets an issue first, assigned to whoever is doing it,
+so it shows up as taken.
+
+## Post-push CI watcher (MANDATORY, even for one-line fix commits)
 
 After **every** `git push` that publishes new commits to a PR branch on
 this repo (including follow-up CodeRabbit-nitpick fixes), launch a
 background watcher per workflow run **before** ending the turn. This is
 the project-level reinforcement of the global rule in
-`~/.claude/git-workflow.md` §Post-push CI watcher — CUDly's pre-commit
+`~/.claude/git-workflow.md` §Post-push CI watcher: CUDly's pre-commit
 job alone takes 9–15 min and is silently broken by routine changes
 (missing CI tools, pre-existing markdownlint debt, git-secrets
 allowlist drift), so leaving a push unwatched routinely lets CI
@@ -97,7 +215,7 @@ Mechanics:
 
 2. For each run still in `queued`/`in_progress`, launch one background
    watcher script via `Bash` with `run_in_background: true` (do NOT use
-   foreground polling — the main session must stay unblocked). The
+   foreground polling; the main session must stay unblocked). The
    minimum viable watcher polls `gh run view <ID> --json status,conclusion`
    every 30s and on completion either reports success or dumps the failed
    step digest. A reusable template lives at
@@ -135,7 +253,7 @@ rules live in `~/.claude/git-workflow.md` §"Post-PR review loop"
    "I fixed pass 1" is not loop-exit. CUDly PRs commonly run 3–6 CR
    passes before settling.
 6. If a fix push triggers conflicts (`mergeStateStatus: DIRTY`), resolve
-   them per `~/.claude/git-workflow.md` §3a — `git rebase
+   them per `~/.claude/git-workflow.md` §3a: `git rebase
    origin/<base>`, atomic conflict resolution, `git push
    --force-with-lease`, post a rebase note on the PR, then continue
    the CR loop.
@@ -147,7 +265,7 @@ When the CodeRabbit loop applies (see Review gate) and you are
 **delegating PR work to a subagent**, the prompt MUST include the
 full CR loop, not stop at the first `@coderabbitai review` ping. A fork
 that pushes the PR, pings CR, then exits leaves the CR threads
-unresolved — same failure mode as forgetting the post-push CI watcher.
+unresolved, the same failure mode as forgetting the post-push CI watcher.
 The subagent's exit criteria must be: "CR's most recent review has zero
 Actionable items AND every Nitpick is either fixed or has a
 justification reply on the thread", not "PR opened and CR pinged". When
@@ -194,10 +312,10 @@ Merge normally; never bypass failing or required checks (no
 real purchases, deploys or the CLI's `--yes`. Any new commit or rebase
 restarts the gate; a missing reviewer or verification blocks the PR.
 
-## PR labeling — mirror closing-issue labels (MANDATORY)
+## PR labeling: mirror closing-issue labels (MANDATORY)
 
 Every PR opened in this repo must carry the **same** triage labels as
-the issue it closes — `priority/*`, `severity/*`, `urgency/*`,
+the issue it closes: `priority/*`, `severity/*`, `urgency/*`,
 `impact/*`, `effort/*`, `type/*`, plus `triaged` if the issue carries
 it. Skipping this leaves PRs invisible to the same priority queries
 that surface the issues, so an unlabeled PR is effectively
@@ -217,7 +335,7 @@ LABELS=$(gh issue view "$ISSUE_NUM" --repo LeanerCloud/cloud-commitments-go --js
         + (if [.labels[].name] | any(. == "triaged") then ["triaged"] else [] end)
         | join(",")')
 
-# Guard against empty $LABELS — gh pr edit --add-label "" fails, which would
+# Guard against empty $LABELS: gh pr edit --add-label "" fails, which would
 # silently break this MANDATORY flow. If the closing issue has no triage
 # labels in the selected classes, surface the gap deterministically instead.
 if [ -n "$LABELS" ]; then
@@ -234,10 +352,10 @@ gh pr view "$PR_NUM" --repo LeanerCloud/cloud-commitments-go --json labels \
 ```
 
 If the closing issue lacks the `triaged` label, do NOT apply
-`triaged` to the PR — that would lie. Surface the gap in the PR body
+`triaged` to the PR; that would lie. Surface the gap in the PR body
 (or as a comment on the issue) so the human can triage.
 
-If a label doesn't yet exist in the repo (rare — the label set is
+If a label doesn't yet exist in the repo (rare; the label set is
 populated from the existing issue queue), `gh label create` it with
 the same color/description as a sibling label BEFORE applying.
 

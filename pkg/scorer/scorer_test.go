@@ -1,6 +1,7 @@
 package scorer
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
@@ -166,4 +167,47 @@ func TestScore_MaxBreakEvenMonths_ComputedFromCosts(t *testing.T) {
 	loose := Score([]common.Recommendation{partial}, Config{MaxBreakEvenMonths: 12})
 	assert.Len(t, loose.Passed, 1)
 	assert.InDelta(t, 7.2, loose.Passed[0].BreakEvenMonths, 1e-9, "computed value is surfaced for reports")
+}
+
+// #392: Azure Advisor fans each recommendation out to an "upfront" and a
+// "monthly" variant, both with CommitmentCost 0 because Advisor reports no
+// price. The upfront variant's break-even is unknown, not 0 months.
+func TestScore_MaxBreakEvenMonths_PriceUnknown(t *testing.T) {
+	t.Parallel()
+	upfront := rec(common.ServiceCompute, "eastus", "Standard_D2s_v3", 0, 50, 0, 1, 0)
+	upfront.Term, upfront.PaymentOption = "1yr", "upfront"
+	monthly := upfront
+	monthly.PaymentOption = "monthly"
+	awsNoUpfront := rec(common.ServiceEC2, "us-east-1", "m5.large", 30, 40, 0, 1, 0)
+	awsNoUpfront.Term, awsNoUpfront.PaymentOption = "1yr", "no-upfront"
+	awsPartialNoPrice := awsNoUpfront
+	awsPartialNoPrice.ResourceType, awsPartialNoPrice.PaymentOption = "c5.large", "partial-upfront"
+	providerValue := awsPartialNoPrice
+	providerValue.ResourceType, providerValue.BreakEvenMonths = "r5.large", 6
+	recs := []common.Recommendation{upfront, monthly, awsNoUpfront, awsPartialNoPrice, providerValue}
+
+	result := Score(recs, Config{MaxBreakEvenMonths: 12})
+
+	passed := map[string]bool{}
+	for _, p := range result.Passed {
+		passed[p.ResourceType+"|"+p.PaymentOption] = true
+	}
+	assert.Equal(t, map[string]bool{
+		"Standard_D2s_v3|monthly":  true,
+		"m5.large|no-upfront":      true,
+		"r5.large|partial-upfront": true,
+	}, passed, "known zero upfront and a provider break-even still pass")
+	assert.Len(t, result.Filtered, 2)
+	for _, f := range result.Filtered {
+		assert.True(t, strings.HasPrefix(f.FilterReason, FilterReasonPriceUnknown+":"), f.FilterReason)
+		assert.Contains(t, f.FilterReason, f.Recommendation.PaymentOption)
+	}
+
+	unfiltered := Score(recs, Config{})
+	assert.Len(t, unfiltered.Passed, len(recs), "price-unknown only drops recs when break-even filtering is active")
+	for _, p := range unfiltered.Passed {
+		if p.ResourceType != "r5.large" {
+			assert.Zero(t, p.BreakEvenMonths, "unknown or zero break-even is never surfaced")
+		}
+	}
 }

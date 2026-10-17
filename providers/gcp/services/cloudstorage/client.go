@@ -13,6 +13,7 @@ import (
 	"google.golang.org/api/option"
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/gcp/internal/billingcurrency"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/gcp/internal/skulist"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/gcp/internal/skumatch"
 )
@@ -280,8 +281,6 @@ func (c *Client) getOrCreateBillingService(ctx context.Context) (BillingService,
 
 // extractStoragePricingFromSKUs extracts on-demand and commitment pricing from SKU list.
 func extractStoragePricingFromSKUs(skus []*cloudbilling.Sku, storageClass, region string) (onDemand, commitment float64, currency string, err error) {
-	currency = "USD"
-
 	for _, sku := range skus {
 		if !skuMatchesStorageClass(sku, storageClass, region) {
 			continue
@@ -295,8 +294,9 @@ func extractStoragePricingFromSKUs(skus []*cloudbilling.Sku, storageClass, regio
 			continue
 		}
 
-		if curr != "" {
-			currency = curr
+		currency, err = billingcurrency.Unify(currency, curr, sku.SkuId)
+		if err != nil {
+			return 0, 0, "", err
 		}
 
 		slot, slotErr := skumatch.Slot(sku)
