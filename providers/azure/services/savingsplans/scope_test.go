@@ -234,9 +234,9 @@ func TestGetCoveringCommitments_ForeignSubscriptionPlans(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			want := []common.Commitment{*convertSavingsPlan(own, "sub-a")}
+			want := []common.Commitment{mustConvertSavingsPlan(t, own, "sub-a")}
 			if tt.wantCover {
-				want = append(want, *convertSavingsPlan(tt.row, "sub-b"))
+				want = append(want, mustConvertSavingsPlan(t, tt.row, "sub-b"))
 			}
 			assert.Equal(t, want, got)
 
@@ -271,7 +271,7 @@ func (v coveringView) GetExistingCommitments(ctx context.Context) ([]common.Comm
 // unless its Single scope names another subscription.
 func TestDuplicateChecker_PlanBilledToAnotherSubscription(t *testing.T) {
 	row := func(applied, props string) string {
-		return fmt.Sprintf(`{"id":"p1","name":"Compute","properties":{"billingScopeId":"/subscriptions/sub-b","appliedScopeType":%q,"appliedScopeProperties":%s,"provisioningState":"Succeeded","effectiveDateTime":%q}}`,
+		return fmt.Sprintf(`{"id":"p1","name":"Compute","sku":{"name":"Compute_Savings_Plan"},"properties":{"billingScopeId":"/subscriptions/sub-b","appliedScopeType":%q,"appliedScopeProperties":%s,"provisioningState":"Succeeded","effectiveDateTime":%q}}`,
 			applied, props, time.Now().UTC().Add(-time.Hour).Format(time.RFC3339))
 	}
 	cases := []struct {
@@ -319,4 +319,11 @@ func TestDuplicateChecker_PlanBilledToAnotherSubscription(t *testing.T) {
 			}
 		})
 	}
+}
+
+func mustConvertSavingsPlan(t *testing.T, sp *armbillingbenefits.SavingsPlanModel, sub string) common.Commitment {
+	t.Helper()
+	c, err := convertSavingsPlan(sp, sub)
+	require.NoError(t, err)
+	return *c
 }

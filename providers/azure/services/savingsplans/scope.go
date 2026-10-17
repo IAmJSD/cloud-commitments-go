@@ -75,7 +75,11 @@ func appendCoveringForeignPlan(dst []common.Commitment, sp *armbillingbenefits.S
 		return nil, fmt.Errorf("covering savings plan has no ID")
 	}
 	payer := (*sp.Properties.BillingScopeID)[len(subscriptionScopePrefix):]
-	return append(dst, *convertSavingsPlan(sp, payer)), nil
+	commitment, err := convertSavingsPlan(sp, payer)
+	if err != nil {
+		return nil, err
+	}
+	return append(dst, *commitment), nil
 }
 
 // foreignPlanMayCover reports whether a plan billed to another subscription
