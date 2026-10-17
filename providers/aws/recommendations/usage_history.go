@@ -88,13 +88,19 @@ func (c *Client) fetchDailyCoverage(ctx context.Context, serviceFilter, resource
 	}
 
 	anyData := false
+	page := 0
 	err := paginateCE(ctx, maxRecommendationPages, "GetReservationCoverage", func(token *string) (*string, error) {
 		input.NextPageToken = token
 		result, err := c.fetchCoveragePage(ctx, input)
 		if err != nil {
 			return nil, err
 		}
-		if applyPeriodsToDayMap(result.CoveragesByTime, dayPct) {
+		page++
+		wrote, err := applyPeriodsToDayMap(result.CoveragesByTime, dayPct)
+		if err != nil {
+			return nil, fmt.Errorf("coverage page %d: %w", page, err)
+		}
+		if wrote {
 			anyData = true
 		}
 		return result.NextPageToken, nil
@@ -105,7 +111,10 @@ func (c *Client) fetchDailyCoverage(ctx context.Context, serviceFilter, resource
 	return anyData, nil
 }
 
-func applyPeriodsToDayMap(periods []types.CoverageByTime, dayPct map[string]float64) bool {
+// applyPeriodsToDayMap writes each period's coverage percentage into dayPct.
+// A period with no percentage (nil) is skipped as "no data"; a present but
+// malformed one is an error rather than a fabricated 0% day.
+func applyPeriodsToDayMap(periods []types.CoverageByTime, dayPct map[string]float64) (bool, error) {
 	anyData := false
 	for _, period := range periods {
 		if period.TimePeriod == nil || period.TimePeriod.Start == nil {
@@ -116,10 +125,14 @@ func applyPeriodsToDayMap(periods []types.CoverageByTime, dayPct map[string]floa
 			period.Total.CoverageHours.CoverageHoursPercentage == nil {
 			continue
 		}
-		dayPct[day] = parseFloat(aws.ToString(period.Total.CoverageHours.CoverageHoursPercentage))
+		pct, err := parseOptionalFloat("CoverageHoursPercentage", period.Total.CoverageHours.CoverageHoursPercentage)
+		if err != nil {
+			return false, fmt.Errorf("day %s: %w", day, err)
+		}
+		dayPct[day] = pct
 		anyData = true
 	}
-	return anyData
+	return anyData, nil
 }
 
 // regionKey identifies one (CE service filter, region) pair. Every
@@ -292,13 +305,17 @@ func (c *Client) fetchGroupedDayCoverage(ctx context.Context, serviceFilter, reg
 		Filter:  serviceRegionFilter(serviceFilter, region),
 		Metrics: []string{"Hour"},
 	}
+	page := 0
 	return paginateCE(ctx, maxCoveragePages, "grouped daily coverage", func(token *string) (*string, error) {
 		input.NextPageToken = token
 		result, err := c.fetchCoveragePage(ctx, input)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get daily coverage for %s/%s on %s: %w", serviceFilter, region, day.Format("2006-01-02"), err)
 		}
-		acc.addPeriods(result.CoveragesByTime)
+		page++
+		if err := acc.addPeriods(result.CoveragesByTime); err != nil {
+			return nil, fmt.Errorf("grouped daily coverage for %s/%s on %s page %d: %w", serviceFilter, region, day.Format("2006-01-02"), page, err)
+		}
 		// Fail fast on a token that doesn't advance; paginateCE's cap catches
 		// longer cycles and endless fresh tokens.
 		if next := aws.ToString(result.NextPageToken); next != "" && next == aws.ToString(token) {
@@ -311,34 +328,43 @@ func (c *Client) fetchGroupedDayCoverage(ctx context.Context, serviceFilter, reg
 // addPeriods applies each group's coverage percentage to the requested
 // types it matches, skipping periods without a start date and groups without
 // a CoverageHoursPercentage, exactly as applyPeriodsToDayMap does for Totals.
-func (a *groupedDayAccumulator) addPeriods(periods []types.CoverageByTime) {
+// A present but malformed percentage is an error naming the day and type.
+func (a *groupedDayAccumulator) addPeriods(periods []types.CoverageByTime) error {
 	for _, period := range periods {
 		if period.TimePeriod == nil || period.TimePeriod.Start == nil {
 			continue
 		}
 		day := aws.ToString(period.TimePeriod.Start)
 		for _, group := range period.Groups {
-			pct, ok := groupCoveragePct(group)
+			instType, _ := extractGroupAttributes(group.Attributes)
+			if len(a.byLower[instType]) == 0 {
+				continue // region-wide response: ignore types nobody requested
+			}
+			pct, ok, err := groupCoveragePct(group)
+			if err != nil {
+				return fmt.Errorf("day %s instance type %q: %w", day, instType, err)
+			}
 			if !ok {
 				continue
 			}
-			instType, _ := extractGroupAttributes(group.Attributes)
 			for _, rt := range a.byLower[instType] {
 				a.dayPct[rt][day] = pct
 				a.withData[rt] = true
 			}
 		}
 	}
+	return nil
 }
 
 // groupCoveragePct returns the group's parsed CoverageHoursPercentage, or
-// false when CE omitted it.
-func groupCoveragePct(group types.ReservationCoverageGroup) (float64, bool) {
+// false when CE omitted it. A present but malformed value is an error.
+func groupCoveragePct(group types.ReservationCoverageGroup) (pct float64, ok bool, err error) {
 	if group.Coverage == nil || group.Coverage.CoverageHours == nil ||
 		group.Coverage.CoverageHours.CoverageHoursPercentage == nil {
-		return 0, false
+		return 0, false, nil
 	}
-	return parseFloat(aws.ToString(group.Coverage.CoverageHours.CoverageHoursPercentage)), true
+	pct, err = parseOptionalFloat("CoverageHoursPercentage", group.Coverage.CoverageHours.CoverageHoursPercentage)
+	return pct, err == nil, err
 }
 
 func dailyUsageFilter(serviceFilter, resourceType, region string) *types.Expression {
