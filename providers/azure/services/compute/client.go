@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v5"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/consumption/armconsumption"
@@ -127,6 +128,12 @@ type Client struct {
 	// hermetically and make the LRO synchronous.
 	calculateExchangeCaller CalculateExchangeCallerFunc
 	doExchangeCaller        DoExchangeCallerFunc
+
+	// Optional ARM client options for the real CalculateExchange and
+	// Exchange SDK clients. Nil in production (SDK defaults); tests set a
+	// fake HTTP transport so the production LRO wrappers and the SDK's own
+	// request serialization run without reaching Azure.
+	exchangeClientOptions *arm.ClientOptions
 }
 
 // NewClient creates a new Azure Compute client.
