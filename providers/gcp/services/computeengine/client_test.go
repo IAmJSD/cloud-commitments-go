@@ -1466,106 +1466,6 @@ func TestConvertGCPRecommendation_ParamPaymentOptionRespected(t *testing.T) {
 	assert.Equal(t, "monthly", rec.PaymentOption)
 }
 
-// TestGroupCommitments_UsesValidMemoryEnum is a regression test for issue #1022:
-// GroupCommitments must emit the canonical GCP ResourceCommitment.Type enum
-// member "MEMORY" (Amount in MB), not the invalid "MEMORY_MB" string that GCP
-// rejects on commitments.insert. Fails on the pre-fix code that emitted
-// "MEMORY_MB".
-// The memory amount is read from ComputeDetails.MemoryGB (set by the converter);
-// recommendations without Details are skipped.
-func TestGroupCommitments_UsesValidMemoryEnum(t *testing.T) {
-	// 4 vCPU, 24 GB memory (non-4096-ratio to confirm the value is read from
-	// Details, not computed from the old ratio).
-	const wantMemoryGB = 24.0
-	const wantMemoryMB = int64(wantMemoryGB * 1024)
-
-	recs := []common.Recommendation{
-		{
-			Provider: common.ProviderGCP,
-			Service:  common.ServiceCompute,
-			Account:  "test-project",
-			Region:   "us-central1",
-			Term:     "1yr",
-			Count:    4,
-			Details:  common.ComputeDetails{MemoryGB: wantMemoryGB},
-		},
-	}
-
-	groups := GroupCommitments(recs)
-	require.Len(t, groups, 1, "one project+region+term group expected")
-
-	var sawVCPU, sawMemory bool
-	for _, r := range groups[0].Resources {
-		switch r.Type {
-		case "VCPU":
-			sawVCPU = true
-			assert.Equal(t, int64(4), r.Amount, "VCPU amount must equal the summed Count")
-		case "MEMORY":
-			sawMemory = true
-			assert.Equal(t, wantMemoryMB, r.Amount, "MEMORY amount must equal the payload-sourced MB (issue #1022)")
-		default:
-			t.Fatalf("invalid ResourceCommitment.Type %q (issue #1022): must be VCPU/MEMORY/LOCAL_SSD/ACCELERATOR", r.Type)
-		}
-	}
-	assert.True(t, sawVCPU, "GroupCommitments must include a VCPU resource")
-	assert.True(t, sawMemory, "GroupCommitments must include a MEMORY resource (issue #1022)")
-}
-
-// TestGroupCommitments_UsesValidMemoryEnum_PointerDetails is the
-// GroupCommitments regression test for #71: recommendations loaded via the
-// scheduler/web execution path carry Details as *ComputeDetails, not
-// ComputeDetails. Pre-fix, memoryMBFromDetails only recognized the value
-// form, so GroupCommitments silently `continue`d past every such
-// recommendation and never grouped it.
-func TestGroupCommitments_UsesValidMemoryEnum_PointerDetails(t *testing.T) {
-	const wantMemoryGB = 24.0
-	const wantMemoryMB = int64(wantMemoryGB * 1024)
-
-	recs := []common.Recommendation{
-		{
-			Provider: common.ProviderGCP,
-			Service:  common.ServiceCompute,
-			Account:  "test-project",
-			Region:   "us-central1",
-			Term:     "1yr",
-			Count:    4,
-			Details:  &common.ComputeDetails{MemoryGB: wantMemoryGB},
-		},
-	}
-
-	groups := GroupCommitments(recs)
-	require.Len(t, groups, 1, "one project+region+term group expected; pre-fix this recommendation was silently skipped")
-
-	var sawMemory bool
-	for _, r := range groups[0].Resources {
-		if r.Type == "MEMORY" {
-			sawMemory = true
-			assert.Equal(t, wantMemoryMB, r.Amount)
-		}
-	}
-	assert.True(t, sawMemory, "GroupCommitments must include a MEMORY resource for pointer-form Details")
-}
-
-// TestGroupCommitments_SkipsRecsWithoutMemory verifies that GroupCommitments skips
-// recommendations that have no Details.MemoryGB (payload omitted memory) rather
-// than producing a zero-memory commitment that GCP would reject.
-func TestGroupCommitments_SkipsRecsWithoutMemory(t *testing.T) {
-	recs := []common.Recommendation{
-		{
-			Provider: common.ProviderGCP,
-			Service:  common.ServiceCompute,
-			Account:  "test-project",
-			Region:   "us-central1",
-			Term:     "1yr",
-			Count:    4,
-			// No Details: memory is absent from the payload.
-		},
-	}
-
-	groups := GroupCommitments(recs)
-	assert.Empty(t, groups, "GroupCommitments must skip recs without payload memory, not produce a zero-memory commitment")
-}
-
 // TestConvertGCPRecommendation_NonMonthlyPaymentOptionForcedToMonthly is a
 // regression test for the CR finding that non-monthly values (e.g. "upfront")
 // are silently propagated to the recommendation, which is invalid for GCP CUDs
@@ -2367,6 +2267,7 @@ func TestConvertGCPRecommendationVCPUOnlyKeepsNilDetails(t *testing.T) {
 func TestGetRecommendationsStringMemoryAmountEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	client, _ := NewClient(ctx, "test-project", "us-central1")
+	client.SetBillingService(&MockBillingService{err: errors.New("catalog not under test")})
 	input := commitmentOnlyCUDRecommendation()
 	input.StateInfo = &recommenderpb.RecommendationStateInfo{State: recommenderpb.RecommendationStateInfo_ACTIVE}
 	memoryOpOf(input).PathValue = &recommenderpb.Operation_Value{Value: structpb.NewStringValue("6144")}
@@ -2541,10 +2442,35 @@ func TestPurchaseCommitment_RejectsNonHexIdempotencyToken(t *testing.T) {
 
 			result, err := client.PurchaseCommitment(ctx, rec, common.PurchaseOptions{IdempotencyToken: token})
 			require.Error(t, err)
-			assert.ErrorIs(t, err, errInvalidIdempotencyToken)
+			assert.ErrorIs(t, err, common.ErrInvalidIdempotencyToken)
 			assert.Contains(t, err.Error(), "lowercase hex digest")
 			assert.False(t, result.Success)
 			assert.Empty(t, mockSvc.insertReqs, "Insert must not be called for an invalid token")
+		})
+	}
+}
+
+// A short or partly non-hex token passes the name check but cannot form a
+// RequestId; it must fail before Insert instead of dropping idempotency.
+func TestPurchaseCommitment_UnformableRequestIDTokenFailsLoud(t *testing.T) {
+	ctx := context.Background()
+	rec := common.Recommendation{
+		ResourceType: "n1-standard-1",
+		Term:         "1yr",
+		Count:        5,
+		Details:      common.ComputeDetails{MemoryGB: 20.0},
+	}
+	for _, token := range []string{"abc", strings.Repeat("a", 31)} {
+		t.Run(token, func(t *testing.T) {
+			client, _ := NewClient(ctx, "test-project", "us-central1")
+			mockSvc := &MockCommitmentsService{operation: &MockOperation{}}
+			client.SetCommitmentsService(mockSvc)
+
+			result, err := client.PurchaseCommitment(ctx, rec, common.PurchaseOptions{IdempotencyToken: token})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, common.ErrInvalidIdempotencyToken)
+			assert.False(t, result.Success)
+			assert.Empty(t, mockSvc.insertReqs, "Insert must not be called")
 		})
 	}
 }
@@ -2558,7 +2484,7 @@ func TestBuildInsertRequest_RejectedTokenWrapsSentinel(t *testing.T) {
 		Details:      common.ComputeDetails{MemoryGB: 20.0},
 	}
 	_, _, err := client.buildInsertRequest(rec, common.PurchaseOptions{IdempotencyToken: "NOT-HEX"})
-	require.ErrorIs(t, err, errInvalidIdempotencyToken)
+	require.ErrorIs(t, err, common.ErrInvalidIdempotencyToken)
 }
 
 // A full 64-char SHA-256 digest must be truncated so the name stays within

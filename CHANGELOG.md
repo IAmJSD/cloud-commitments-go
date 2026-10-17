@@ -32,6 +32,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **`recommendations.AdjustExistingCoverageForExpiringCommitmentsWithCoverageOptions`:**
+  the per-pool (EC2 and other non-family) expiry deduction, plus credit for
+  replacements already bought. Coverage is a lookback average, so RIs bought
+  inside `CoverageLookbackDays` are not in it yet; with R the count of active,
+  non-expiring RIs in the same pool that started inside the lookback, the
+  deduction is `max(0, expiring - R)`. It can only buy less, never more. A
+  growth purchase in the pool counts as a replacement, and a replacement of
+  a different size in the same family is not credited.
+  `CoverageLookbackDays <= 0` credits none. Additive; the existing functions
+  are unchanged (#346).
+
 - **`recommendations.Client.GetSPCommitmentRate`:** commitment dollars per
   on-demand dollar (r) of the used part of a new Savings Plan, derived from CE
   purchase recommendations as `(utilization/100) * EstimatedSPCost /
@@ -150,6 +161,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   token (#211)
 
 ### Fixed
+
+- **`azure/compute`:** reservation exchange targets are no longer always
+  billed Upfront. `ExchangeTarget.BillingPlan` (new, optional) is sent as each
+  target's `billingPlan` in the CalculateExchange body, so the session that
+  `ExecuteExchange` commits carries it. Unset keeps the previous Upfront
+  request byte for byte; anything other than `Upfront` or `Monthly` (exact
+  spelling) is a validation error before any request (#89).
 
 - **`azure/savingsplans`:** the commitment currency is no longer hardcoded to
   USD. `SavingsPlanDetails.Currency` (new, additive) is sent in the purchase and
