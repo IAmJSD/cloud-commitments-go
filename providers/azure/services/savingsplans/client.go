@@ -4,6 +4,7 @@ package savingsplans
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -135,7 +136,10 @@ func (c *Client) GetRecommendations(ctx context.Context, params *common.Recommen
 // never terminates fails loud instead of looping forever.
 const maxSavingsPlanPages = 100
 
-// GetExistingCommitments retrieves the Azure Savings Plans billed to this client's subscription.
+// GetExistingCommitments retrieves the Azure Savings Plans billed to this
+// client's subscription, plus Single-scope plans billed to a billing account
+// that name this subscription (see planOwnedBy). Shared and management-group
+// plans billed to a billing account fail the call closed.
 func (c *Client) GetExistingCommitments(ctx context.Context) ([]common.Commitment, error) {
 	var pager SavingsPlanListAllPager
 
@@ -150,6 +154,7 @@ func (c *Client) GetExistingCommitments(ctx context.Context) ([]common.Commitmen
 	}
 
 	commitments := make([]common.Commitment, 0)
+	skippedSingle := 0
 	for pageIndex := 1; pager.More(); pageIndex++ {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("failed to list savings plans: context canceled during pagination: %w", err)
@@ -161,28 +166,40 @@ func (c *Client) GetExistingCommitments(ctx context.Context) ([]common.Commitmen
 		if err != nil {
 			return nil, fmt.Errorf("failed to list savings plans: %w", err)
 		}
-		commitments, err = c.appendOwnedPlans(commitments, page.Value)
+		var skipped int
+		commitments, skipped, err = c.appendOwnedPlans(commitments, page.Value)
+		skippedSingle += skipped
 		if err != nil {
 			return nil, fmt.Errorf("incomplete savings plan inventory for subscription %s, page %d: %w", c.subscriptionID, pageIndex, err)
 		}
+	}
+	if skippedSingle > 0 {
+		log.Printf("WARNING: skipped %d single-scope savings plans applied to other subscriptions", skippedSingle)
 	}
 	return commitments, nil
 }
 
 const subscriptionScopePrefix = "/subscriptions/"
 
-func (c *Client) appendOwnedPlans(dst []common.Commitment, plans []*armbillingbenefits.SavingsPlanModel) ([]common.Commitment, error) {
-	ownScope := c.billingScopeID()
+func (c *Client) appendOwnedPlans(dst []common.Commitment, plans []*armbillingbenefits.SavingsPlanModel) ([]common.Commitment, int, error) {
+	skipped := 0
 	for i, sp := range plans {
-		owned, err := planOwnedBy(sp, ownScope)
+		disposition, err := planOwnedBy(sp, c.subscriptionID)
 		if err != nil {
-			return nil, fmt.Errorf("row %d: %w", i+1, err)
+			return nil, 0, fmt.Errorf("row %d: %w", i+1, err)
 		}
-		if owned {
-			dst = append(dst, *convertSavingsPlan(sp, c.subscriptionID))
+		switch disposition {
+		case planOwned:
+			commitment, err := convertSavingsPlan(sp, c.subscriptionID)
+			if err != nil {
+				return nil, 0, fmt.Errorf("row %d: %w", i+1, err)
+			}
+			dst = append(dst, *commitment)
+		case planSkippedSingle:
+			skipped++
 		}
 	}
-	return dst, nil
+	return dst, skipped, nil
 }
 
 func hasPrefixFold(s, prefix string) bool {
@@ -215,10 +232,31 @@ func azureSavingsPlanState(ps armbillingbenefits.ProvisioningState) common.Commi
 	}
 }
 
+// computeResourceType is the ResourceType of a Compute savings plan on both the
+// recommendation and the inventory side; recfilter.DuplicateChecker matches on it.
+const computeResourceType = "Compute"
+
+// savingsPlanResourceType maps the plan SKU (armSkuComputeSavingsPlan, matched
+// case-insensitively) to the shared resource type. A missing or unknown SKU is
+// an error so the duplicate guard fails closed.
+func savingsPlanResourceType(sp *armbillingbenefits.SavingsPlanModel) (string, error) {
+	if sp.SKU == nil || sp.SKU.Name == nil || *sp.SKU.Name == "" {
+		return "", fmt.Errorf("owned savings plan %s has an unrecognized SKU (none reported); extend the SKU mapping in convertSavingsPlan", *sp.ID)
+	}
+	if !strings.EqualFold(*sp.SKU.Name, armSkuComputeSavingsPlan) {
+		return "", fmt.Errorf("owned savings plan %s has an unrecognized SKU %q; extend the SKU mapping in convertSavingsPlan", *sp.ID, *sp.SKU.Name)
+	}
+	return computeResourceType, nil
+}
+
 // convertSavingsPlan maps an armbillingbenefits.SavingsPlanModel to a common.Commitment.
-func convertSavingsPlan(sp *armbillingbenefits.SavingsPlanModel, subscriptionID string) *common.Commitment {
+func convertSavingsPlan(sp *armbillingbenefits.SavingsPlanModel, subscriptionID string) (*common.Commitment, error) {
 	if sp == nil || sp.ID == nil {
-		return nil
+		return nil, fmt.Errorf("savings plan has no ID")
+	}
+	resourceType, err := savingsPlanResourceType(sp)
+	if err != nil {
+		return nil, err
 	}
 
 	commitment := common.Commitment{
@@ -227,12 +265,9 @@ func convertSavingsPlan(sp *armbillingbenefits.SavingsPlanModel, subscriptionID 
 		CommitmentID:   *sp.ID,
 		CommitmentType: common.CommitmentSavingsPlan,
 		Service:        common.ServiceSavingsPlansAll,
+		ResourceType:   resourceType,
 		Count:          1,
 		State:          common.CommitmentStateActive,
-	}
-
-	if sp.Name != nil {
-		commitment.ResourceType = *sp.Name
 	}
 
 	if sp.Properties != nil {
@@ -255,7 +290,26 @@ func convertSavingsPlan(sp *armbillingbenefits.SavingsPlanModel, subscriptionID 
 		}
 	}
 
-	return &commitment
+	return requireStartDate(&commitment)
+}
+
+// requireStartDate returns c, or fails closed on a non-terminal plan with no start date.
+func requireStartDate(c *common.Commitment) (*common.Commitment, error) {
+	if c.StartDate.IsZero() && !isTerminalSavingsPlanState(c.State) {
+		return nil, fmt.Errorf("owned savings plan %s is in state %q but reports no effectiveDateTime; the duplicate guard cannot date it", c.CommitmentID, c.State)
+	}
+	return c, nil
+}
+
+// isTerminalSavingsPlanState reports the states recfilter rejects before it
+// reads StartDate, so a zero start is harmless. Anything else, including an
+// unknown or defaulted state, is treated as live.
+func isTerminalSavingsPlanState(s common.CommitmentState) bool {
+	switch s {
+	case common.CommitmentStateFailed, common.CommitmentStateCanceled, common.CommitmentStateExpired:
+		return true
+	}
+	return false
 }
 
 var currencyCodePattern = regexp.MustCompile(`^[A-Za-z]{3}$`)
@@ -279,10 +333,11 @@ func commitmentCurrency(d *common.SavingsPlanDetails) (string, error) {
 // PUT with a previously-used name returns the existing order alias rather than
 // creating a second savings plan. When opts.IdempotencyToken is set (the
 // purchase-execution path), the alias name is derived deterministically from it
-// via common.ReservationOrderID so a re-drive of a stranded execution (issue
+// via common.OrderIDFromToken so a re-drive of a stranded execution (issue
 // #636) re-PUTs the same alias instead of double-buying. When the token is empty
 // (the CLI path, which has no owning execution), the prior timestamp-based name
-// is retained.
+// is retained. A non-empty malformed token returns an error wrapping
+// common.ErrInvalidIdempotencyToken before any PUT.
 func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendation, opts common.PurchaseOptions) (common.PurchaseResult, error) {
 	result := common.PurchaseResult{
 		Recommendation: rec,
@@ -313,6 +368,16 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		return result, result.Error
 	}
 	displayName := fmt.Sprintf("cudly-%s-%s", spDetails.PlanType, rec.Term)
+	// Derive a deterministic alias name from the idempotency token when present
+	// so a re-drive PUTs the same alias (idempotent), falling back to the prior
+	// timestamp-based name on the CLI path (empty token). A malformed non-empty
+	// token fails here, before the body or alias client exists, so it can never
+	// downgrade to a non-idempotent purchase.
+	aliasName, err := common.OrderIDFromToken(opts.IdempotencyToken, fmt.Sprintf("cudly-%d", time.Now().UnixNano()))
+	if err != nil {
+		result.Error = err
+		return result, result.Error
+	}
 
 	body := armbillingbenefits.SavingsPlanOrderAliasModel{
 		SKU: &armbillingbenefits.SKU{Name: toPtr(spDetails.PlanType)},
@@ -341,10 +406,6 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		aliasClient = &realOrderAliasClient{client: client}
 	}
 
-	// Derive a deterministic alias name from the idempotency token when present
-	// so a re-drive PUTs the same alias (idempotent), falling back to the prior
-	// timestamp-based name on the CLI path (empty token).
-	aliasName := common.ReservationOrderID(opts.IdempotencyToken, fmt.Sprintf("cudly-%d", time.Now().UnixNano()))
 	poller, err := aliasClient.BeginCreate(ctx, aliasName, body, nil)
 	if err != nil {
 		result.Error = fmt.Errorf("failed to begin savings plan purchase: %w", err)

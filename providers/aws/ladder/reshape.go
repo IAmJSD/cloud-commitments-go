@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/exchange"
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/ladder"
 )
@@ -165,6 +166,8 @@ func summarizeExchangeResult(result *exchange.AutoExchangeResult) (ladder.Reshap
 			len(result.Completed)+len(result.Pending)+len(result.Failed)+len(result.Skipped)),
 	}
 
+	unknown := 0
+	firstUnknown := -1
 	for i := range result.Completed {
 		o := &result.Completed[i]
 		summary.Details = append(summary.Details, fmt.Sprintf(
@@ -179,9 +182,17 @@ func summarizeExchangeResult(result *exchange.AutoExchangeResult) (ladder.Reshap
 	}
 	for i := range result.Failed {
 		o := &result.Failed[i]
+		label := "failed"
+		if o.OutcomeUnknown {
+			unknown++
+			if firstUnknown < 0 {
+				firstUnknown = i
+			}
+			label = "outcome unknown, reconcile before retrying"
+		}
 		summary.Details = append(summary.Details, fmt.Sprintf(
-			"failed: %s (%s) -> %s: %s",
-			o.SourceRIID, o.SourceInstanceType, o.TargetInstanceType, o.Error))
+			"%s: %s (%s) -> %s: %s",
+			label, o.SourceRIID, o.SourceInstanceType, o.TargetInstanceType, o.Error))
 	}
 	for i := range result.Skipped {
 		s := &result.Skipped[i]
@@ -194,9 +205,16 @@ func summarizeExchangeResult(result *exchange.AutoExchangeResult) (ladder.Reshap
 		// summary.Analyzed: pending and skipped items were never attempted,
 		// and an inflated denominator would misread during an incident.
 		attempts := len(result.Completed) + len(result.Failed)
-		return summary, fmt.Errorf(
-			"ReshapeBuffer: %d of %d exchange attempt(s) failed (first: %s: %s); see summary details for the full list",
-			len(result.Failed), attempts, result.Failed[0].SourceRIID, result.Failed[0].Error)
+		const format = "ReshapeBuffer: %d of %d exchange attempt(s) failed (first: %s: %s)%s; see summary details for the full list"
+		if unknown == 0 {
+			first := &result.Failed[0]
+			return summary, fmt.Errorf(format, len(result.Failed), attempts, first.SourceRIID, first.Error, "")
+		}
+		// The unknown entry is the one needing reconciliation, so name it
+		// and wrap the sentinel for errors.Is.
+		first := &result.Failed[firstUnknown]
+		return summary, fmt.Errorf(format+": %w", len(result.Failed), attempts, first.SourceRIID, first.Error,
+			fmt.Sprintf("; %d with unknown outcome", unknown), common.ErrOutcomeUnknown)
 	}
 	return summary, nil
 }
