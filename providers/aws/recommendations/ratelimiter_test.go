@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/costexplorer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -124,6 +125,58 @@ func TestWait_ContextTimeout(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.Equal(t, context.DeadlineExceeded, err)
+}
+
+// TestWait_FirstAttemptHonorsCanceledContext pins issue #16: Wait must report
+// an already-canceled context even on the first attempt (retryCount == 0),
+// where no backoff delay applies.
+func TestWait_FirstAttemptHonorsCanceledContext(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  func() context.Context
+		want error
+	}{
+		{"canceled", func() context.Context {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx
+		}, context.Canceled},
+		{"deadline exceeded", func() context.Context {
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			t.Cleanup(cancel)
+			return ctx
+		}, context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			limiter := NewRateLimiter()
+			require.Equal(t, 0, limiter.GetRetryCount())
+
+			err := limiter.Wait(tc.ctx())
+
+			assert.ErrorIs(t, err, tc.want)
+			assert.Equal(t, 0, limiter.GetRetryCount(), "Wait must not change retry state")
+		})
+	}
+}
+
+// TestFetchRIPageWithRetry_PreCanceledContextSkipsCostExplorer covers the
+// caller-level effect of issue #16: with no shared semaphore attached to ctx
+// (so concurrency.Acquire is a no-op), a pre-canceled context must stop at the
+// rate limiter and never reach Cost Explorer.
+func TestFetchRIPageWithRetry_PreCanceledContextSkipsCostExplorer(t *testing.T) {
+	mockAPI := &mockCostExplorerAPI{
+		riRecommendations: &costexplorer.GetReservationPurchaseRecommendationOutput{},
+	}
+	client := NewClientWithAPI(mockAPI, "us-east-1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	out, err := client.fetchRIPageWithRetry(ctx, &costexplorer.GetReservationPurchaseRecommendationInput{})
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, out)
+	assert.Empty(t, mockAPI.riCalls, "a pre-canceled context must not reach Cost Explorer")
 }
 
 func TestShouldRetry_NoError(t *testing.T) {
