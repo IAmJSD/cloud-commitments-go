@@ -1,12 +1,17 @@
 package common //nolint:revive // pkg/common is the module's core domain package (Recommendation, ProviderType, ...), imported by name (common.X) throughout this repo and by consumer-mcp; renaming would break every consumer import
 
-import "math"
+import (
+	"math"
+	"strings"
+)
 
 // BreakEven returns the number of months until the upfront payment of rec is
 // recovered by its recurring discount, and whether that is known.
 //
 //   - A positive rec.BreakEvenMonths set by a provider wins.
 //   - No upfront (CommitmentCost == 0): (0, true). There is nothing to recover.
+//     Exception: a zero upfront on a payment option that carries an upfront
+//     (see UpfrontPriceUnknown) is a missing price, not a known zero: (0, false).
 //   - Otherwise upfront / gross monthly savings, where gross monthly savings is
 //     EstimatedSavings plus the upfront amortized over the term. EstimatedSavings
 //     is the net monthly figure (already after the amortized upfront), so using
@@ -28,7 +33,7 @@ func BreakEven(rec Recommendation) (months float64, known bool) {
 		return 0, false
 	}
 	if upfront == 0 {
-		return 0, true
+		return 0, !UpfrontPriceUnknown(rec)
 	}
 	termMonths, ok := breakEvenTermMonths(rec.Term)
 	if !ok {
@@ -53,3 +58,21 @@ func breakEvenTermMonths(term string) (float64, bool) {
 }
 
 func isFinite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+
+// UpfrontPriceUnknown reports whether rec's zero CommitmentCost is a missing
+// price rather than a known zero upfront: the payment option says an upfront
+// is charged (all, partial or Azure "upfront"), but the provider gave no
+// figure. Azure Advisor "upfront" variants and AWS recommendations with a nil
+// UpfrontCost have this shape. No-upfront, monthly and empty or unrecognized
+// payment options keep a zero as a known zero upfront.
+func UpfrontPriceUnknown(rec Recommendation) bool {
+	if rec.CommitmentCost != 0 {
+		return false
+	}
+	switch strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(strings.TrimSpace(rec.PaymentOption))) {
+	case "allupfront", "upfront", "partialupfront", "partial":
+		return true
+	default:
+		return false
+	}
+}
