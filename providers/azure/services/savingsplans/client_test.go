@@ -181,6 +181,7 @@ func TestGetExistingCommitments_Happy(t *testing.T) {
 	assert.Equal(t, spName, got.ResourceType)
 	assert.Equal(t, common.CommitmentStateActive, got.State)
 	assert.Equal(t, amount, got.Cost)
+	assert.False(t, got.StartDateIsDay, "EffectiveDateTime is a timestamp, not a calendar date")
 }
 
 func TestGetExistingCommitments_SubscriptionOwnership(t *testing.T) {
@@ -213,8 +214,8 @@ func TestGetExistingCommitments_SubscriptionOwnership(t *testing.T) {
 		{"foreign-empty-id", plan("", "/subscriptions/sub-b", "", ""), false, false},
 		{"prefix-lookalike", plan("foreign", "/subscriptions/sub-a-2", "", ""), false, false},
 		{"account-shared", plan("shared", accountScope, armbillingbenefits.AppliedScopeTypeShared, ""), false, true},
-		{"account-single-ours", plan("single", accountScope, armbillingbenefits.AppliedScopeTypeSingle, "/subscriptions/sub-a"), false, true},
-		{"account-single-other", plan("single", accountScope, armbillingbenefits.AppliedScopeTypeSingle, "/subscriptions/sub-b"), false, true},
+		{"account-single-ours", plan("single", accountScope, armbillingbenefits.AppliedScopeTypeSingle, "/subscriptions/sub-a"), true, false},
+		{"account-single-other", plan("single", accountScope, armbillingbenefits.AppliedScopeTypeSingle, "/subscriptions/sub-b"), false, false},
 		{"account-management-group", plan("group", accountScope, armbillingbenefits.AppliedScopeTypeManagementGroup, ""), false, true},
 		{"nil-row", nil, false, true},
 		{"missing-properties", &armbillingbenefits.SavingsPlanModel{ID: toPtr("missing")}, false, true},

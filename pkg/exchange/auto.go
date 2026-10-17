@@ -2,6 +2,7 @@ package exchange
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"time"
@@ -85,8 +86,20 @@ type RIExchangeConfig struct {
 	LookbackDays             int
 }
 
+// LookupOfferingParams carries the target instance type and the source RI
+// metadata a lookup needs. AvailabilityZone is the source RI's AZ and is empty
+// for regional RIs.
+type LookupOfferingParams struct {
+	InstanceType       string
+	ProductDescription string
+	Tenancy            string
+	Scope              string
+	AvailabilityZone   string
+	Duration           int64
+}
+
 // LookupOfferingFunc looks up a target offering ID for a given instance type and RI metadata.
-type LookupOfferingFunc func(ctx context.Context, instanceType, productDesc, tenancy, scope string, duration int64) (string, error)
+type LookupOfferingFunc func(ctx context.Context, p LookupOfferingParams) (string, error)
 
 // RunAutoExchangeParams holds all dependencies for RunAutoExchange.
 type RunAutoExchangeParams struct {
@@ -122,6 +135,7 @@ type RIMetadataInfo struct {
 	ProductDescription string
 	InstanceTenancy    string
 	Scope              string
+	AvailabilityZone   string
 	Duration           int64
 }
 
@@ -283,7 +297,14 @@ func resolveOffering(ctx context.Context, params RunAutoExchangeParams, rec Resh
 		}
 	}
 
-	offeringID, err := params.LookupOffering(ctx, rec.TargetInstanceType, meta.ProductDescription, meta.InstanceTenancy, meta.Scope, meta.Duration)
+	offeringID, err := params.LookupOffering(ctx, LookupOfferingParams{
+		InstanceType:       rec.TargetInstanceType,
+		ProductDescription: meta.ProductDescription,
+		Tenancy:            meta.InstanceTenancy,
+		Scope:              meta.Scope,
+		AvailabilityZone:   meta.AvailabilityZone,
+		Duration:           meta.Duration,
+	})
 	if err != nil {
 		logging.Warnf("offering lookup failed for %s -> %s: %v", rec.SourceRIID, rec.TargetInstanceType, err)
 		return "", &SkippedRecommendation{
@@ -551,6 +572,11 @@ func processAutoExchange(ctx context.Context, params RunAutoExchangeParams, rec 
 	if execErr != nil {
 		logging.Errorf("exchange execution failed for %s: %v", rec.SourceRIID, execErr)
 		outcome.Error = execErr.Error()
+		if errors.Is(execErr, common.ErrOutcomeUnknown) {
+			// The exchange may have happened: keep the record processing (still
+			// counted against the cap) and stop, instead of marking it failed.
+			return outcome, true
+		}
 		return outcome, failLedgerRecord(ctx, params.Store, record.ID, outcome.Error)
 	}
 

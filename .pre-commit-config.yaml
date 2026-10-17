@@ -47,13 +47,16 @@ repos:
     hooks:
       - id: trailing-whitespace
         name: Trim trailing whitespace
+        exclude: '^\.github/golangci/'
       - id: end-of-file-fixer
         name: Fix end of files
+        exclude: '^\.github/golangci/'
       - id: check-yaml
         name: Check YAML syntax
         exclude: '^(docker-compose.*\.yml|\.github/workflows/.*|cloudformation/.*|iac/.*/cloudformation/.*)$'
       - id: check-json
         name: Check JSON syntax
+        exclude: '^\.github/golangci/'
       - id: check-added-large-files
         name: Check for large files
         args: ['--maxkb=1024']
@@ -176,11 +179,8 @@ repos:
         # providers/azure, providers/gcp). Fast: never whole-repo, always
         # per-changed-package. CI owns the authoritative per-module scan.
         #
-        # gosec v2.28.0 is auto-installed to
-        # ~/.cache/pre-commit-gosec/v2.28.0/gosec on first use.
-        #
-        # Exclusion rationale and flag list live in scripts/gosec-hook.sh.
-        # Keep in sync with the exclude= flags there.
+        # Version, toolchain and rule set (no excludes) live in
+        # scripts/run-gosec.sh, shared with `make security-scan-go` and CI.
         entry: bash scripts/gosec-hook.sh
         language: system
         pass_filenames: true
@@ -281,5 +281,6 @@ repos:
         stages: [pre-push]
 
 # Global configuration
+default_install_hook_types: [pre-commit, pre-push]
 default_stages: [pre-commit, pre-push]
 fail_fast: false
