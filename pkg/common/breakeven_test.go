@@ -27,6 +27,13 @@ func TestBreakEven(t *testing.T) {
 		{"empty term", Recommendation{CommitmentCost: 100, EstimatedSavings: 10}, 0, false},
 		{"negative upfront", Recommendation{CommitmentCost: -1, EstimatedSavings: 10, Term: "1yr"}, 0, false},
 		{"nan savings", Recommendation{CommitmentCost: 10, EstimatedSavings: math.NaN(), Term: "1yr"}, 0, false},
+		// #392: a zero upfront on an upfront-bearing payment option is a missing price.
+		{"azure advisor upfront variant", Recommendation{PaymentOption: "upfront", EstimatedSavings: 50, Term: "1yr"}, 0, false},
+		{"all upfront without price", Recommendation{PaymentOption: "all-upfront", EstimatedSavings: 50, Term: "3yr"}, 0, false},
+		{"partial upfront without price", Recommendation{PaymentOption: "partial-upfront", EstimatedSavings: 50, Term: "1yr"}, 0, false},
+		{"no upfront option is known zero", Recommendation{PaymentOption: "no-upfront", EstimatedSavings: 50, Term: "1yr"}, 0, true},
+		{"azure monthly variant is known zero", Recommendation{PaymentOption: "monthly", EstimatedSavings: 50, Term: "1yr"}, 0, true},
+		{"provider value wins over missing upfront", Recommendation{BreakEvenMonths: 9, PaymentOption: "all-upfront", Term: "1yr"}, 9, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -44,4 +51,35 @@ func TestBreakEven_InvariantUnderScaling(t *testing.T) {
 	before, _ := BreakEven(rec)
 	after, _ := BreakEven(ScaleRecommendationCosts(rec, 0.4))
 	assert.InDelta(t, before, after, 1e-9)
+}
+
+func TestUpfrontPriceUnknown(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		payment string
+		cost    float64
+		want    bool
+	}{
+		{"all-upfront", 0, true},
+		{"partial-upfront", 0, true},
+		{"upfront", 0, true},
+		{"partial", 0, true},
+		{"All Upfront", 0, true},
+		{" Partial Upfront ", 0, true},
+		{"ALL_UPFRONT", 0, true},
+		{"all-upfront", 720, false},
+		{"upfront", 0.01, false},
+		{"no-upfront", 0, false},
+		{"No Upfront", 0, false},
+		{"NO_UPFRONT", 0, false},
+		{"monthly", 0, false},
+		{"", 0, false},
+		{"weekly-bananas", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.payment, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, UpfrontPriceUnknown(Recommendation{PaymentOption: tt.payment, CommitmentCost: tt.cost}))
+		})
+	}
 }

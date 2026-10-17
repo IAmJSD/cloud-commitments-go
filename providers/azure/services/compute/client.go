@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v5"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/consumption/armconsumption"
@@ -127,6 +128,12 @@ type Client struct {
 	// hermetically and make the LRO synchronous.
 	calculateExchangeCaller CalculateExchangeCallerFunc
 	doExchangeCaller        DoExchangeCallerFunc
+
+	// Optional ARM client options for the real CalculateExchange and
+	// Exchange SDK clients. Nil in production (SDK defaults); tests set a
+	// fake HTTP transport so the production LRO wrappers and the SDK's own
+	// request serialization run without reaching Azure.
+	exchangeClientOptions *arm.ClientOptions
 }
 
 // NewClient creates a new Azure Compute client.
@@ -140,6 +147,9 @@ func NewClient(cred azcore.TokenCredential, subscriptionID, region string) *Clie
 }
 
 // NewClientWithHTTP creates a new Azure Compute client with a custom HTTP client (for testing).
+// httpClient is used as-is and bypasses the SSRF dial guard of
+// httpclient.New(): metadata, NAT64/6to4 and unspecified addresses are
+// dialable unless the caller's client blocks them itself.
 func NewClientWithHTTP(cred azcore.TokenCredential, subscriptionID, region string, httpClient HTTPClient) *Client {
 	return &Client{
 		cred:           cred,
@@ -413,6 +423,10 @@ func (c *Client) buildReservationBody(rec common.Recommendation, billingPlan arm
 	if err != nil {
 		return nil, err
 	}
+	term, termEnumErr := reservations.ReservationTermForYears(termYears)
+	if termEnumErr != nil {
+		return nil, termEnumErr
+	}
 	requestBody := map[string]interface{}{
 		"sku":      map[string]string{"name": rec.ResourceType},
 		"location": c.region,
@@ -420,7 +434,7 @@ func (c *Client) buildReservationBody(rec common.Recommendation, billingPlan arm
 			"reservedResourceType": string(armreservations.ReservedResourceTypeVirtualMachines),
 			"billingScopeId":       fmt.Sprintf("/subscriptions/%s", c.subscriptionID),
 			"billingPlan":          string(billingPlan),
-			"term":                 fmt.Sprintf("P%dY", termYears),
+			"term":                 string(term),
 			"quantity":             rec.Count,
 			"displayName": reservations.BuildDisplayName(reservations.DisplayNameFields{
 				Service:      "vm",
@@ -431,7 +445,7 @@ func (c *Client) buildReservationBody(rec common.Recommendation, billingPlan arm
 				Payment:      rec.PaymentOption,
 				Now:          time.Now(),
 			}),
-			"appliedScopeType": "Shared",
+			"appliedScopeType": string(armreservations.AppliedScopeTypeShared),
 			"renew":            false,
 		},
 	}

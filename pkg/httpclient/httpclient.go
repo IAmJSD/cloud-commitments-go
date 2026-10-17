@@ -7,6 +7,10 @@
 // This is the single shared implementation; the Azure provider's
 // internal httpclient package delegates here so every module uses the
 // same hardening.
+//
+// The guard lives in the transport's dialer, so it protects only clients
+// returned by New. A caller-supplied *http.Client (for example one passed to
+// an Azure service's NewClientWithHTTP) is used as-is and bypasses it.
 package httpclient
 
 import (
