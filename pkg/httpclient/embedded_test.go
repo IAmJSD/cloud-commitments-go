@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -25,6 +27,13 @@ func TestBlockMetadata_EmbeddedAndUnspecified(t *testing.T) {
 		"[64:ff9b::a9fe:a9fe%eth0]:80",
 		"0.0.0.0:80",
 		"[::]:80",
+		// IPv4-mapped forms reach blockMetadata unchanged when a caller dials
+		// the literal; Unmap must reduce them to the IPv4 address.
+		"[::ffff:169.254.169.254]:80",
+		"[::ffff:a9fe:a9fe]:80",
+		"[::ffff:168.63.129.16]:80",
+		"[::ffff:100.100.100.200]:80",
+		"[::ffff:0.0.0.0]:80",
 	}
 	for _, addr := range blocked {
 		t.Run(addr, func(t *testing.T) {
@@ -41,7 +50,9 @@ func TestBlockMetadata_EmbeddedAndUnspecified(t *testing.T) {
 		"[::808:808]:443",
 		"[::1]:80",
 		"127.0.0.1:80",
+		"[::ffff:127.0.0.1]:80",
 		"8.8.8.8:443",
+		"[::ffff:8.8.8.8]:443",
 	}
 	for _, addr := range allowed {
 		t.Run(addr, func(t *testing.T) {
@@ -77,5 +88,55 @@ func TestNew_BlocksEmbeddedFormsViaRedirect(t *testing.T) {
 				t.Fatalf("redirect to %s reached test containment, not the production guard: %v", target, err)
 			}
 		})
+	}
+}
+
+// A hostname whose AAAA record is an embedded metadata form, an IPv4-mapped
+// metadata address or an unspecified address must be refused on the resolved
+// address, so DNS (including DNS64 synthesis) cannot route around the guard.
+func TestNew_BlocksHostnameResolvingToEmbeddedOrUnspecified(t *testing.T) {
+	for _, tc := range []struct {
+		answer string
+		want   string
+	}{
+		{"64:ff9b::a9fe:a9fe", "connection to metadata endpoint "},
+		{"64:ff9b::a83f:8110", "connection to metadata endpoint "},
+		{"2002:a9fe:a9fe::", "connection to metadata endpoint "},
+		{"::a9fe:a9fe", "connection to metadata endpoint "},
+		{"::ffff:169.254.169.254", "connection to metadata endpoint "},
+		{"::", "connection to unspecified address "},
+		{"0.0.0.0", "connection to unspecified address "},
+	} {
+		t.Run(tc.answer, func(t *testing.T) {
+			useFakeResolverWith(t, netip.MustParseAddr(tc.answer))
+			resp, err := newContainedClient(t).Get("http://imds.example.test/latest/meta-data/")
+			if err == nil {
+				resp.Body.Close()
+				t.Fatalf("hostname resolving to %s must be blocked", tc.answer)
+			}
+			if errors.Is(err, errTestContainment) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("hostname resolving to %s: want %q from the production guard, got: %v", tc.answer, tc.want, err)
+			}
+		})
+	}
+}
+
+// The fake resolver path still reaches an allowed loopback server, so the
+// test above fails only because of the guard.
+func TestNew_AllowsHostnameResolvingToLoopback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	port := srv.URL[strings.LastIndex(srv.URL, ":"):]
+
+	useFakeResolverWith(t, netip.MustParseAddr("127.0.0.1"))
+	resp, err := newContainedClient(t).Get("http://loopback.example.test" + port + "/")
+	if err != nil {
+		t.Fatalf("hostname resolving to loopback failed: %v", err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
 	}
 }
