@@ -78,7 +78,9 @@ func NewClient(cred azcore.TokenCredential, subscriptionID, region string) *Clie
 
 // NewClientWithHTTP creates a new Azure Synapse client with a custom HTTP client (for testing).
 // When httpClient is nil, the SSRF-hardened httpclient.New() is used so the nil
-// fallback also blocks IMDS connections.
+// fallback also blocks IMDS connections. A non-nil httpClient is used as-is and
+// bypasses that guard: metadata, NAT64/6to4 and unspecified addresses are
+// dialable unless the caller's client blocks them itself.
 func NewClientWithHTTP(cred azcore.TokenCredential, subscriptionID, region string, httpClient HTTPClient) *Client {
 	if httpClient == nil {
 		httpClient = httpclient.New()
@@ -312,6 +314,11 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		result.Error = err
 		return result, result.Error
 	}
+	term, termEnumErr := reservations.ReservationTermForYears(termYears)
+	if termEnumErr != nil {
+		result.Error = termEnumErr
+		return result, result.Error
+	}
 	billingPlan, err := reservations.BillingPlanForPaymentOption(rec.PaymentOption)
 	if err != nil {
 		result.Error = err
@@ -327,10 +334,10 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 			"reservedResourceType": string(armreservations.ReservedResourceTypeSQLDataWarehouse),
 			"billingScopeId":       fmt.Sprintf("/subscriptions/%s", c.subscriptionID),
 			"billingPlan":          string(billingPlan),
-			"term":                 fmt.Sprintf("P%dY", termYears),
+			"term":                 string(term),
 			"quantity":             rec.Count,
 			"displayName":          fmt.Sprintf("Synapse SQL Pool Reservation - %s", rec.ResourceType),
-			"appliedScopeType":     "Shared",
+			"appliedScopeType":     string(armreservations.AppliedScopeTypeShared),
 			"renew":                false,
 		},
 	}

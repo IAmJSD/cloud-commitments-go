@@ -153,6 +153,7 @@ func TestGetExistingCommitments_Happy(t *testing.T) {
 	sp := &armbillingbenefits.SavingsPlanModel{
 		ID:   &spID,
 		Name: &spName,
+		SKU:  &armbillingbenefits.SKU{Name: toPtr("Compute_Savings_Plan")},
 		Properties: &armbillingbenefits.SavingsPlanModelProperties{
 			BillingScopeID:    toPtr("/subscriptions/sub-abc"),
 			ProvisioningState: &prov,
@@ -178,17 +179,20 @@ func TestGetExistingCommitments_Happy(t *testing.T) {
 	assert.Equal(t, common.CommitmentSavingsPlan, got.CommitmentType)
 	assert.Equal(t, common.ServiceSavingsPlansAll, got.Service)
 	assert.Equal(t, spID, got.CommitmentID)
-	assert.Equal(t, spName, got.ResourceType)
+	assert.Equal(t, "Compute", got.ResourceType)
 	assert.Equal(t, common.CommitmentStateActive, got.State)
 	assert.Equal(t, amount, got.Cost)
+	assert.False(t, got.StartDateIsDay, "EffectiveDateTime is a timestamp, not a calendar date")
 }
 
 func TestGetExistingCommitments_SubscriptionOwnership(t *testing.T) {
 	plan := func(id, scope string, applied armbillingbenefits.AppliedScopeType, subscription string) *armbillingbenefits.SavingsPlanModel {
 		return &armbillingbenefits.SavingsPlanModel{
-			ID: toPtr(id),
+			ID:  toPtr(id),
+			SKU: &armbillingbenefits.SKU{Name: toPtr("Compute_Savings_Plan")},
 			Properties: &armbillingbenefits.SavingsPlanModelProperties{
 				BillingScopeID:         toPtr(scope),
+				EffectiveDateTime:      toPtr(time.Now()),
 				AppliedScopeType:       toPtr(applied),
 				AppliedScopeProperties: &armbillingbenefits.AppliedScopeProperties{SubscriptionID: toPtr(subscription)},
 			},
@@ -213,8 +217,8 @@ func TestGetExistingCommitments_SubscriptionOwnership(t *testing.T) {
 		{"foreign-empty-id", plan("", "/subscriptions/sub-b", "", ""), false, false},
 		{"prefix-lookalike", plan("foreign", "/subscriptions/sub-a-2", "", ""), false, false},
 		{"account-shared", plan("shared", accountScope, armbillingbenefits.AppliedScopeTypeShared, ""), false, true},
-		{"account-single-ours", plan("single", accountScope, armbillingbenefits.AppliedScopeTypeSingle, "/subscriptions/sub-a"), false, true},
-		{"account-single-other", plan("single", accountScope, armbillingbenefits.AppliedScopeTypeSingle, "/subscriptions/sub-b"), false, true},
+		{"account-single-ours", plan("single", accountScope, armbillingbenefits.AppliedScopeTypeSingle, "/subscriptions/sub-a"), true, false},
+		{"account-single-other", plan("single", accountScope, armbillingbenefits.AppliedScopeTypeSingle, "/subscriptions/sub-b"), false, false},
 		{"account-management-group", plan("group", accountScope, armbillingbenefits.AppliedScopeTypeManagementGroup, ""), false, true},
 		{"nil-row", nil, false, true},
 		{"missing-properties", &armbillingbenefits.SavingsPlanModel{ID: toPtr("missing")}, false, true},
@@ -353,14 +357,15 @@ func TestPurchaseCommitment_DeterministicAliasNameFromToken(t *testing.T) {
 	}
 
 	token := common.DeriveIdempotencyToken("exec-1", 0)
-	wantName := common.ReservationOrderID(token, "")
+	wantName, err := common.OrderIDFromToken(token, "")
+	require.NoError(t, err)
 	require.NotEmpty(t, wantName, "token must yield a deterministic GUID")
 
 	// First drive.
 	mock1 := &mockOrderAliasClient{createPoller: &mockPoller{resp: resp}}
 	c1 := NewClient(nil, "sub", "eastus")
 	c1.SetOrderAliasClient(mock1)
-	_, err := c1.PurchaseCommitment(context.Background(), makeRec("1yr"), common.PurchaseOptions{IdempotencyToken: token})
+	_, err = c1.PurchaseCommitment(context.Background(), makeRec("1yr"), common.PurchaseOptions{IdempotencyToken: token})
 	require.NoError(t, err)
 	assert.Equal(t, wantName, mock1.capturedName)
 
@@ -372,6 +377,35 @@ func TestPurchaseCommitment_DeterministicAliasNameFromToken(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, mock1.capturedName, mock2.capturedName,
 		"re-drive with the same idempotency token must reuse the alias name (PUT is idempotent)")
+}
+
+// TestPurchaseCommitment_MalformedTokenFailsBeforePUT verifies a non-empty token
+// that yields no GUID is refused before BeginCreate. The case without an
+// injected alias client checks the error is the token error, not "failed to
+// create order alias client". Pre-fix the malformed token silently fell back to
+// a timestamp alias name and the purchase went ahead.
+func TestPurchaseCommitment_MalformedTokenFailsBeforePUT(t *testing.T) {
+	for _, token := range []string{"abc", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"} {
+		id := "/subscriptions/sub/providers/Microsoft.BillingBenefits/savingsPlanOrders/o"
+		mock := &mockOrderAliasClient{createPoller: &mockPoller{resp: armbillingbenefits.SavingsPlanOrderAliasClientCreateResponse{
+			SavingsPlanOrderAliasModel: armbillingbenefits.SavingsPlanOrderAliasModel{ID: &id},
+		}}}
+		c := NewClient(nil, "sub", "eastus")
+		c.SetOrderAliasClient(mock)
+		result, err := c.PurchaseCommitment(context.Background(), makeRec("1yr"), common.PurchaseOptions{IdempotencyToken: token})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, common.ErrInvalidIdempotencyToken)
+		assert.False(t, result.Success)
+		assert.Zero(t, mock.calls, "no BeginCreate for a malformed token")
+		assert.NotContains(t, err.Error(), token)
+	}
+
+	// No injected alias client and a nil credential: the token error must win
+	// over "failed to create order alias client".
+	c := NewClient(nil, "sub", "eastus")
+	_, err := c.PurchaseCommitment(context.Background(), makeRec("1yr"), common.PurchaseOptions{IdempotencyToken: "abc"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, common.ErrInvalidIdempotencyToken)
 }
 
 // TestPurchaseCommitment_EmptyTokenUsesTimestampName verifies the CLI path (no
