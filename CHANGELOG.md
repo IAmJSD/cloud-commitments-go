@@ -176,6 +176,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **`azure/compute`:** reservation exchange targets are no longer always
+  billed Upfront. `ExchangeTarget.BillingPlan` (new, optional) is sent as each
+  target's `billingPlan` in the CalculateExchange body, so the session that
+  `ExecuteExchange` commits carries it. Unset keeps the previous Upfront
+  request byte for byte; anything other than `Upfront` or `Monthly` (exact
+  spelling) is a validation error before any request (#89).
+
 - **`azure/savingsplans`:** the commitment currency is no longer hardcoded to
   USD. `SavingsPlanDetails.Currency` (new, additive) is sent in the purchase and
   validate bodies and returned by `GetOfferingDetails`; empty or malformed

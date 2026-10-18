@@ -2,8 +2,10 @@ package reservations
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/reservations/armreservations"
 
@@ -31,7 +33,16 @@ func StrictCommitment(r *armreservations.ReservationResponse, subscriptionID str
 	if commitment == nil {
 		return nil, nil
 	}
-	if err := validateReservationScope(r.Properties, commitment.CommitmentID, subscriptionID, labels, now); err != nil {
+	owned, err := reservationOwnedBy(r.Properties, commitment.CommitmentID, subscriptionID, labels)
+	if err != nil {
+		return nil, err
+	}
+	if !owned {
+		log.Printf("%s: skipping Shared %s reservation %q: billed to %q, not subscription %q",
+			labels.Service, labels.Resource, commitment.CommitmentID, *r.Properties.BillingScopeID, subscriptionID)
+		return nil, nil
+	}
+	if err := validateReservationExpiry(r.Properties, commitment.CommitmentID, subscriptionID, labels, now); err != nil {
 		return nil, err
 	}
 	if !isTerminalCommitmentState(commitment.State) {
@@ -87,13 +98,52 @@ func validateLiveReservationFields(r *armreservations.ReservationResponse, reser
 	return nil
 }
 
-func validateReservationScope(props *armreservations.Properties, reservationID, subscriptionID string, labels StrictLabels, now time.Time) error {
+// reservationOwnedBy decides whether a reservation from the applied list is
+// this subscription's commitment. A Single reservation was already matched to
+// the subscription by filterAppliedReservations. A Shared reservation applies
+// across its billing context, so it is attributed only to the subscription its
+// billingScopeId names: CUDly purchases under /subscriptions/{sub}, so the
+// buying subscription keeps its duplicate guard and no other subscription is
+// credited with the same quantity (issue #293). A Shared reservation whose
+// purchaser cannot be identified, and any other scope type, fails closed: it
+// may be the reservation bought an hour ago.
+func reservationOwnedBy(props *armreservations.Properties, reservationID, subscriptionID string, labels StrictLabels) (bool, error) {
 	if props.AppliedScopeType == nil {
-		return fmt.Errorf("%s: cannot attribute %s reservation %q to subscription %q: missing applied scope type", labels.Service, labels.Resource, reservationID, subscriptionID)
+		return false, fmt.Errorf("%s: cannot attribute %s reservation %q to subscription %q: missing applied scope type", labels.Service, labels.Resource, reservationID, subscriptionID)
 	}
-	if *props.AppliedScopeType != armreservations.AppliedScopeTypeSingle {
-		return fmt.Errorf("%s: cannot attribute %s reservation %q to subscription %q: applied scope type %q is not Single", labels.Service, labels.Resource, reservationID, subscriptionID, *props.AppliedScopeType)
+	switch *props.AppliedScopeType {
+	case armreservations.AppliedScopeTypeSingle:
+		return true, nil
+	case armreservations.AppliedScopeTypeShared:
+		billingSubscription, ok := billingSubscriptionID(props.BillingScopeID)
+		if !ok {
+			return false, fmt.Errorf("%s: cannot attribute %s reservation %q to subscription %q: Shared scope without a subscription billingScopeId", labels.Service, labels.Resource, reservationID, subscriptionID)
+		}
+		return strings.EqualFold(billingSubscription, subscriptionID), nil
+	default:
+		return false, fmt.Errorf("%s: cannot attribute %s reservation %q to subscription %q: unsupported applied scope type %q", labels.Service, labels.Resource, reservationID, subscriptionID, *props.AppliedScopeType)
 	}
+}
+
+// billingSubscriptionID extracts {sub} from a billingScopeId of exactly
+// /subscriptions/{sub}. Anything else (nil, blank, another resource path) is
+// not a purchasing subscription.
+func billingSubscriptionID(scope *string) (string, bool) {
+	if scope == nil {
+		return "", false
+	}
+	segments := strings.Split(*scope, "/")
+	if len(segments) != 3 || segments[0] != "" || !strings.EqualFold(segments[1], "subscriptions") {
+		return "", false
+	}
+	sub := segments[2]
+	if sub == "" || strings.IndexFunc(sub, unicode.IsSpace) >= 0 {
+		return "", false
+	}
+	return sub, true
+}
+
+func validateReservationExpiry(props *armreservations.Properties, reservationID, subscriptionID string, labels StrictLabels, now time.Time) error {
 	if props.ProvisioningState != nil && *props.ProvisioningState == armreservations.ProvisioningStateSucceeded &&
 		props.ExpiryDate != nil && props.ExpiryDate.UTC().Format(time.DateOnly) == now.UTC().Format(time.DateOnly) {
 		return fmt.Errorf("%s: cannot determine lifecycle for %s reservation %q in subscription %q: reservations API date-only expiryDate %s falls on the current UTC date",

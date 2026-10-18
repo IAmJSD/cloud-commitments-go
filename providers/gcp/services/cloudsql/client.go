@@ -361,12 +361,8 @@ func extractSQLPriceFromSKU(sku *cloudbilling.Sku) (price float64, currency stri
 	}
 
 	pricingInfo := sku.PricingInfo[0]
-	if pricingInfo.PricingExpression == nil || len(pricingInfo.PricingExpression.TieredRates) == 0 {
-		return 0, ""
-	}
-
-	rate := pricingInfo.PricingExpression.TieredRates[0]
-	if rate.UnitPrice == nil {
+	rate := skumatch.PaidRate(pricingInfo.PricingExpression)
+	if rate == nil {
 		return 0, ""
 	}
 
