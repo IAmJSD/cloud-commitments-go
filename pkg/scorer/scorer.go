@@ -15,10 +15,15 @@ import (
 // Zero values mean "no filter" for numeric thresholds; empty slice means "all services".
 type Config struct {
 	MinSavingsPct      float64  // Minimum savings percentage. 0 = no filter.
-	MaxBreakEvenMonths int      // Maximum break-even months. 0 = no filter. No-upfront recs pass; recs whose break-even cannot be computed are filtered.
+	MaxBreakEvenMonths int      // Maximum break-even months. 0 = no filter. No-upfront recs pass; recs whose break-even cannot be computed are filtered (an upfront payment option with no upfront price as FilterReasonPriceUnknown).
 	MinCount           int      // Minimum count per recommendation. 0 = no filter.
 	EnabledServices    []string // Empty = all services. E.g. ["ec2", "rds"].
 }
+
+// FilterReasonPriceUnknown prefixes the FilterReason of a recommendation
+// dropped by MaxBreakEvenMonths because its upfront price is unknown
+// (common.UpfrontPriceUnknown).
+const FilterReasonPriceUnknown = "price-unknown"
 
 // FilteredRecommendation holds a recommendation that did not pass a filter, with the reason.
 type FilteredRecommendation struct {
@@ -90,12 +95,8 @@ func filterReason(rec common.Recommendation, cfg Config, enabledServices map[str
 	}
 
 	if cfg.MaxBreakEvenMonths > 0 {
-		months, known := common.BreakEven(rec)
-		if !known {
-			return fmt.Sprintf("break-even cannot be computed (upfront %.2f, savings %.2f, term %q); --max-break-even-months %d cannot be enforced", rec.CommitmentCost, rec.EstimatedSavings, rec.Term, cfg.MaxBreakEvenMonths)
-		}
-		if months > float64(cfg.MaxBreakEvenMonths) {
-			return fmt.Sprintf("break-even %.1f months exceeds maximum %d months", months, cfg.MaxBreakEvenMonths)
+		if reason := breakEvenReason(rec, cfg.MaxBreakEvenMonths); reason != "" {
+			return reason
 		}
 	}
 
@@ -103,6 +104,22 @@ func filterReason(rec common.Recommendation, cfg Config, enabledServices map[str
 		return fmt.Sprintf("count %d below minimum %d", rec.Count, cfg.MinCount)
 	}
 
+	return ""
+}
+
+// breakEvenReason returns why rec fails a positive maxMonths break-even
+// filter, or "" if it passes. Unknown break-even fails closed.
+func breakEvenReason(rec common.Recommendation, maxMonths int) string {
+	months, known := common.BreakEven(rec)
+	if !known {
+		if common.UpfrontPriceUnknown(rec) {
+			return fmt.Sprintf("%s: no upfront price for payment option %q; --max-break-even-months %d cannot be enforced", FilterReasonPriceUnknown, rec.PaymentOption, maxMonths)
+		}
+		return fmt.Sprintf("break-even cannot be computed (upfront %.2f, savings %.2f, term %q); --max-break-even-months %d cannot be enforced", rec.CommitmentCost, rec.EstimatedSavings, rec.Term, maxMonths)
+	}
+	if months > float64(maxMonths) {
+		return fmt.Sprintf("break-even %.1f months exceeds maximum %d months", months, maxMonths)
+	}
 	return ""
 }
 

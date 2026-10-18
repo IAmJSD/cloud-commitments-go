@@ -47,12 +47,20 @@ func newContainedClient(t *testing.T) *http.Client {
 // getaddrinfo for decimal/hex/octal IPv4 spellings) resolves in production.
 func useFakeResolver(t *testing.T) {
 	t.Helper()
+	useFakeResolverWith(t, netip.AddrFrom4(imdsIPv4))
+}
+
+// useFakeResolverWith points New's dialer at an in-process DNS server that
+// answers A queries with the IPv4 entries of answers and AAAA queries with the
+// IPv6 entries (an IPv4-mapped entry is an IPv6 answer).
+func useFakeResolverWith(t *testing.T, answers ...netip.Addr) {
+	t.Helper()
 	prev := resolver
 	resolver = &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			client, server := net.Pipe()
-			go serveOneDNSQuery(server)
+			go serveOneDNSQuery(server, answers)
 			return client, nil
 		},
 	}
@@ -60,9 +68,9 @@ func useFakeResolver(t *testing.T) {
 }
 
 // serveOneDNSQuery answers one TCP-framed query (net.Pipe is not a PacketConn,
-// so the Go resolver uses length-prefixed framing). A queries get imdsIPv4;
-// anything else gets an empty answer section.
-func serveOneDNSQuery(conn net.Conn) {
+// so the Go resolver uses length-prefixed framing) with the answers matching
+// its QTYPE; other query types get an empty answer section.
+func serveOneDNSQuery(conn net.Conn, answers []netip.Addr) {
 	defer conn.Close()
 	var l [2]byte
 	if _, err := io.ReadFull(conn, l[:]); err != nil {
@@ -80,15 +88,26 @@ func serveOneDNSQuery(conn net.Conn) {
 	if end > len(q) {
 		return
 	}
-	isA := binary.BigEndian.Uint16(q[end-4:end-2]) == 1
+	qtype := binary.BigEndian.Uint16(q[end-4 : end-2])
 
 	resp := append([]byte{}, q[:2]...)                      // ID
 	resp = append(resp, 0x81, 0x80, 0, 1, 0, 0, 0, 0, 0, 0) // flags, QD=1, AN/NS/AR=0
 	resp = append(resp, q[12:end]...)
-	if isA {
-		resp[7] = 1 // ANCOUNT
-		resp = append(resp, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4)
-		resp = append(resp, imdsIPv4[:]...)
+	for _, a := range answers {
+		var rdata []byte
+		switch {
+		case qtype == 1 && a.Is4():
+			b := a.As4()
+			rdata = b[:]
+		case qtype == 28 && a.Is6():
+			b := a.As16()
+			rdata = b[:]
+		default:
+			continue
+		}
+		resp[7]++ // ANCOUNT
+		resp = append(resp, 0xc0, 0x0c, byte(qtype>>8), byte(qtype), 0, 1, 0, 0, 0, 60, 0, byte(len(rdata)))
+		resp = append(resp, rdata...)
 	}
 	out := binary.BigEndian.AppendUint16(nil, uint16(len(resp)))
 	_, _ = conn.Write(append(out, resp...))

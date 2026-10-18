@@ -300,6 +300,12 @@ func (c *Client) findReservationByID(ctx context.Context, reservationID string) 
 // pages to walk before giving up. At MaxRecords=100 per page this caps the
 // search at 500 offerings. Exceeding the cap returns a diagnostic error instead
 // of timing out the Lambda budget (issue #688).
+//
+// The walk must reach the last page to prove an exact match is unique (issue
+// #288), so hitting the cap is a refuse-only outcome even when a match was
+// already found: the lookup errors and nothing is purchased (issue #303). The
+// request filters on class, engine, multi-AZ, duration and payment option, so
+// a result set anywhere near 500 rows is not expected.
 const maxOfferingPages = 5
 
 // findOfferingID finds the appropriate RDS Reserved Instance offering ID.
@@ -371,9 +377,10 @@ func (c *Client) fetchRDSOfferingPage(ctx context.Context, baseInput *rds.Descri
 	return rdsOfferingPageResult{id: id, marker: nextMarker}, nil
 }
 
-// paginateRDSOfferings walks DescribeReservedDBInstancesOfferings pages and returns
-// the first matching offering ID. It caps at maxOfferingPages to prevent Lambda
-// timeout exhaustion (issue #688).
+// paginateRDSOfferings walks every DescribeReservedDBInstancesOfferings page and
+// returns the single exact-match offering ID. It caps at maxOfferingPages to
+// prevent Lambda timeout exhaustion (issue #688); reaching the cap errors even
+// when a match was already seen (issue #303).
 func (c *Client) paginateRDSOfferings(ctx context.Context, rec common.Recommendation, details *common.DatabaseDetails, offeringType, execID string) (string, error) {
 	multiAZ := details.AZConfig == "multi-az"
 	normalizedEngine, err := c.lookupEngineName(details.Engine)
@@ -418,7 +425,7 @@ func (c *Client) paginateRDSOfferings(ctx context.Context, rec common.Recommenda
 	var found string
 	pages := 0
 	for page := 1; ; page++ {
-		if err := offeringPageAllowed(ctx, page, desc); err != nil {
+		if err := offeringPageAllowed(ctx, page, desc, found); err != nil {
 			return "", err
 		}
 		pr, err := c.fetchRDSOfferingPage(ctx, baseInput, marker, want, tag, page, t0)
@@ -442,14 +449,20 @@ func (c *Client) paginateRDSOfferings(ctx context.Context, rec common.Recommenda
 }
 
 // offeringPageAllowed stops the page walk on cancellation or at the page cap.
-func offeringPageAllowed(ctx context.Context, page int, desc string) error {
+// found is the exact match seen so far, if any; at the cap it cannot be proven
+// unique, so the walk refuses rather than return it (issue #303).
+func offeringPageAllowed(ctx context.Context, page int, desc, found string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if page > maxOfferingPages {
-		return fmt.Errorf("pagination cap reached after %d pages for RDS %s (issue #688)", maxOfferingPages, desc)
+	if page <= maxOfferingPages {
+		return nil
 	}
-	return nil
+	if found != "" {
+		return fmt.Errorf("pagination cap reached after %d pages for RDS %s: offering %q matched but more pages remain, "+
+			"so it cannot be proven unique; refusing to purchase (issue #303)", maxOfferingPages, desc, found)
+	}
+	return fmt.Errorf("pagination cap reached after %d pages for RDS %s (issue #688)", maxOfferingPages, desc)
 }
 
 // pickOfferingID folds a newly found exact-match ID into the one found so far
@@ -475,10 +488,26 @@ func (c *Client) lookupEngineName(engine string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if strings.HasPrefix(name, "oracle") || strings.HasPrefix(name, "sqlserver") || strings.HasPrefix(name, "sql-server") {
+	if isLicensedEngine(name) {
 		return "", fmt.Errorf("engine %q: license model is not known; refusing to guess", engine)
 	}
 	return name, nil
+}
+
+// licensedEnginePrefixes are the lower-cased engine spellings whose offerings
+// carry a license model. "sql server" (with a space) is the Cost Explorer
+// spelling, which normalizeEngineName passes through as-is (issue #302).
+var licensedEnginePrefixes = []string{"oracle", "sqlserver", "sql-server", "sql server"}
+
+// isLicensedEngine reports whether a normalized engine name is Oracle or SQL
+// Server in any spelling.
+func isLicensedEngine(name string) bool {
+	for _, prefix := range licensedEnginePrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // offeringDuration returns the term as the API's duration string and as seconds

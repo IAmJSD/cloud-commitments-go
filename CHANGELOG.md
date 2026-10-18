@@ -162,6 +162,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **`azure/compute`:** reservation exchange targets are no longer always
+  billed Upfront. `ExchangeTarget.BillingPlan` (new, optional) is sent as each
+  target's `billingPlan` in the CalculateExchange body, so the session that
+  `ExecuteExchange` commits carries it. Unset keeps the previous Upfront
+  request byte for byte; anything other than `Upfront` or `Monthly` (exact
+  spelling) is a validation error before any request (#89).
+
 - **`ladder.Allocate` no longer subtracts existing commitment from a residual
   baseline a second time (#282).** New `UsageBaseline.Basis`
   (`BaselineBasisTotal`, the default including the empty value, or

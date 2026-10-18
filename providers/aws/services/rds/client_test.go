@@ -1316,9 +1316,14 @@ func TestFindOfferingID_NoMatchReportsPagesFetched(t *testing.T) {
 
 // TestFindOfferingID_LicensedEnginesRefusedBeforeAPICall: Oracle and SQL Server
 // offerings are listed as "oracle-se2(li)" / "oracle-se2(byol)", so the license
-// model must be known; the lookup refuses without calling the API.
+// model must be known; the lookup refuses without calling the API. "SQL Server"
+// is the Cost Explorer spelling (with a space) and must be refused the same way
+// rather than fail later as "no offerings found" (issue #302).
 func TestFindOfferingID_LicensedEnginesRefusedBeforeAPICall(t *testing.T) {
-	for _, engine := range []string{"oracle-se2", "oracle-ee", "sqlserver-se", "sqlserver-web", "sql-server-ex"} {
+	for _, engine := range []string{
+		"oracle-se2", "oracle-ee", "sqlserver-se", "sqlserver-web", "sql-server-ex",
+		"SQL Server", "sql server", "SQL Server Enterprise",
+	} {
 		t.Run(engine, func(t *testing.T) {
 			mockRDS := &MockRDSClient{}
 			t.Cleanup(func() { mockRDS.AssertExpectations(t) })
@@ -1335,4 +1340,59 @@ func TestFindOfferingID_LicensedEnginesRefusedBeforeAPICall(t *testing.T) {
 			mockRDS.AssertNotCalled(t, "DescribeReservedDBInstancesOfferings", mock.Anything, mock.Anything)
 		})
 	}
+}
+
+// cappedOfferingPages returns maxOfferingPages pages, each with a next-page
+// marker, so the walk always reaches the page cap. matchPage (1-based) carries
+// an exact match; every other page is empty.
+func cappedOfferingPages(mockRDS *MockRDSClient, matchPage int) {
+	for i := range maxOfferingPages {
+		out := &rds.DescribeReservedDBInstancesOfferingsOutput{
+			ReservedDBInstancesOfferings: []types.ReservedDBInstancesOffering{},
+			Marker:                       aws.String(fmt.Sprintf("tok-%d", i+1)),
+		}
+		if i+1 == matchPage {
+			out.ReservedDBInstancesOfferings = []types.ReservedDBInstancesOffering{exactOffering("offering-early")}
+		}
+		mockRDS.On("DescribeReservedDBInstancesOfferings", mock.Anything, mock.Anything).Return(out, nil).Once()
+	}
+}
+
+// TestFindOfferingID_MatchBeforeCapRefusesWhenMorePagesRemain pins issue #303:
+// an exact match seen before the page cap cannot be proven unique while more
+// pages remain, so the lookup must refuse (never return the match) with an
+// error that names the unverified match, and must not fetch past the cap.
+func TestFindOfferingID_MatchBeforeCapRefusesWhenMorePagesRemain(t *testing.T) {
+	for _, matchPage := range []int{1, maxOfferingPages} {
+		t.Run(fmt.Sprintf("match on page %d", matchPage), func(t *testing.T) {
+			mockRDS := &MockRDSClient{}
+			t.Cleanup(func() { mockRDS.AssertExpectations(t) })
+			client := &Client{client: mockRDS, region: "us-east-1"}
+			cappedOfferingPages(mockRDS, matchPage)
+
+			id, err := client.findOfferingID(context.Background(), idempotencyTestRec(), "")
+
+			assert.Empty(t, id)
+			if assert.Error(t, err) {
+				assert.Contains(t, err.Error(), "pagination cap reached")
+				assert.Contains(t, err.Error(), `"offering-early"`)
+				assert.Contains(t, err.Error(), "cannot be proven unique")
+				assert.Contains(t, err.Error(), "refusing to purchase")
+			}
+			mockRDS.AssertNumberOfCalls(t, "DescribeReservedDBInstancesOfferings", maxOfferingPages)
+		})
+	}
+}
+
+// TestFindOfferingID_MatchOnLastAllowedPageSucceeds pins the cap boundary for
+// issue #303: when the final page is the last one the cap allows (no further
+// marker), the walk is complete and the unique match is returned.
+func TestFindOfferingID_MatchOnLastAllowedPageSucceeds(t *testing.T) {
+	pages := make([][]types.ReservedDBInstancesOffering, maxOfferingPages)
+	pages[maxOfferingPages-1] = []types.ReservedDBInstancesOffering{exactOffering("offering-last")}
+
+	id, err := findAcrossPages(t, pages...)
+
+	assert.NoError(t, err)
+	assert.Equal(t, "offering-last", id)
 }

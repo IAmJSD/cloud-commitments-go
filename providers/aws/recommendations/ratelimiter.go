@@ -64,8 +64,13 @@ func (r *RateLimiter) newOperation() *RateLimiter {
 	return NewRateLimiterWithOptions(r.baseDelay, r.maxDelay, r.maxRetries)
 }
 
-// Wait implements exponential backoff delay.
+// Wait implements exponential backoff delay. An already-canceled or expired
+// context is reported on every attempt, including the first, so callers never
+// proceed to an API call with a dead context.
 func (r *RateLimiter) Wait(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if r.retryCount == 0 {
 		// No delay for first attempt
 		return nil
