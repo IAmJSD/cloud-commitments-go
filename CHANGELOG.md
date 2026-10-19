@@ -176,6 +176,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **`aws/recommendations`:** the Savings Plans coverage and utilization and
+  on-demand Cost Explorer fetchers now hold the shared concurrency slot around
+  each call, so they count toward `CUDLY_MAX_PARALLELISM` (#8).
 - **`azure`:** the Retail Prices `$filter` values built from SKU and region in
   the search, compute, cosmosdb and savingsplans clients are now validated with
   `pricing.ODataString`, so an injected value is rejected before any request is
