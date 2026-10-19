@@ -32,6 +32,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **`RecommendationParams.RIAccountScope`:** selects the Cost Explorer account
+  scope (`linked` default, or `payer`) for Reserved Instance recommendations,
+  mirroring `SPAccountScope`. Empty keeps the previous linked behaviour; an
+  unknown value is rejected (#508).
 - **`recommendations.RederiveFamilyCoverage`:** recomputes the family-wide
   RDS `ProjectedCoverage` that family-NU sizing wrote, after a caller changed
   `Count` (`--max-instances`, count override, duplicate-RI dedupe). It shares
