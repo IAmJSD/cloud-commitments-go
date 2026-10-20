@@ -12,6 +12,7 @@ import (
 )
 
 func TestGetFilteredPlanTypes(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		includeSPTypes []string
@@ -155,6 +156,7 @@ func TestGetFilteredPlanTypes(t *testing.T) {
 // EstimatedAverageUtilization field added for issue #338 — the SP equivalent
 // of the RI AverageUtilization signal that drives --target-coverage sizing.
 func TestParseSavingsPlanDetail_RecommendedUtilization(t *testing.T) {
+	t.Parallel()
 	client := &Client{}
 	params := common.RecommendationParams{
 		Service:       common.ServiceSavingsPlansCompute,
@@ -215,6 +217,7 @@ func TestParseSavingsPlanDetail_RecommendedUtilization(t *testing.T) {
 // the purchase path can use them. Pre-fix: the field was ignored; assertions on
 // InstanceFamily/Region/OfferingID would fail. Post-fix: the fields are captured.
 func TestParseSavingsPlanDetail_EC2InstanceFieldsCaptured(t *testing.T) {
+	t.Parallel()
 	client := &Client{}
 	params := common.RecommendationParams{
 		Service:       common.ServiceSavingsPlansEC2Instance,
@@ -322,6 +325,7 @@ func TestParseSavingsPlanDetail_EC2InstanceFieldsCaptured(t *testing.T) {
 // for all fields and substituted 0; the fix errors on money fields and
 // uses warn+0 only for non-money fields (percentages/averages).
 func TestParseSavingsPlanDetail_MoneyFieldUnparseable(t *testing.T) {
+	t.Parallel()
 	client := &Client{}
 	params := common.RecommendationParams{
 		Service:       common.ServiceSavingsPlansCompute,
@@ -351,6 +355,20 @@ func TestParseSavingsPlanDetail_MoneyFieldUnparseable(t *testing.T) {
 			detail: &types.SavingsPlansPurchaseRecommendationDetail{
 				HourlyCommitmentToPurchase: aws.String("1.0"),
 				UpfrontCost:                aws.String("not-a-float"),
+			},
+		},
+		{
+			name: "unparseable CurrentAverageHourlyOnDemandSpend",
+			detail: &types.SavingsPlansPurchaseRecommendationDetail{
+				HourlyCommitmentToPurchase:        aws.String("1.0"),
+				CurrentAverageHourlyOnDemandSpend: aws.String("oops"),
+			},
+		},
+		{
+			name: "unparseable EstimatedSavingsPercentage",
+			detail: &types.SavingsPlansPurchaseRecommendationDetail{
+				HourlyCommitmentToPurchase: aws.String("1.0"),
+				EstimatedSavingsPercentage: aws.String("20%"),
 			},
 		},
 		// NaN / ±Inf are accepted by strconv.ParseFloat with a nil error, so
@@ -394,13 +412,18 @@ func TestParseSavingsPlanDetail_MoneyFieldUnparseable(t *testing.T) {
 // nil error, so parseOptionalFloat must reject them explicitly. It also rejects
 // negative values (invalid for the non-negative financial metrics it parses).
 func TestParseOptionalFloat_RejectsNonFinite(t *testing.T) {
-	for _, s := range []string{"NaN", "Inf", "+Inf", "-Inf", "Infinity", "-Infinity", "-5", "-0.01"} {
-		t.Run(s, func(t *testing.T) {
+	t.Parallel()
+	for _, s := range []string{"NaN", "Inf", "+Inf", "-Inf", "Infinity", "-Infinity", "-5", "-0.01", "", "abc", "1,5"} {
+		t.Run("bad_"+s, func(t *testing.T) {
 			v, err := parseOptionalFloat("TestField", aws.String(s))
 			require.Error(t, err, "invalid value %q must be rejected", s)
 			assert.Zero(t, v)
 		})
 	}
+	// A field CE omits (nil) is the only absent case that yields 0 without error.
+	nilV, nilErr := parseOptionalFloat("TestField", nil)
+	require.NoError(t, nilErr)
+	assert.Zero(t, nilV)
 	// Sanity: a normal finite value still parses; zero is valid.
 	v, err := parseOptionalFloat("TestField", aws.String("12.5"))
 	require.NoError(t, err)
@@ -410,21 +433,12 @@ func TestParseOptionalFloat_RejectsNonFinite(t *testing.T) {
 	assert.Zero(t, z)
 }
 
-// TestUtilizationParseFloat_DegradesNonFinite guards the warn-and-zero
-// utilization parser: NaN/Inf must degrade to 0 so a single non-finite hours
-// value can't poison the utilization aggregates (NaN propagates through sums).
-func TestUtilizationParseFloat_DegradesNonFinite(t *testing.T) {
-	for _, s := range []string{"NaN", "Inf", "+Inf", "-Inf", "not-a-number"} {
-		assert.Zero(t, parseFloat(s), "non-finite/unparseable %q must degrade to 0", s)
-	}
-	assert.InDelta(t, 42.5, parseFloat("42.5"), 0.0001)
-}
-
 // TestRICostParsers_RejectNonFiniteAndNegative verifies the RI money parsers
 // (parseCostInformation, parseAWSCostDetails) reject NaN/Inf/negative CE money
 // values -- the same class the SP path rejects -- since both now route through
 // parseOptionalFloat. Regression guard for the incomplete-fix finding on #1461.
 func TestRICostParsers_RejectNonFiniteAndNegative(t *testing.T) {
+	t.Parallel()
 	client := &Client{}
 
 	costInfoCases := []struct {
@@ -511,6 +525,7 @@ func TestExtractEC2SPFieldsNormalizesRegion(t *testing.T) {
 // go#54: a present-but-invalid EstimatedAverageUtilization used to become 0 =
 // "no signal", so --target-coverage left the SP unsized at AWS's commitment.
 func TestParseSavingsPlansRecommendations_InvalidEstimatedUtilizationIsReported(t *testing.T) {
+	t.Parallel()
 	detail := func(util *string) types.SavingsPlansPurchaseRecommendationDetail {
 		return types.SavingsPlansPurchaseRecommendationDetail{
 			HourlyCommitmentToPurchase:    aws.String("1.5"),

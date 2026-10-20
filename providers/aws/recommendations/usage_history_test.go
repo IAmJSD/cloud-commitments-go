@@ -148,6 +148,7 @@ func buildDailyOutput() *costexplorer.GetReservationCoverageOutput {
 // returns exactly usageHistoryLookbackDays points ordered oldest-to-newest
 // when CE reports coverage for every day.
 func TestGetDailyUsagePcts_ReturnsNDailyPoints(t *testing.T) {
+	t.Parallel()
 	mock := &mockCoverageCE{
 		coverageOutput: buildDailyOutput(),
 	}
@@ -167,6 +168,7 @@ func TestGetDailyUsagePcts_ReturnsNDailyPoints(t *testing.T) {
 // returns (nil, nil) when CE has no data for the tuple so the frontend
 // renders "—" (not a flat-zero sparkline).
 func TestGetDailyUsagePcts_ReturnsNilOnNoData(t *testing.T) {
+	t.Parallel()
 	mock := &mockCoverageCE{
 		coverageOutput: &costexplorer.GetReservationCoverageOutput{
 			CoveragesByTime: []types.CoverageByTime{},
@@ -183,6 +185,7 @@ func TestGetDailyUsagePcts_ReturnsNilOnNoData(t *testing.T) {
 // TestGetDailyUsagePcts_EmptyInputsReturnNil asserts that empty serviceFilter,
 // resourceType, or region short-circuit without an API call.
 func TestGetDailyUsagePcts_EmptyInputsReturnNil(t *testing.T) {
+	t.Parallel()
 	mock := &mockCoverageCE{}
 
 	client := NewClientWithAPI(mock, "us-east-1")
@@ -199,6 +202,7 @@ func TestGetDailyUsagePcts_EmptyInputsReturnNil(t *testing.T) {
 // should populate every matching rec's UsageHistory field with the daily
 // coverage percentages returned by CE.
 func TestAttachDailyUsageHistory_PopulatesUsageHistory(t *testing.T) {
+	t.Parallel()
 	mock := &mockCoverageCE{
 		coverageOutput: buildDailyOutput(),
 	}
@@ -232,6 +236,7 @@ func TestAttachDailyUsageHistory_PopulatesUsageHistory(t *testing.T) {
 // missing Region are silently skipped so AttachDailyUsageHistory never fires
 // a CE call with an empty region filter value.
 func TestAttachDailyUsageHistory_SkipsEmptyRegion(t *testing.T) {
+	t.Parallel()
 	mock := &mockCoverageCE{}
 
 	client := NewClientWithAPI(mock, "us-east-1")
@@ -247,4 +252,22 @@ func TestAttachDailyUsageHistory_SkipsEmptyRegion(t *testing.T) {
 
 	assert.Nil(t, recs[0].UsageHistory, "rec with empty region must not have UsageHistory populated")
 	assert.Equal(t, 0, mock.coverageCalls, "no CE call when region is empty")
+}
+
+// TestGetDailyUsagePcts_MalformedPercentageFailsLoud is the regression for
+// #120: an unparseable CE coverage percentage used to become a fake 0% day.
+func TestGetDailyUsagePcts_MalformedPercentageFailsLoud(t *testing.T) {
+	t.Parallel()
+	for _, bad := range []string{"abc", "", "NaN", "-1"} {
+		t.Run(bad, func(t *testing.T) {
+			out := buildDailyOutput()
+			out.CoveragesByTime[3].Total.CoverageHours.CoverageHoursPercentage = aws.String(bad)
+			client := NewClientWithAPI(&mockCoverageCE{coverageOutput: out}, "us-east-1")
+			pcts, err := client.GetDailyUsagePcts(context.Background(), "Amazon Elastic Compute Cloud - Compute", "m5.large", "us-east-1")
+			require.Error(t, err)
+			assert.Nil(t, pcts)
+			assert.Contains(t, err.Error(), "CoverageHoursPercentage")
+			assert.Contains(t, err.Error(), "coverage page 1")
+		})
+	}
 }

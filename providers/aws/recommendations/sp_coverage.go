@@ -11,6 +11,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/costexplorer"
 	"github.com/aws/aws-sdk-go-v2/service/costexplorer/types"
+
+	"github.com/LeanerCloud/cloud-commitments-go/pkg/concurrency"
 )
 
 // SPCoverageSummary is the Savings Plans coverage summary (optionally scoped
@@ -351,30 +353,21 @@ func (c *Client) GetSPCoverageSummary(ctx context.Context, region string, lookba
 	}
 
 	var acc spCoverageAccumulator
-	var token *string
-	for pageIdx := 0; ; pageIdx++ {
-		if err := ctx.Err(); err != nil {
-			return SPCoverageSummary{}, fmt.Errorf("sp coverage: pagination canceled: %w", err)
-		}
-		if pageIdx >= maxSPCoveragePages {
-			return SPCoverageSummary{}, fmt.Errorf(
-				"sp coverage: pagination cap reached after %d pages (mirrors the issue #692 guard)",
-				maxSPCoveragePages)
-		}
+	err := paginateCE(ctx, maxSPCoveragePages, "sp coverage", func(token *string) (*string, error) {
 		input.NextToken = token
 		result, err := c.fetchSPCoveragePage(ctx, input)
 		if err != nil {
-			return SPCoverageSummary{}, err
+			return nil, err
 		}
 		for _, cov := range result.SavingsPlansCoverages {
 			if addErr := acc.add(cov); addErr != nil {
-				return SPCoverageSummary{}, fmt.Errorf("sp coverage: %w", addErr)
+				return nil, fmt.Errorf("sp coverage: %w", addErr)
 			}
 		}
-		if result.NextToken == nil || *result.NextToken == "" {
-			break
-		}
-		token = result.NextToken
+		return result.NextToken, nil
+	})
+	if err != nil {
+		return SPCoverageSummary{}, err
 	}
 
 	windowHours := float64(lookbackDays * 24)
@@ -389,7 +382,11 @@ func (c *Client) fetchSPCoveragePage(ctx context.Context, input *costexplorer.Ge
 		if waitErr := rateLimiter.Wait(ctx); waitErr != nil {
 			return nil, fmt.Errorf("rate limiter wait failed: %w", waitErr)
 		}
+		if acqErr := concurrency.Acquire(ctx); acqErr != nil {
+			return nil, fmt.Errorf("concurrency acquire failed: %w", acqErr)
+		}
 		result, err := c.costExplorerClient.GetSavingsPlansCoverage(ctx, input)
+		concurrency.Release(ctx)
 		if !rateLimiter.ShouldRetry(err) {
 			if err != nil {
 				return nil, fmt.Errorf("failed to get SP coverage: %w", err)
@@ -478,7 +475,11 @@ func (c *Client) fetchSPUtilizationPage(ctx context.Context, input *costexplorer
 		if waitErr := rateLimiter.Wait(ctx); waitErr != nil {
 			return nil, fmt.Errorf("rate limiter wait failed: %w", waitErr)
 		}
+		if acqErr := concurrency.Acquire(ctx); acqErr != nil {
+			return nil, fmt.Errorf("concurrency acquire failed: %w", acqErr)
+		}
 		result, err := c.costExplorerClient.GetSavingsPlansUtilization(ctx, input)
+		concurrency.Release(ctx)
 		if !rateLimiter.ShouldRetry(err) {
 			if err != nil {
 				return nil, fmt.Errorf("failed to get SP utilization: %w", err)
@@ -537,8 +538,9 @@ func spRatePerHour(total *string, field string, windowHours float64) (*float64, 
 
 // parseSPFloat parses a Cost Explorer string value into a float64, returning
 // an explicit error on unparseable values, NaN/Inf, or negative values
-// (all of which are invalid for financial metrics). Unlike the package-level
-// parseFloat helper in utilization.go, this never silently falls back to zero.
+// (all of which are invalid for financial metrics). It never silently falls
+// back to zero. parseOptionalFloat in parser_sp.go applies the same checks to
+// an optional *string.
 func parseSPFloat(s, field string) (float64, error) {
 	v, err := strconv.ParseFloat(s, 64)
 	if err != nil {

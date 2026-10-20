@@ -89,6 +89,7 @@ func (m *MockBillingService) ListSKUs(serviceID string) (*cloudbilling.ListSkusR
 }
 
 func TestNewClient(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client, err := NewClient(ctx, "test-project", "us-central1")
 
@@ -100,16 +101,19 @@ func TestNewClient(t *testing.T) {
 }
 
 func TestCloudStorageClient_GetServiceType(t *testing.T) {
+	t.Parallel()
 	client := &Client{}
 	assert.Equal(t, common.ServiceStorage, client.GetServiceType())
 }
 
 func TestCloudStorageClient_GetRegion(t *testing.T) {
+	t.Parallel()
 	client := &Client{region: "europe-west1"}
 	assert.Equal(t, "europe-west1", client.GetRegion())
 }
 
 func TestCloudStorageClient_GetValidResourceTypes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := &Client{
 		ctx:       ctx,
@@ -130,6 +134,7 @@ func TestCloudStorageClient_GetValidResourceTypes(t *testing.T) {
 }
 
 func TestCloudStorageClient_ValidateOffering_ValidClasses(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := &Client{
 		ctx:       ctx,
@@ -141,6 +146,7 @@ func TestCloudStorageClient_ValidateOffering_ValidClasses(t *testing.T) {
 
 	for _, class := range validClasses {
 		t.Run(class, func(t *testing.T) {
+			t.Parallel()
 			rec := common.Recommendation{
 				ResourceType: class,
 			}
@@ -151,6 +157,7 @@ func TestCloudStorageClient_ValidateOffering_ValidClasses(t *testing.T) {
 }
 
 func TestCloudStorageClient_ValidateOffering_InvalidClass(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := &Client{
 		ctx:       ctx,
@@ -168,6 +175,7 @@ func TestCloudStorageClient_ValidateOffering_InvalidClass(t *testing.T) {
 }
 
 func TestStoragePricing_Fields(t *testing.T) {
+	t.Parallel()
 	pricing := &StoragePricing{
 		HourlyRate:        0.026,
 		CommitmentPrice:   100.0,
@@ -184,6 +192,7 @@ func TestStoragePricing_Fields(t *testing.T) {
 }
 
 func TestSkuMatchesStorageClass(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		description  string
@@ -288,6 +297,7 @@ func TestSkuMatchesStorageClass(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			sku := &cloudbilling.Sku{
 				Description:    tt.description,
 				Category:       &cloudbilling.Category{UsageType: "OnDemand"},
@@ -303,6 +313,7 @@ func TestSkuMatchesStorageClass(t *testing.T) {
 }
 
 func TestCloudStorageClient_Fields(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := &Client{
 		ctx:       ctx,
@@ -316,6 +327,7 @@ func TestCloudStorageClient_Fields(t *testing.T) {
 }
 
 func TestCloudStorageClient_SetterMethods(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client, _ := NewClient(ctx, "test-project", "us-central1")
 
@@ -334,6 +346,7 @@ func TestCloudStorageClient_SetterMethods(t *testing.T) {
 // GetExistingCommitments always returns an empty slice. GCS has no commitment
 // API; enumerating regional buckets does not represent a commitment (10-L2).
 func TestCloudStorageClient_GetExistingCommitments_ReturnsEmpty(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client, _ := NewClient(ctx, "test-project", "us-central1")
 
@@ -347,6 +360,7 @@ func TestCloudStorageClient_GetExistingCommitments_ReturnsEmpty(t *testing.T) {
 // PurchaseCommitment must return ErrCommitmentPurchaseNotSupported and MUST NOT call
 // any resource-creation API (it previously created a new empty billable bucket).
 func TestCloudStorageClient_PurchaseCommitment_NotSupported(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client, _ := NewClient(ctx, "test-project", "us-central1")
 
@@ -374,6 +388,7 @@ func TestCloudStorageClient_PurchaseCommitment_NotSupported(t *testing.T) {
 // for issue #78(c): the old path turned a bucket name from a CostRecommender
 // operation into ResourceType, which pricing then treated as a storage class.
 func TestCloudStorageClient_GetRecommendations_NotSupported(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client, _ := NewClient(ctx, "test-project", "us-central1")
 
@@ -407,6 +422,7 @@ func (m *countingRecommender) Close() error {
 }
 
 func TestCloudStorageClient_DeprecatedRecommenderClientIsNotCalled(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client, err := NewClient(ctx, "test-project", "us-central1")
 	require.NoError(t, err)
@@ -474,6 +490,7 @@ func storageMockSkus(storageClass string, onDemandNanos, commitmentNanos int64) 
 }
 
 func TestCloudStorageClient_GetOfferingDetails_WithMock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client, _ := NewClient(ctx, "test-project", "us-central1")
 
@@ -502,6 +519,7 @@ func TestCloudStorageClient_GetOfferingDetails_WithMock(t *testing.T) {
 }
 
 func TestCloudStorageClient_GetOfferingDetails_3yr(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client, _ := NewClient(ctx, "test-project", "us-central1")
 
@@ -528,6 +546,7 @@ func TestCloudStorageClient_GetOfferingDetails_3yr(t *testing.T) {
 }
 
 func TestCloudStorageClient_GetOfferingDetails_NoPricing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client, _ := NewClient(ctx, "test-project", "us-central1")
 
@@ -548,6 +567,7 @@ func TestCloudStorageClient_GetOfferingDetails_NoPricing(t *testing.T) {
 }
 
 func TestCloudStorageClient_GetOfferingDetails_BillingError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client, _ := NewClient(ctx, "test-project", "us-central1")
 
@@ -566,6 +586,7 @@ func TestCloudStorageClient_GetOfferingDetails_BillingError(t *testing.T) {
 }
 
 func TestCloudStorageClient_GetOfferingDetails_DefaultPaymentOption(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client, _ := NewClient(ctx, "test-project", "us-central1")
 
@@ -589,6 +610,7 @@ func TestCloudStorageClient_GetOfferingDetails_DefaultPaymentOption(t *testing.T
 }
 
 func TestCloudStorageClient_GetStoragePricing_WithCommitmentPrice(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client, _ := NewClient(ctx, "test-project", "us-central1")
 	client.SetBillingService(&MockBillingService{skus: &cloudbilling.ListSkusResponse{
@@ -604,6 +626,7 @@ func TestCloudStorageClient_GetStoragePricing_WithCommitmentPrice(t *testing.T) 
 }
 
 func TestCloudStorageClient_GetStoragePricing_3Year(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client, _ := NewClient(ctx, "test-project", "us-central1")
 
@@ -624,6 +647,7 @@ func TestCloudStorageClient_GetStoragePricing_3Year(t *testing.T) {
 }
 
 func TestSkuMatchesStorageClass_CaseInsensitive(t *testing.T) {
+	t.Parallel()
 	sku := &cloudbilling.Sku{
 		Description:    "STANDARD Storage in Americas",
 		Category:       &cloudbilling.Category{UsageType: "OnDemand"},
@@ -633,6 +657,7 @@ func TestSkuMatchesStorageClass_CaseInsensitive(t *testing.T) {
 }
 
 func TestSkuMatchesStorageClass_Capacity(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		class       string
 		description string
@@ -649,6 +674,7 @@ func TestSkuMatchesStorageClass_Capacity(t *testing.T) {
 		{"ARCHIVE", "Archive Storage Doha (Early Delete)", false},
 	} {
 		t.Run(tc.description, func(t *testing.T) {
+			t.Parallel()
 			sku := &cloudbilling.Sku{Description: tc.description, ServiceRegions: []string{"me-central1"}}
 			assert.Equal(t, tc.want, skuMatchesStorageClass(sku, tc.class, "me-central1"))
 		})
@@ -656,6 +682,7 @@ func TestSkuMatchesStorageClass_Capacity(t *testing.T) {
 }
 
 func TestStoragePricingUnits_PublicConsumers(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name           string
 		onDemandUnit   string
@@ -671,6 +698,7 @@ func TestStoragePricingUnits_PublicConsumers(t *testing.T) {
 		{"hourly-demand", "GiBy.h", "GiBy.mo", 40000, 20000000, 0.0292, 0.020},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			skus := storageMockSkus("STANDARD", tc.onDemandNanos, tc.commitNanos)
 			skus[0].PricingInfo[0].PricingExpression.UsageUnit = tc.onDemandUnit
 			skus[1].PricingInfo[0].PricingExpression.UsageUnit = tc.commitmentUnit
@@ -689,6 +717,7 @@ func TestStoragePricingUnits_PublicConsumers(t *testing.T) {
 				months float64
 			}{{"1yr", 12}, {"3yr", 36}} {
 				t.Run(term.label, func(t *testing.T) {
+					t.Parallel()
 					rec := common.Recommendation{ResourceType: "STANDARD", Term: term.label}
 					for _, payment := range []string{"monthly", "all-upfront"} {
 						rec.PaymentOption = payment
@@ -711,6 +740,7 @@ func TestStoragePricingUnits_PublicConsumers(t *testing.T) {
 }
 
 func TestStoragePricingUnits_InvalidPublicConsumers(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		unit string
@@ -725,6 +755,7 @@ func TestStoragePricingUnits_InvalidPublicConsumers(t *testing.T) {
 		{"no-commitment", "", -1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			skus := storageMockSkus("STANDARD", 26000000, 20000000)
 			wantError := "no commitment pricing found"
 			if tc.sku < 0 {

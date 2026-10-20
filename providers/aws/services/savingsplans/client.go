@@ -3,6 +3,7 @@ package savingsplans
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -15,9 +16,15 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/savingsplans/types"
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/offeringprice"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/purchasecfg"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/spcommitment"
 )
+
+// ErrUnsupportedPartition is returned for Savings Plans offering lookups and
+// purchases in a partition the USD-only purchase path cannot price (aws-cn
+// bills in CNY).
+var ErrUnsupportedPartition = errors.New("savings plans are not supported in the aws-cn partition: the purchase path is USD-only")
 
 // API defines the interface for Savings Plans operations (enables mocking).
 type API interface {
@@ -136,9 +143,7 @@ func (c *Client) GetExistingCommitments(ctx context.Context) ([]common.Commitmen
 
 		page++
 		if page > maxCommitmentPages {
-			log.Printf("WARNING: savingsplans.GetExistingCommitments reached page cap (%d) — returning partial results (issue #1019)",
-				maxCommitmentPages)
-			break
+			return nil, fmt.Errorf("pagination cap reached after %d pages for Savings Plans commitments (issue #561)", maxCommitmentPages)
 		}
 
 		input := &savingsplans.DescribeSavingsPlansInput{
@@ -449,6 +454,20 @@ func (c *Client) collectSPOfferings(ctx context.Context, input *savingsplans.Des
 	return offerings, nil
 }
 
+// checkedPlanType fails closed on unsupported partitions before any AWS call
+// (the pinned USD currency filter and USD OfferingDetails are wrong for
+// CNY-billed partitions), then resolves the plan type.
+func (c *Client) checkedPlanType(rec common.Recommendation, spDetails *common.SavingsPlanDetails) (types.SavingsPlanType, error) {
+	// Every region the request can carry: the client's, the recommendation's
+	// and the plan details' (which feeds the EC2Instance region filter).
+	for _, r := range []string{c.region, rec.Region, spDetails.Region} {
+		if offeringprice.IsChinaRegion(r) {
+			return "", fmt.Errorf("%w (region %q)", ErrUnsupportedPartition, r)
+		}
+	}
+	return c.resolveSPPlanType(spDetails.PlanType)
+}
+
 // findOfferingID finds the appropriate Savings Plans offering ID.
 // execID is the purchase execution UUID for log correlation; pass "" when
 // calling outside of a purchase flow (ValidateOffering, GetOfferingDetails).
@@ -463,15 +482,9 @@ func (c *Client) findOfferingID(ctx context.Context, rec common.Recommendation, 
 		tag = "no-exec"
 	}
 
-	// If CE supplied an exact offering ID, use it directly — this is the
-	// safest path because it bypasses DescribeSavingsPlansOfferings filtering
-	// entirely and always resolves to exactly the workload CE recommended.
-	if spDetails.OfferingID != "" {
-		log.Printf("purchase[%s]: SavingsPlans findOfferingID: using CE-provided OfferingID %s (skipping DescribeSavingsPlansOfferings)", tag, spDetails.OfferingID)
-		return spDetails.OfferingID, nil
-	}
-
-	planType, err := c.resolveSPPlanType(spDetails.PlanType)
+	// Validate before trusting a CE-supplied offering ID so an invalid plan
+	// type, term or payment option fails loud instead of reaching the purchase.
+	planType, err := c.checkedPlanType(rec, spDetails)
 	if err != nil {
 		return "", err
 	}
@@ -482,6 +495,14 @@ func (c *Client) findOfferingID(ctx context.Context, rec common.Recommendation, 
 	paymentOption, err := convertPaymentOption(rec.PaymentOption)
 	if err != nil {
 		return "", err
+	}
+
+	// If CE supplied an exact offering ID, use it directly — this is the
+	// safest path because it bypasses DescribeSavingsPlansOfferings filtering
+	// entirely and always resolves to exactly the workload CE recommended.
+	if spDetails.OfferingID != "" {
+		log.Printf("purchase[%s]: SavingsPlans findOfferingID: using CE-provided OfferingID %s (skipping DescribeSavingsPlansOfferings)", tag, spDetails.OfferingID)
+		return spDetails.OfferingID, nil
 	}
 
 	t0 := time.Now()
@@ -613,9 +634,9 @@ const maxOfferingPages = 5
 // maxCommitmentPages is the maximum number of DescribeSavingsPlans pages to
 // walk when listing existing commitments. 100 pages * 100 items/page = 10,000
 // SPs, which is a realistic upper bound for even large enterprise accounts.
-// Exceeding the cap logs a warning but still returns the commitments collected
-// so far, consistent with the #691 guidance (data loss is worse than a
-// truncation warning for the commitment path).
+// Exceeding the cap returns an error rather than a partial list: these results
+// feed the duplicate-purchase guards, so a truncated list must fail loud
+// (issue #561).
 const maxCommitmentPages = 100
 
 // lookupOfferingID resolves the offering ID for non-EC2Instance Savings Plans
@@ -662,18 +683,25 @@ func (c *Client) GetOfferingDetails(ctx context.Context, rec common.Recommendati
 		return nil, fmt.Errorf("invalid service details for Savings Plans")
 	}
 
-	if err := c.validateOffering(ctx, offeringID); err != nil {
-		return nil, err
+	if vErr := c.validateOffering(ctx, offeringID); vErr != nil {
+		return nil, vErr
 	}
 
-	hoursInTerm := calculateHoursInTerm(rec.Term)
+	hoursInTerm, err := calculateHoursInTerm(rec.Term)
+	if err != nil {
+		return nil, err
+	}
+	termString, err := normalizeTermString(rec.Term)
+	if err != nil {
+		return nil, err
+	}
 	totalCost := spDetails.HourlyCommitment * hoursInTerm
 	upfrontCost, recurringCost := calculatePaymentBreakdown(rec.PaymentOption, totalCost, hoursInTerm)
 
 	return &common.OfferingDetails{
 		OfferingID:          offeringID,
 		ResourceType:        spDetails.PlanType,
-		Term:                normalizeTermString(rec.Term),
+		Term:                termString,
 		PaymentOption:       rec.PaymentOption,
 		UpfrontCost:         upfrontCost,
 		RecurringCost:       recurringCost,
@@ -699,11 +727,13 @@ func (c *Client) validateOffering(ctx context.Context, offeringID string) error 
 
 // calculateHoursInTerm calculates the number of hours in a commitment term.
 // Uses 365 days/year to match AWS billing conventions for RIs and Savings Plans.
-func calculateHoursInTerm(term string) float64 {
-	if term == "3yr" || term == "3" {
-		return 3 * 365 * 24 // 3 years (26280 hours)
+// Returns an error on an unrecognized term rather than defaulting to one year.
+func calculateHoursInTerm(term string) (float64, error) {
+	months, err := purchasecfg.ParseTermMonths(term, "Savings Plans")
+	if err != nil {
+		return 0, err
 	}
-	return 365 * 24 // 1 year (8760 hours)
+	return float64(months/12) * common.HoursPerYear, nil
 }
 
 // calculatePaymentBreakdown calculates upfront and recurring costs based on payment option.
@@ -720,12 +750,10 @@ func calculatePaymentBreakdown(paymentOption string, totalCost, hoursInTerm floa
 	}
 }
 
-// normalizeTermString normalizes a term string to standard format.
-func normalizeTermString(term string) string {
-	if term == "3yr" || term == "3" {
-		return "3yr"
-	}
-	return "1yr"
+// normalizeTermString normalizes a term string to "1yr" or "3yr". Returns an
+// error on an unrecognized term rather than defaulting to one year.
+func normalizeTermString(term string) (string, error) {
+	return purchasecfg.DurationYearString(term, "Savings Plans")
 }
 
 // GetValidResourceTypes returns valid Savings Plan types.

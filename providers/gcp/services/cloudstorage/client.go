@@ -13,6 +13,7 @@ import (
 	"google.golang.org/api/option"
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/gcp/internal/billingcurrency"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/gcp/internal/skulist"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/gcp/internal/skumatch"
 )
@@ -281,7 +282,6 @@ func (c *Client) getOrCreateBillingService(ctx context.Context) (BillingService,
 // extractStoragePricingFromSKUs extracts on-demand and commitment pricing from SKU list.
 func extractStoragePricingFromSKUs(skus []*cloudbilling.Sku, storageClass, region string) (onDemand, commitment float64, currency string, err error) {
 	var prices skumatch.SlotPrices
-	currency = "USD"
 
 	for _, sku := range skus {
 		if !skuMatchesStorageClass(sku, storageClass, region) {
@@ -296,8 +296,9 @@ func extractStoragePricingFromSKUs(skus []*cloudbilling.Sku, storageClass, regio
 			continue
 		}
 
-		if curr != "" {
-			currency = curr
+		currency, err = billingcurrency.Unify(currency, curr, sku.SkuId)
+		if err != nil {
+			return 0, 0, "", err
 		}
 
 		slot, slotErr := skumatch.Slot(sku)
@@ -319,12 +320,8 @@ func extractStoragePriceFromSKU(sku *cloudbilling.Sku) (price float64, currency 
 	}
 
 	pricingInfo := sku.PricingInfo[0]
-	if pricingInfo.PricingExpression == nil || len(pricingInfo.PricingExpression.TieredRates) == 0 {
-		return 0, "", nil
-	}
-
-	rate := pricingInfo.PricingExpression.TieredRates[0]
-	if rate.UnitPrice == nil {
+	rate := skumatch.PaidRate(pricingInfo.PricingExpression)
+	if rate == nil {
 		return 0, "", nil
 	}
 

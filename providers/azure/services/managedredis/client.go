@@ -5,7 +5,6 @@ package managedredis
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -13,7 +12,6 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/consumption/armconsumption"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/redis/armredis/v3"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/reservations/armreservations"
@@ -22,6 +20,7 @@ import (
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/httpclient"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/pricing"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/recommendations"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/slot"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/services/internal/reservations"
 )
 
@@ -97,7 +96,9 @@ func NewClient(cred azcore.TokenCredential, subscriptionID, region string) *Clie
 
 // NewClientWithHTTP creates a new Client with a custom HTTP client (for testing).
 // When httpClient is nil, the SSRF-hardened httpclient.New() is used so the nil
-// fallback also blocks IMDS connections.
+// fallback also blocks IMDS connections. A non-nil httpClient is used as-is and
+// bypasses that guard: metadata, NAT64/6to4 and unspecified addresses are
+// dialable unless the caller's client blocks them itself.
 func NewClientWithHTTP(cred azcore.TokenCredential, subscriptionID, region string, httpClient HTTPClient) *Client {
 	if httpClient == nil {
 		httpClient = httpclient.New()
@@ -168,7 +169,7 @@ func (c *Client) GetRecommendations(ctx context.Context, _ *common.Recommendatio
 		if pageIdx >= maxRecsPages {
 			return nil, fmt.Errorf("managedredis: GetRecommendations pagination cap (%d pages) reached", maxRecsPages)
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get Redis Cache recommendations: %w", err)
 		}
@@ -216,7 +217,7 @@ func (c *Client) GetExistingCommitments(ctx context.Context) ([]common.Commitmen
 		if pageIdx >= maxReservationsPages {
 			return nil, fmt.Errorf("managedredis: GetExistingCommitments pagination cap (%d pages) reached", maxReservationsPages)
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch reservations details page: %w", err)
 		}
@@ -293,6 +294,10 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		result.Error = fmt.Errorf("purchase source is required for Azure reservation purchases")
 		return result, result.Error
 	}
+	if strings.TrimSpace(rec.ResourceType) == "" {
+		result.Error = fmt.Errorf("resource type is required")
+		return result, result.Error
+	}
 	if rec.Count <= 0 {
 		result.Error = fmt.Errorf("quantity must be greater than zero, got %d", rec.Count)
 		return result, result.Error
@@ -303,8 +308,7 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		result.Error = termErr
 		return result, result.Error
 	}
-	term, termEnumErr := reservations.ReservationTermForYears(termYears)
-	if termEnumErr != nil {
+	if _, termEnumErr := reservations.ReservationTermForYears(termYears); termEnumErr != nil {
 		result.Error = termEnumErr
 		return result, result.Error
 	}
@@ -314,39 +318,26 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		return result, result.Error
 	}
 
-	requestBody := map[string]interface{}{
-		"sku": map[string]string{
-			"name": rec.ResourceType,
+	bodyBytes, err := reservations.BuildPurchaseBody(reservations.PurchaseParams{
+		ReservedResourceType: string(armreservations.ReservedResourceTypeRedisCache),
+		DisplayName: func(r common.Recommendation) string {
+			return reservations.BuildDisplayName(reservations.DisplayNameFields{
+				Service:      "redis",
+				Region:       c.region,
+				ResourceType: r.ResourceType,
+				Count:        r.Count,
+				Term:         r.Term,
+				Payment:      r.PaymentOption,
+				Now:          time.Now(),
+			})
 		},
-		"location": c.region,
-		"properties": map[string]interface{}{
-			"reservedResourceType": string(armreservations.ReservedResourceTypeRedisCache),
-			"billingScopeId":       fmt.Sprintf("/subscriptions/%s", c.subscriptionID),
-			"billingPlan":          string(billingPlan),
-			"term":                 string(term),
-			"quantity":             rec.Count,
-			"displayName":          fmt.Sprintf("Azure Cache for Redis Reservation - %s", rec.ResourceType),
-			"appliedScopeType":     string(armreservations.AppliedScopeTypeShared),
-			"renew":                false,
-		},
-	}
-	reservations.ApplyPurchaseTags(requestBody, opts.Source, opts.IdempotencyToken)
-
-	bodyBytes, err := json.Marshal(requestBody)
+	}, rec, opts, c.region, c.subscriptionID, billingPlan)
 	if err != nil {
 		result.Error = fmt.Errorf("failed to marshal request: %w", err)
 		return result, result.Error
 	}
 
-	token, err := c.cred.GetToken(ctx, policy.TokenRequestOptions{
-		Scopes: []string{"https://management.azure.com/.default"},
-	})
-	if err != nil {
-		result.Error = fmt.Errorf("failed to get access token: %w", err)
-		return result, result.Error
-	}
-
-	reservationOrderID, existing, err := reservations.DoIdempotentPurchaseTwoStep(ctx, c.httpClient, reservations.CalculatePriceURL(), bodyBytes, token.Token, opts.IdempotencyToken)
+	reservationOrderID, existing, err := reservations.Submit(ctx, c.cred, c.httpClient, bodyBytes, opts)
 	if err != nil {
 		result.Error = err
 		return result, result.Error
@@ -464,7 +455,7 @@ func collectSKUsFromPager(ctx context.Context, pager RedisCachesPager) (map[stri
 		if pageIdx >= maxCachesPages {
 			return nil, fmt.Errorf("managedredis: list caches: pagination cap (%d pages) reached", maxCachesPages)
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			return nil, err
 		}
@@ -504,11 +495,9 @@ func (c *Client) commonSKUs() []string {
 
 // RedisPricing holds pricing details for a given Redis Cache SKU.
 type RedisPricing struct {
-	HourlyRate        float64
-	ReservationPrice  float64
-	OnDemandPrice     float64
-	Currency          string
-	SavingsPercentage float64
+	HourlyRate       float64
+	ReservationPrice float64
+	Currency         string
 }
 
 func (c *Client) getRedisPricing(ctx context.Context, sku, region string, termYears int) (*RedisPricing, error) {
@@ -516,8 +505,16 @@ func (c *Client) getRedisPricing(ctx context.Context, sku, region string, termYe
 	if err != nil {
 		return nil, err
 	}
-	filter := fmt.Sprintf("serviceName eq 'Redis Cache' and armRegionName eq '%s' and armSkuName eq '%s' and priceType eq 'Reservation'",
-		strings.ReplaceAll(region, "'", "''"), identity.ArmSKUName)
+	qRegion, err := pricing.ODataString(region)
+	if err != nil {
+		return nil, err
+	}
+	qSKU, err := pricing.ODataString(identity.ArmSKUName)
+	if err != nil {
+		return nil, err
+	}
+	filter := fmt.Sprintf("serviceName eq 'Redis Cache' and armRegionName eq %s and armSkuName eq %s and priceType eq 'Reservation'",
+		qRegion, qSKU)
 
 	params := url.Values{}
 	params.Add("$filter", filter)
@@ -541,7 +538,7 @@ func (c *Client) getRedisPricing(ctx context.Context, sku, region string, termYe
 		return nil, err
 	}
 	return &RedisPricing{
-		HourlyRate:       selected.RetailPrice / (8760 * float64(termYears)),
+		HourlyRate:       selected.RetailPrice / (common.HoursPerYear * float64(termYears)),
 		ReservationPrice: selected.RetailPrice,
 		Currency:         selected.CurrencyCode,
 	}, nil

@@ -98,3 +98,21 @@ func Slot(sku *cloudbilling.Sku) (PriceSlot, error) {
 	}
 	return 0, fmt.Errorf("sku %s has unrecognized usage type %q", sku.SkuId, sku.Category.UsageType)
 }
+
+// PaidRate returns the first tier whose unit price is non-zero, or nil when
+// every tier is free or has no price. The catalog lists tiers by ascending
+// StartUsageAmount, and a free allowance shows up as a leading zero-price
+// tier; the first non-zero tier is the marginal rate a workload sized for a
+// commitment pays, so it is the one to price from. Reading only the first
+// tier would treat a [free, paid] SKU as free and drop it.
+func PaidRate(expr *cloudbilling.PricingExpression) *cloudbilling.TierRate {
+	if expr == nil {
+		return nil
+	}
+	for _, rate := range expr.TieredRates {
+		if rate != nil && rate.UnitPrice != nil && (rate.UnitPrice.Units != 0 || rate.UnitPrice.Nanos != 0) {
+			return rate
+		}
+	}
+	return nil
+}

@@ -45,12 +45,14 @@ func rootCUDRecommendationWithPlan(kind, plan string) *recommenderpb.Recommendat
 }
 
 func TestRootCUDPublicPurchasePath(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"MEMORY_OPTIMIZED_M4_6TB", "MEMORY_OPTIMIZED_X4_480_6T"} {
 		for _, decoded := range []bool{false, true} {
 			for _, existingKind := range []string{"", kind, "MEMORY_OPTIMIZED_X4_960_12T"} {
 				t.Run(fmt.Sprintf("%s/decoded=%t/existing=%s", kind, decoded, existingKind), func(t *testing.T) {
+					t.Parallel()
 					ctx := context.Background()
-					client, err := NewClient(ctx, "test-project", "us-central1")
+					client, err := NewClient("test-project", "us-central1")
 					require.NoError(t, err)
 					client.SetRecommenderClient(&MockRecommenderClient{iterator: &MockRecommenderIterator{recommendations: []*recommenderpb.Recommendation{rootCUDRecommendation(kind)}}})
 					recs, err := client.GetRecommendations(ctx, &common.RecommendationParams{})
@@ -67,7 +69,7 @@ func TestRootCUDPublicPurchasePath(t *testing.T) {
 					svc := &MockCommitmentsService{operation: &MockOperation{}}
 					if existingKind != "" {
 						cud := recentCUD()
-						cud.Type = stringPtr(existingKind)
+						cud.Type = new(existingKind)
 						svc.commitments = []*computepb.Commitment{cud}
 					}
 					client.SetCommitmentsService(svc)
@@ -96,6 +98,7 @@ func TestRootCUDPublicPurchasePath(t *testing.T) {
 }
 
 func TestCUDStoredTypePublicPath(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"", "MEMORY_OPTIMIZED_M4_6TB", "MEMORY_OPTIMIZED_X4_480_6T", "UNDEFINED_TYPE", "TYPE_UNSPECIFIED", "UNKNOWN", "ACCELERATOR_OPTIMIZED", "GRAPHICS_OPTIMIZED", "STORAGE_OPTIMIZED_Z3"} {
 		for _, decoded := range []bool{false, true} {
 			want := kind
@@ -105,6 +108,7 @@ func TestCUDStoredTypePublicPath(t *testing.T) {
 			valid := kind == "" || kind == "MEMORY_OPTIMIZED_M4_6TB" || kind == "MEMORY_OPTIMIZED_X4_480_6T"
 			for _, sameBucket := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/decoded=%t/same=%t", kind, decoded, sameBucket), func(t *testing.T) {
+					t.Parallel()
 					ctx := context.Background()
 					rec := cudRecommendation()
 					rec.Details = common.ComputeDetails{MemoryGB: 256, GCPCommitmentType: kind}
@@ -114,12 +118,12 @@ func TestCUDStoredTypePublicPath(t *testing.T) {
 						rec.Details, err = common.DecodeServiceDetailsFor(string(common.ServiceCompute), raw)
 						require.NoError(t, err)
 					}
-					client, err := NewClient(ctx, rec.Account, rec.Region)
+					client, err := NewClient(rec.Account, rec.Region)
 					require.NoError(t, err)
 					cud := recentCUD()
-					cud.Type = stringPtr("MEMORY_OPTIMIZED_X4_960_12T")
+					cud.Type = new("MEMORY_OPTIMIZED_X4_960_12T")
 					if sameBucket && valid {
-						cud.Type = stringPtr(want)
+						cud.Type = new(want)
 					}
 					service := &MockCommitmentsService{operation: &MockOperation{}, commitments: []*computepb.Commitment{cud}}
 					client.SetCommitmentsService(service)
@@ -155,10 +159,11 @@ func TestCUDStoredTypePublicPath(t *testing.T) {
 }
 
 func TestCUDTypeFallbackWithAbsentDetails(t *testing.T) {
+	t.Parallel()
 	for _, details := range []common.ServiceDetails{nil, (*common.ComputeDetails)(nil)} {
 		rec := cudRecommendation()
 		rec.Details = details
-		client, err := NewClient(context.Background(), rec.Account, rec.Region)
+		client, err := NewClient(rec.Account, rec.Region)
 		require.NoError(t, err)
 		service := &MockCommitmentsService{operation: &MockOperation{}, commitments: []*computepb.Commitment{recentCUD()}}
 		client.SetCommitmentsService(service)
@@ -174,11 +179,11 @@ func TestCUDTypeFallbackWithAbsentDetails(t *testing.T) {
 
 func recentCUD() *computepb.Commitment {
 	return &computepb.Commitment{
-		Name: stringPtr("recent-cud"), Type: stringPtr("GENERAL_PURPOSE_N2"),
-		Status: stringPtr("ACTIVE"), StartTimestamp: stringPtr(time.Now().Add(-time.Hour).Format(time.RFC3339)),
+		Name: new("recent-cud"), Type: new("GENERAL_PURPOSE_N2"),
+		Status: new("ACTIVE"), StartTimestamp: new(time.Now().Add(-time.Hour).Format(time.RFC3339)),
 		Resources: []*computepb.ResourceCommitment{
-			{Type: stringPtr("MEMORY"), Amount: int64Ptr(65536)},
-			{Type: stringPtr("VCPU"), Amount: int64Ptr(16)},
+			{Type: new("MEMORY"), Amount: new(int64(65536))},
+			{Type: new("VCPU"), Amount: new(int64(16))},
 		},
 	}
 }
@@ -193,6 +198,7 @@ func cudRecommendation() common.Recommendation {
 }
 
 func TestCUDDuplicatePurchasePath(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name          string
 		change        func(*computepb.Commitment, *common.Recommendation)
@@ -205,33 +211,34 @@ func TestCUDDuplicatePurchasePath(t *testing.T) {
 		}, 0},
 		{"different family", func(c *computepb.Commitment, r *common.Recommendation) { r.ResourceType = "c3-standard-32" }, 1},
 		{"queued future", func(c *computepb.Commitment, r *common.Recommendation) {
-			c.Status = stringPtr("NOT_YET_ACTIVE")
-			c.StartTimestamp = stringPtr(time.Now().Add(time.Hour).Format(time.RFC3339))
+			c.Status = new("NOT_YET_ACTIVE")
+			c.StartTimestamp = new(time.Now().Add(time.Hour).Format(time.RFC3339))
 		}, 0},
-		{"creating", func(c *computepb.Commitment, r *common.Recommendation) { c.Status = stringPtr("CREATING") }, 0},
-		{"unknown state", func(c *computepb.Commitment, r *common.Recommendation) { c.Status = stringPtr("FUTURE_STATE") }, 0},
-		{"expired", func(c *computepb.Commitment, r *common.Recommendation) { c.Status = stringPtr("EXPIRED") }, 1},
+		{"creating", func(c *computepb.Commitment, r *common.Recommendation) { c.Status = new("CREATING") }, 0},
+		{"unknown state", func(c *computepb.Commitment, r *common.Recommendation) { c.Status = new("FUTURE_STATE") }, 0},
+		{"expired", func(c *computepb.Commitment, r *common.Recommendation) { c.Status = new("EXPIRED") }, 1},
 		{"canceled", func(c *computepb.Commitment, r *common.Recommendation) {
-			c.Status = stringPtr(computepb.Commitment_CANCELLED.String()) //nolint:misspell // SDK identifier
+			c.Status = new(computepb.Commitment_CANCELLED.String()) //nolint:misspell // SDK identifier
 		}, 1},
 		{"stale advice outside window", func(c *computepb.Commitment, r *common.Recommendation) {
-			c.StartTimestamp = stringPtr(time.Now().Add(-48 * time.Hour).Format(time.RFC3339))
+			c.StartTimestamp = new(time.Now().Add(-48 * time.Hour).Format(time.RFC3339))
 			r.Timestamp = time.Now().Add(-72 * time.Hour)
 		}, 1},
 		{"legacy custom N1", func(c *computepb.Commitment, r *common.Recommendation) {
-			c.Type = stringPtr("GENERAL_PURPOSE")
+			c.Type = new("GENERAL_PURPOSE")
 			r.ResourceType = "custom-32-262144"
 		}, 0},
 		{"M1 M2 shared pool", func(c *computepb.Commitment, r *common.Recommendation) {
-			c.Type = stringPtr("MEMORY_OPTIMIZED")
+			c.Type = new("MEMORY_OPTIMIZED")
 			r.ResourceType = "m2-ultramem-208"
 		}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			cud, rec := recentCUD(), cudRecommendation()
 			tc.change(cud, &rec)
-			client, err := NewClient(ctx, rec.Account, rec.Region)
+			client, err := NewClient(rec.Account, rec.Region)
 			require.NoError(t, err)
 			svc := &MockCommitmentsService{commitments: []*computepb.Commitment{cud}, operation: &MockOperation{}}
 			client.SetCommitmentsService(svc)
@@ -256,28 +263,30 @@ func TestCUDDuplicatePurchasePath(t *testing.T) {
 }
 
 func TestCUDInventoryRejectsUnusableMetadata(t *testing.T) {
+	t.Parallel()
 	for name, mutate := range map[string]func(*computepb.Commitment){
 		"missing name":       func(c *computepb.Commitment) { c.Name = nil },
 		"missing start":      func(c *computepb.Commitment) { c.StartTimestamp = nil },
-		"invalid start":      func(c *computepb.Commitment) { c.StartTimestamp = stringPtr("yesterday") },
-		"unknown family":     func(c *computepb.Commitment) { c.Type = stringPtr("FUTURE_FAMILY") },
-		"undefined family":   func(c *computepb.Commitment) { c.Type = stringPtr("UNDEFINED_TYPE") },
-		"unknown resource":   func(c *computepb.Commitment) { c.Resources[0].Type = stringPtr("FUTURE_RESOURCE") },
-		"undefined resource": func(c *computepb.Commitment) { c.Resources[0].Type = stringPtr("UNDEFINED_TYPE") },
+		"invalid start":      func(c *computepb.Commitment) { c.StartTimestamp = new("yesterday") },
+		"unknown family":     func(c *computepb.Commitment) { c.Type = new("FUTURE_FAMILY") },
+		"undefined family":   func(c *computepb.Commitment) { c.Type = new("UNDEFINED_TYPE") },
+		"unknown resource":   func(c *computepb.Commitment) { c.Resources[0].Type = new("FUTURE_RESOURCE") },
+		"undefined resource": func(c *computepb.Commitment) { c.Resources[0].Type = new("UNDEFINED_TYPE") },
 		"nil resource type":  func(c *computepb.Commitment) { c.Resources[0].Type = nil },
 		"nil memory amount":  func(c *computepb.Commitment) { c.Resources[0].Amount = nil },
 		"nil vcpu amount":    func(c *computepb.Commitment) { c.Resources[1].Amount = nil },
-		"negative amount":    func(c *computepb.Commitment) { c.Resources[1].Amount = int64Ptr(-1) },
-		"zero amount":        func(c *computepb.Commitment) { c.Resources[1].Amount = int64Ptr(0) },
+		"negative amount":    func(c *computepb.Commitment) { c.Resources[1].Amount = new(int64(-1)) },
+		"zero amount":        func(c *computepb.Commitment) { c.Resources[1].Amount = new(int64(0)) },
 		"missing vcpu":       func(c *computepb.Commitment) { c.Resources = c.Resources[:1] },
 		"nil resource":       func(c *computepb.Commitment) { c.Resources[0] = nil },
 		"duplicate vcpu":     func(c *computepb.Commitment) { c.Resources = append(c.Resources, c.Resources[1]) },
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			cud := recentCUD()
 			mutate(cud)
-			client, err := NewClient(ctx, "test-project", "us-central1")
+			client, err := NewClient("test-project", "us-central1")
 			require.NoError(t, err)
 			svc := &MockCommitmentsService{commitments: []*computepb.Commitment{recentCUD(), cud}}
 			client.SetCommitmentsService(svc)
@@ -292,6 +301,7 @@ func TestCUDInventoryRejectsUnusableMetadata(t *testing.T) {
 }
 
 func TestCUDDuplicateIdentity(t *testing.T) {
+	t.Parallel()
 	for name, change := range map[string]func(*common.Recommendation){
 		"another project":        func(r *common.Recommendation) { r.Account = "other-project" },
 		"another region":         func(r *common.Recommendation) { r.Region = "europe-west1" },
@@ -303,8 +313,9 @@ func TestCUDDuplicateIdentity(t *testing.T) {
 		"unknown machine family": func(r *common.Recommendation) { r.ResourceType = "future-standard-32" },
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
-			client, err := NewClient(ctx, "test-project", "us-central1")
+			client, err := NewClient("test-project", "us-central1")
 			require.NoError(t, err)
 			client.SetCommitmentsService(&MockCommitmentsService{commitments: []*computepb.Commitment{recentCUD()}})
 			rec := cudRecommendation()
@@ -323,7 +334,8 @@ func TestCUDDuplicateIdentity(t *testing.T) {
 }
 
 func TestCUDNilInventoryRecord(t *testing.T) {
-	client, err := NewClient(context.Background(), "test-project", "us-central1")
+	t.Parallel()
+	client, err := NewClient("test-project", "us-central1")
 	require.NoError(t, err)
 	client.SetCommitmentsService(&MockCommitmentsService{commitments: []*computepb.Commitment{nil}})
 	got, err := client.GetExistingCommitments(context.Background())

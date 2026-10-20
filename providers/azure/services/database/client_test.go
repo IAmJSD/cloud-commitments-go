@@ -143,6 +143,7 @@ func createSampleSQLPricingResponse() string {
 }
 
 func TestNewClient(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 
 	require.NotNil(t, client)
@@ -152,11 +153,13 @@ func TestNewClient(t *testing.T) {
 }
 
 func TestDatabaseClient_GetServiceType(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "sub", "region")
 	assert.Equal(t, common.ServiceRelationalDB, client.GetServiceType())
 }
 
 func TestDatabaseClient_GetRegion(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		region   string
@@ -188,22 +191,20 @@ func TestDatabaseClient_GetRegion(t *testing.T) {
 }
 
 func TestSQLPricingStructure(t *testing.T) {
+	t.Parallel()
 	pricing := SQLPricing{
-		HourlyRate:        0.25,
-		ReservationPrice:  2190.0,
-		OnDemandPrice:     4380.0,
-		Currency:          "USD",
-		SavingsPercentage: 50.0,
+		HourlyRate:       0.25,
+		ReservationPrice: 2190.0,
+		Currency:         "USD",
 	}
 
 	assert.Equal(t, 0.25, pricing.HourlyRate)
 	assert.Equal(t, 2190.0, pricing.ReservationPrice)
-	assert.Equal(t, 4380.0, pricing.OnDemandPrice)
 	assert.Equal(t, "USD", pricing.Currency)
-	assert.Equal(t, 50.0, pricing.SavingsPercentage)
 }
 
 func TestAzureRetailPriceStructure(t *testing.T) {
+	t.Parallel()
 	price := AzureRetailPrice{
 		Items: []azpricing.RetailPriceItem{
 			{
@@ -231,6 +232,7 @@ func TestAzureRetailPriceStructure(t *testing.T) {
 }
 
 func TestDatabaseClient_Fields(t *testing.T) {
+	t.Parallel()
 	// Test that client stores fields correctly
 	client := NewClient(nil, "test-sub", "northeurope")
 
@@ -240,6 +242,7 @@ func TestDatabaseClient_Fields(t *testing.T) {
 }
 
 func TestNewClientWithHTTP(t *testing.T) {
+	t.Parallel()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
 
@@ -250,6 +253,7 @@ func TestNewClientWithHTTP(t *testing.T) {
 }
 
 func TestDatabaseClient_GetOfferingDetails_WithMock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
@@ -282,6 +286,7 @@ func TestDatabaseClient_GetOfferingDetails_WithMock(t *testing.T) {
 }
 
 func TestDatabaseClient_GetOfferingDetails_3YearTerm(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
@@ -312,6 +317,7 @@ func TestDatabaseClient_GetOfferingDetails_3YearTerm(t *testing.T) {
 }
 
 func TestDatabaseClient_GetOfferingDetails_NoUpfront(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
@@ -339,6 +345,7 @@ func TestDatabaseClient_GetOfferingDetails_NoUpfront(t *testing.T) {
 }
 
 func TestDatabaseClient_GetOfferingDetails_APIError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
@@ -363,6 +370,7 @@ func TestDatabaseClient_GetOfferingDetails_APIError(t *testing.T) {
 }
 
 func TestDatabaseClient_GetOfferingDetails_NoPricing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
@@ -392,6 +400,7 @@ func TestDatabaseClient_GetOfferingDetails_NoPricing(t *testing.T) {
 // multiplier (issue #1020 H4). Pre-fix this would have silently surfaced a
 // fabricated TotalCost/SavingsPercentage as a real quote.
 func TestDatabaseClient_GetOfferingDetails_NoReservationPricing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	onDemandOnly := `{
@@ -427,6 +436,7 @@ func TestDatabaseClient_GetOfferingDetails_NoReservationPricing(t *testing.T) {
 }
 
 func TestDatabaseClient_GetOfferingDetails_SelectsSyntheticVCoreRow(t *testing.T) {
+	t.Parallel()
 	base := azpricing.RetailPriceItem{
 		CurrencyCode: "EUR", RetailPrice: 1200, UnitPrice: 1200,
 		ServiceName: "SQL Database", ProductName: "SQL Database", ArmRegionName: "eastus",
@@ -558,40 +568,21 @@ func TestDatabaseClient_GetOfferingDetails_SelectsSyntheticVCoreRow(t *testing.T
 	}
 }
 
-func TestDatabaseClient_GetOfferingDetails_ExactEscapedReservationFilter(t *testing.T) {
-	const region, sku = "east'us", "GeneralPurpose_Gen5_'2"
-	row := azpricing.RetailPriceItem{
-		ServiceName: "SQL Database", ArmRegionName: region, ArmSKUName: sku,
-		Type: "Reservation", ReservationTerm: "1 Year", UnitOfMeasure: "1 Hour",
-		CurrencyCode: "EUR", RetailPrice: 1200,
-	}
-	body, err := json.Marshal(AzureRetailPrice{Items: []azpricing.RetailPriceItem{row}})
-	require.NoError(t, err)
-	mockHTTP := &MockHTTPClient{}
-	response := createMockHTTPResponse(http.StatusOK, string(body))
-	t.Cleanup(func() {
-		require.NoError(t, response.Body.Close())
+func TestDatabaseClient_GetOfferingDetails_RejectsQuoteInRegionAndSKU(t *testing.T) {
+	t.Parallel()
+	// Quote characters are rejected outright (not escaped); the mock has no
+	// expectations, so any request would panic.
+	client := NewClientWithHTTP(nil, "sub", "east'us", &MockHTTPClient{})
+	details, err := client.GetOfferingDetails(context.Background(), common.Recommendation{
+		ResourceType: "GeneralPurpose_Gen5_'2", Term: "1yr", PaymentOption: "upfront",
 	})
-	mockHTTP.On("Do", mock.Anything).Return(response, nil).Run(func(args mock.Arguments) {
-		req := args.Get(0).(*http.Request)
-		assert.Equal(t, http.MethodGet, req.Method)
-		assert.Equal(t, "https", req.URL.Scheme)
-		assert.Equal(t, "prices.azure.com", req.URL.Host)
-		assert.Equal(t, "/api/retail/prices", req.URL.Path)
-		assert.Equal(t, "2023-01-01-preview", req.URL.Query().Get("api-version"))
-		assert.Equal(t, "serviceName eq 'SQL Database' and armRegionName eq 'east''us' and armSkuName eq 'GeneralPurpose_Gen5_''2' and priceType eq 'Reservation'", req.URL.Query().Get("$filter"))
-	}).Once()
-	details, err := NewClientWithHTTP(nil, "sub", region, mockHTTP).GetOfferingDetails(context.Background(), common.Recommendation{
-		ResourceType: sku, Term: "1yr", PaymentOption: "upfront",
-	})
-	require.NoError(t, err)
-	require.NotNil(t, details)
-	assert.Equal(t, 1200.0, details.TotalCost)
-	assert.Equal(t, "EUR", details.Currency)
-	mockHTTP.AssertExpectations(t)
+	require.Error(t, err)
+	assert.Nil(t, details)
+	assert.Contains(t, err.Error(), "Retail Prices filter")
 }
 
 func TestDatabaseClient_GetOfferingDetails_ReservationAcrossPages(t *testing.T) {
+	t.Parallel()
 	var sample AzureRetailPrice
 	require.NoError(t, json.Unmarshal([]byte(createSampleSQLPricingResponse()), &sample))
 	selected := sample.Items[0]
@@ -649,6 +640,7 @@ func TestDatabaseClient_GetOfferingDetails_ReservationAcrossPages(t *testing.T) 
 }
 
 func TestDatabaseClient_GetExistingCommitments_Empty(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -662,6 +654,7 @@ func TestDatabaseClient_GetExistingCommitments_Empty(t *testing.T) {
 }
 
 func TestDatabaseClient_GetRecommendations_WithMockPager(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -684,6 +677,7 @@ func TestDatabaseClient_GetRecommendations_WithMockPager(t *testing.T) {
 }
 
 func TestDatabaseClient_GetRecommendations_MultiplePages(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -711,6 +705,7 @@ func TestDatabaseClient_GetRecommendations_MultiplePages(t *testing.T) {
 }
 
 func TestDatabaseClient_GetExistingCommitments_WithMockPager(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -750,6 +745,7 @@ func TestDatabaseClient_GetExistingCommitments_WithMockPager(t *testing.T) {
 // usage API, one row per reservation per usage day. A pager returning three
 // rows for the same ReservationID must surface as a single commitment.
 func TestDatabaseClient_GetExistingCommitments_DedupesDailyUsageRows(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -782,6 +778,7 @@ func TestDatabaseClient_GetExistingCommitments_DedupesDailyUsageRows(t *testing.
 }
 
 func TestDatabaseClient_GetExistingCommitments_FilterNonSQL(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -823,6 +820,7 @@ func TestDatabaseClient_GetExistingCommitments_FilterNonSQL(t *testing.T) {
 }
 
 func TestDatabaseClient_GetExistingCommitments_NilProperties(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -849,6 +847,7 @@ func TestDatabaseClient_GetExistingCommitments_NilProperties(t *testing.T) {
 }
 
 func TestDatabaseClient_GetExistingCommitments_PagerError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -869,6 +868,7 @@ func TestDatabaseClient_GetExistingCommitments_PagerError(t *testing.T) {
 }
 
 func TestDatabaseClient_GetValidResourceTypes_WithMock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -906,6 +906,7 @@ func TestDatabaseClient_GetValidResourceTypes_WithMock(t *testing.T) {
 }
 
 func TestDatabaseClient_GetValidResourceTypes_ManagedInstance(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -937,6 +938,7 @@ func TestDatabaseClient_GetValidResourceTypes_ManagedInstance(t *testing.T) {
 }
 
 func TestDatabaseClient_GetValidResourceTypes_Error(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -952,6 +954,7 @@ func TestDatabaseClient_GetValidResourceTypes_Error(t *testing.T) {
 }
 
 func TestDatabaseClient_GetValidResourceTypes_Empty(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -969,6 +972,7 @@ func TestDatabaseClient_GetValidResourceTypes_Empty(t *testing.T) {
 }
 
 func TestDatabaseClient_SetterMethods(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 
 	// Test SetRecommendationsPager
@@ -990,6 +994,7 @@ func TestDatabaseClient_SetterMethods(t *testing.T) {
 // TestDatabaseClient_ConvertAzureSQLRecommendation_NilGuards pins the new
 // contract: unusable SDK payloads produce a nil *Recommendation.
 func TestDatabaseClient_ConvertAzureSQLRecommendation_NilGuards(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	assert.Nil(t, client.convertAzureSQLRecommendation(context.Background(), nil))
 }
@@ -1000,6 +1005,7 @@ func TestDatabaseClient_ConvertAzureSQLRecommendation_NilGuards(t *testing.T) {
 // response (region with no SKU mapping) is the "no signal" baseline —
 // EngineVersion stays empty.
 func TestDatabaseClient_ConvertAzureSQLRecommendation_PopulatesAllFields(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	// Inject empty capabilities client so cachedSKULookup doesn't make a
 	// real Azure call during this test.
@@ -1047,6 +1053,7 @@ func TestDatabaseClient_ConvertAzureSQLRecommendation_PopulatesAllFields(t *test
 // DatabaseDetails.EngineVersion when the recommendation's SKU appears
 // in the location capabilities response.
 func TestDatabaseClient_ConvertAzureSQLRecommendation_PopulatesEngineVersion(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 
 	skuName := "GeneralPurpose_Gen5_2"
@@ -1094,6 +1101,7 @@ func TestDatabaseClient_ConvertAzureSQLRecommendation_PopulatesEngineVersion(t *
 // asserts that a capabilities-listing failure does NOT fail the
 // conversion — EngineVersion just stays empty.
 func TestDatabaseClient_ConvertAzureSQLRecommendation_CapabilitiesErrorFallsBack(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	client.SetCapabilitiesClient(&MockCapabilitiesClient{
 		err: errors.New("transient Azure API error"),
@@ -1119,6 +1127,7 @@ func TestDatabaseClient_ConvertAzureSQLRecommendation_CapabilitiesErrorFallsBack
 // many converter calls in the same GetRecommendations run trigger
 // exactly ONE armsql.ListByLocation call.
 func TestDatabaseClient_CachedSKULookup_FetchedOnce(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 
 	skuName := "GeneralPurpose_Gen5_2"
@@ -1171,6 +1180,7 @@ func calcPriceRespJSON(orderID string) string {
 }
 
 func TestDatabaseClient_PurchaseCommitment_Success(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1209,6 +1219,7 @@ func TestDatabaseClient_PurchaseCommitment_Success(t *testing.T) {
 }
 
 func TestDatabaseClient_PurchaseCommitment_3YearTerm(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1245,6 +1256,7 @@ func TestDatabaseClient_PurchaseCommitment_3YearTerm(t *testing.T) {
 }
 
 func TestDatabaseClient_PurchaseCommitment_Accepted(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1280,6 +1292,7 @@ func TestDatabaseClient_PurchaseCommitment_Accepted(t *testing.T) {
 }
 
 func TestDatabaseClient_PurchaseCommitment_TokenError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{err: errors.New("token error")}
@@ -1299,6 +1312,7 @@ func TestDatabaseClient_PurchaseCommitment_TokenError(t *testing.T) {
 }
 
 func TestDatabaseClient_PurchaseCommitment_HTTPError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1322,6 +1336,7 @@ func TestDatabaseClient_PurchaseCommitment_HTTPError(t *testing.T) {
 }
 
 func TestDatabaseClient_PurchaseCommitment_BadStatus(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1363,6 +1378,7 @@ func TestDatabaseClient_PurchaseCommitment_BadStatus(t *testing.T) {
 // the call would succeed without the tag and re-driven purchases would
 // duplicate reservations server-side.
 func TestDatabaseClient_PurchaseCommitment_TagInjection(t *testing.T) {
+	t.Parallel()
 	const orderID = "db-tag-test"
 	const source = common.PurchaseSourceWeb
 
@@ -1413,6 +1429,7 @@ func TestDatabaseClient_PurchaseCommitment_TagInjection(t *testing.T) {
 // ReservationBillingPlan value in the purchase body rather than silently
 // defaulting to Azure's Upfront behavior for a no-upfront/monthly rec.
 func TestDatabaseClient_PurchaseCommitment_BillingPlan(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name          string
 		paymentOption string
@@ -1490,6 +1507,7 @@ func TestDatabaseClient_PurchaseCommitment_BillingPlan(t *testing.T) {
 // signal CUDly controls -- proceeding without it would allow a re-driven
 // purchase to create a duplicate reservation.
 func TestDatabaseClient_PurchaseCommitment_RequiresSource(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1504,6 +1522,7 @@ func TestDatabaseClient_PurchaseCommitment_RequiresSource(t *testing.T) {
 }
 
 func TestDatabaseClient_ValidateOffering_Valid(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -1537,6 +1556,7 @@ func TestDatabaseClient_ValidateOffering_Valid(t *testing.T) {
 }
 
 func TestDatabaseClient_ValidateOffering_Invalid(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -1571,6 +1591,7 @@ func TestDatabaseClient_ValidateOffering_Invalid(t *testing.T) {
 }
 
 func TestDatabaseClient_ValidateOffering_CaseInsensitive(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	skuName := "GP_Gen5_8"
@@ -1613,6 +1634,7 @@ func TestDatabaseClient_ValidateOffering_CaseInsensitive(t *testing.T) {
 // against regression: displayName in the calculatePrice body must match
 // [A-Za-z0-9_-]{1,64} (Azure rejects DisplayNameInvalid otherwise).
 func TestDatabaseClient_PurchaseCommitment_DisplayNameConformsToAzureAllowlist(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1674,6 +1696,7 @@ func TestDatabaseClient_PurchaseCommitment_DisplayNameConformsToAzureAllowlist(t
 // send the canonical SDK enum value "SqlDatabases", not the hand-written
 // "SqlDatabase" Azure rejects as an invalid reservedResourceType.
 func TestDatabaseClient_PurchaseCommitment_CanonicalReservedResourceType(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1736,6 +1759,7 @@ func TestDatabaseClient_PurchaseCommitment_CanonicalReservedResourceType(t *test
 // the hand-written string "SqlDatabase" (lowercase SQL, singular) which is not a
 // valid resourceType enum member, causing the API to return no recommendations.
 func TestReservationResourceTypeSQLDB_IsCanonical(t *testing.T) {
+	t.Parallel()
 	assert.Equal(t, "SQLDatabases", reservationResourceTypeSQLDB,
 		"SQL Database filter value must be the Azure REST API canonical enum \"SQLDatabases\"; "+
 			"\"SqlDatabase\" (pre-fix) is not a valid resourceType")
@@ -1824,6 +1848,7 @@ func buildServerPage(n int) armsql.ServersClientListResponse {
 // that a subscription with all zone-redundant managed instances produces
 // AZConfig="zoneRedundant" in the recommendation Details.
 func TestDatabaseClient_ConvertAzureSQLRecommendation_PopulatesAZConfig(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	client.SetCapabilitiesClient(&MockCapabilitiesClient{})
 	client.SetManagedInstancesPager(&MockSQLManagedInstancesPager{
@@ -1846,6 +1871,7 @@ func TestDatabaseClient_ConvertAzureSQLRecommendation_PopulatesAZConfig(t *testi
 // TestDatabaseClient_ConvertAzureSQLRecommendation_AmbiguousAZConfig asserts
 // that a subscription with mixed zone-redundancy produces AZConfig="" (empty).
 func TestDatabaseClient_ConvertAzureSQLRecommendation_AmbiguousAZConfig(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	client.SetCapabilitiesClient(&MockCapabilitiesClient{})
 	// One zone-redundant and one non-zone-redundant = ambiguous.
@@ -1869,6 +1895,7 @@ func TestDatabaseClient_ConvertAzureSQLRecommendation_AmbiguousAZConfig(t *testi
 // asserts that a managed-instances pager failure leaves AZConfig empty
 // without failing the recommendation conversion.
 func TestDatabaseClient_ConvertAzureSQLRecommendation_AZConfigPagerErrorFallsBack(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	client.SetCapabilitiesClient(&MockCapabilitiesClient{})
 	client.SetManagedInstancesPager(&MockSQLManagedInstancesPager{
@@ -1911,6 +1938,7 @@ func (f *failingSecondPageMIPager) NextPage(_ context.Context) (armsql.ManagedIn
 // asserts that a page error after a successful first page does not derive
 // AZConfig or Deployment from the partial sample.
 func TestDatabaseClient_ConvertAzureSQLRecommendation_MidWalkPageErrorLeavesSignalsEmpty(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	client.SetCapabilitiesClient(&MockCapabilitiesClient{})
 	client.SetManagedInstancesPager(&failingSecondPageMIPager{
@@ -1936,6 +1964,7 @@ func TestDatabaseClient_ConvertAzureSQLRecommendation_MidWalkPageErrorLeavesSign
 // walk stops early: Deployment must not become "single" and AZConfig must
 // stay empty.
 func TestDatabaseClient_ConvertAzureSQLRecommendation_IncompleteWalkLeavesSignalsEmpty(t *testing.T) {
+	t.Parallel()
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	tests := []struct {
@@ -1991,6 +2020,7 @@ func TestDatabaseClient_ConvertAzureSQLRecommendation_IncompleteWalkLeavesSignal
 // TestDatabaseClient_ConvertAzureSQLRecommendation_MultiPageWalkDerivesAZConfig
 // is the control: a fully paginated walk still derives AZConfig.
 func TestDatabaseClient_ConvertAzureSQLRecommendation_MultiPageWalkDerivesAZConfig(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	client.SetCapabilitiesClient(&MockCapabilitiesClient{})
 	client.SetManagedInstancesPager(&MockSQLManagedInstancesPager{
@@ -2014,6 +2044,7 @@ func TestDatabaseClient_ConvertAzureSQLRecommendation_MultiPageWalkDerivesAZConf
 // that a subscription with only managed instances produces
 // Deployment="managed".
 func TestDatabaseClient_ConvertAzureSQLRecommendation_PopulatesDeployment(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	client.SetCapabilitiesClient(&MockCapabilitiesClient{})
 	zr := true
@@ -2044,6 +2075,7 @@ func TestDatabaseClient_ConvertAzureSQLRecommendation_PopulatesDeployment(t *tes
 // that a subscription with only regular servers (no managed instances)
 // produces Deployment="single".
 func TestDatabaseClient_ConvertAzureSQLRecommendation_DeploymentSingle(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	client.SetCapabilitiesClient(&MockCapabilitiesClient{})
 	// No managed instances.
@@ -2067,6 +2099,7 @@ func TestDatabaseClient_ConvertAzureSQLRecommendation_DeploymentSingle(t *testin
 // asserts that a servers pager failure leaves Deployment empty without
 // failing the conversion.
 func TestDatabaseClient_ConvertAzureSQLRecommendation_DeploymentPagerErrorFallsBack(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	client.SetCapabilitiesClient(&MockCapabilitiesClient{})
 	client.SetManagedInstancesPager(&MockSQLManagedInstancesPager{})
@@ -2090,6 +2123,7 @@ func TestDatabaseClient_ConvertAzureSQLRecommendation_DeploymentPagerErrorFallsB
 // converter calls in the same GetRecommendations run trigger exactly ONE
 // walk of the managed-instances and servers pagers regardless of call count.
 func TestDatabaseClient_ServerInfo_FetchedOnce(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	client.SetCapabilitiesClient(&MockCapabilitiesClient{})
 
@@ -2110,11 +2144,76 @@ func TestDatabaseClient_ServerInfo_FetchedOnce(t *testing.T) {
 		out := client.convertAzureSQLRecommendation(context.Background(), rec)
 		require.NotNil(t, out)
 	}
-	// The pager is walked exactly once: the sync.Once gate fires on the
+	// The pager is walked exactly once: the serverInfo cache fills on the
 	// first converter call and all subsequent calls read the cached value.
 	assert.Equal(t, 1, miPager.CallCount,
 		"managed-instances pager must be walked ONCE regardless of converter call count")
 	// Servers pager is also walked once (zero pages = no servers found).
 	assert.Equal(t, 0, serversPager.CallCount,
 		"servers pager NextPage not called when it has no pages")
+}
+
+// An injected SKU or region must be rejected before any Retail Prices request
+// is built; the mock has no expectations, so any HTTP call would panic.
+func TestGetSQLPricing_RejectsInjectedFilterValues(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, sku, region string }{
+		{"sku", "x' or armSkuName ne '", "eastus"},
+		{"region", "GP_Gen5_2", "eastus' or '1' eq '1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewClientWithHTTP(nil, "test-subscription", "eastus", &MockHTTPClient{})
+			_, err := client.getSQLPricing(context.Background(), tc.sku, tc.region, 1)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "Retail Prices filter")
+		})
+	}
+}
+
+func TestDatabaseClient_GetOfferingDetails_ExactReservationFilter(t *testing.T) {
+	t.Parallel()
+	const region, sku = "eastus", "GP_Gen5_2"
+	row := azpricing.RetailPriceItem{
+		ServiceName: "SQL Database", ArmRegionName: region, ArmSKUName: sku,
+		Type: "Reservation", ReservationTerm: "1 Year", UnitOfMeasure: "1 Hour",
+		CurrencyCode: "EUR", RetailPrice: 1200,
+	}
+	body, err := json.Marshal(AzureRetailPrice{Items: []azpricing.RetailPriceItem{row}})
+	require.NoError(t, err)
+	mockHTTP := &MockHTTPClient{}
+	response := createMockHTTPResponse(http.StatusOK, string(body))
+	t.Cleanup(func() {
+		require.NoError(t, response.Body.Close())
+	})
+	mockHTTP.On("Do", mock.Anything).Return(response, nil).Run(func(args mock.Arguments) {
+		req := args.Get(0).(*http.Request)
+		assert.Equal(t, "2023-01-01-preview", req.URL.Query().Get("api-version"))
+		assert.Equal(t, "serviceName eq 'SQL Database' and armRegionName eq 'eastus' and armSkuName eq 'GP_Gen5_2' and priceType eq 'Reservation'", req.URL.Query().Get("$filter"))
+	}).Once()
+	details, err := NewClientWithHTTP(nil, "sub", region, mockHTTP).GetOfferingDetails(context.Background(), common.Recommendation{
+		ResourceType: sku, Term: "1yr", PaymentOption: "upfront",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, details)
+	assert.Equal(t, 1200.0, details.TotalCost)
+	mockHTTP.AssertExpectations(t)
+}
+
+// TestNewClientWithHTTP_NilFallbackIsHardened verifies that passing nil as the
+// httpClient falls back to the SSRF-hardened httpclient.New(), which rejects
+// IMDS connections, instead of leaving a nil client that panics on first use.
+func TestNewClientWithHTTP_NilFallbackIsHardened(t *testing.T) {
+	t.Parallel()
+	c := NewClientWithHTTP(nil, "sub-123", "eastus", nil)
+	require.NotNil(t, c.httpClient)
+	require.NotEqual(t, http.DefaultClient, c.httpClient,
+		"nil fallback must never be http.DefaultClient")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://169.254.169.254/metadata/instance", nil)
+	require.NoError(t, err)
+	resp, err := c.httpClient.Do(req)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	require.Error(t, err, "nil-fallback client must reject IMDS connections")
+	assert.Contains(t, err.Error(), "blocked")
 }

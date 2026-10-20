@@ -16,8 +16,6 @@ const (
 	// computeServiceID is the Cloud Billing catalog service for Compute Engine.
 	computeServiceID = "services/6F81-5844-456A"
 
-	hoursPerYear = 8760.0
-
 	usageUnitHour    = "h"
 	usageUnitGiBHour = "GiBy.h"
 
@@ -61,6 +59,10 @@ func resourcesFromRecommendation(rec common.Recommendation) (computeResources, e
 type skuFamilyLabels struct {
 	onDemand string   // "<label> Instance Core running in ..."
 	commit   []string // "Commitment v1: <label> Cpu in ..."
+	// legacyCommit lists labels the catalog also names "Commitment: <label> Core
+	// running in ..." (no "v1:", Core/Ram instead of Cpu/Ram). An allowlist, not a
+	// pattern: a family absent here never matches the legacy form.
+	legacyCommit []string
 }
 
 // skuFamilyOverrides lists families whose catalog label differs from the
@@ -71,7 +73,7 @@ var skuFamilyOverrides = map[string]skuFamilyLabels{
 	"c2d": {onDemand: "C2D AMD", commit: []string{"C2D AMD"}},
 	"t2d": {onDemand: "T2D AMD", commit: []string{"T2D AMD"}},
 	"c4a": {onDemand: "C4A Arm", commit: []string{"C4A Arm"}},
-	"c2":  {onDemand: "Compute optimized", commit: []string{"Compute optimized"}},
+	"c2":  {onDemand: "Compute optimized", commit: []string{"Compute optimized"}, legacyCommit: []string{"Compute optimized"}},
 	"m1":  {onDemand: "Memory-optimized", commit: []string{"Memory-optimized"}},
 	"m2":  {onDemand: "Memory-optimized", commit: []string{"Memory-optimized"}},
 	"m3":  {onDemand: "M3 Memory-optimized", commit: []string{"M3 Memory-optimized"}},
@@ -116,6 +118,13 @@ func commitmentDescription(label string) *regexp.Regexp {
 	return regexp.MustCompile(`^Commitment v1: ` + family + `(Cpu|Ram) in .* for (1|3) Years?$`)
 }
 
+// legacyCommitmentDescription matches e.g. "Commitment: Compute optimized Core
+// running in Americas for 1 Year". Group 1 is Core|Ram and group 2 the term, the
+// same positions as commitmentDescription.
+func legacyCommitmentDescription(label string) *regexp.Regexp {
+	return regexp.MustCompile(`^Commitment: ` + regexp.QuoteMeta(label) + ` (Core|Ram) running in .* for (1|3) Years?$`)
+}
+
 // rateMatcher recognizes the catalog SKUs of one family, region and term.
 type rateMatcher struct {
 	region      string
@@ -132,6 +141,9 @@ func newRateMatcher(labels skuFamilyLabels, region string, termYears int) rateMa
 	}
 	for _, label := range labels.commit {
 		m.commitments = append(m.commitments, commitmentDescription(label))
+	}
+	for _, label := range labels.legacyCommit {
+		m.commitments = append(m.commitments, legacyCommitmentDescription(label))
 	}
 	return m
 }
@@ -284,7 +296,7 @@ func (c *Client) getComputePricing(ctx context.Context, machineType, region stri
 		return nil, err
 	}
 
-	hours := hoursPerYear * float64(termYears)
+	hours := common.HoursPerYear * float64(termYears)
 	commitHourly := float64(res.vcpus)*rates.commitment.cpu + res.memoryGiB*rates.commitment.ram
 	onDemandHourly := float64(res.vcpus)*rates.onDemand.cpu + res.memoryGiB*rates.onDemand.ram
 
@@ -309,7 +321,7 @@ func (c *Client) listComputeSKUs(ctx context.Context) ([]*cloudbilling.Sku, erro
 	if err != nil {
 		return nil, err
 	}
-	resp, err := svc.ListSKUs(computeServiceID)
+	resp, err := svc.ListSKUs(ctx, computeServiceID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list SKUs: %w", err)
 	}

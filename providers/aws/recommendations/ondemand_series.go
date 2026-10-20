@@ -11,6 +11,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/costexplorer"
 	"github.com/aws/aws-sdk-go-v2/service/costexplorer/types"
+
+	"github.com/LeanerCloud/cloud-commitments-go/pkg/concurrency"
 )
 
 // ec2ComputeService is the CE SERVICE dimension value for EC2 compute.
@@ -135,23 +137,12 @@ func (c *Client) getOnDemandSeries(ctx context.Context, accountID, region string
 
 	byDate := make(map[string]float64)
 
-	var nextToken *string
-	page := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("GetOnDemandSeries: context canceled during pagination: %w", err)
-		}
-		page++
-		if page > maxOnDemandSeriesPages {
-			return nil, fmt.Errorf("GetOnDemandSeries: exceeded %d page cap; possible CE token loop", maxOnDemandSeriesPages)
-		}
-		input.NextPageToken = nextToken
-
+	err := paginateCE(ctx, maxOnDemandSeriesPages, "GetOnDemandSeries", func(token *string) (*string, error) {
+		input.NextPageToken = token
 		out, err := c.fetchOnDemandPage(ctx, input)
 		if err != nil {
 			return nil, fmt.Errorf("GetOnDemandSeries: %w", err)
 		}
-
 		if accountID != "" {
 			err = accumulateScopedDailyResults(byDate, out, start, end)
 		} else {
@@ -160,13 +151,10 @@ func (c *Client) getOnDemandSeries(ctx context.Context, accountID, region string
 		if err != nil {
 			return nil, fmt.Errorf("GetOnDemandSeries: %w", err)
 		}
-
-		// aws.ToString returns "" for nil, so this single check covers both nil
-		// and empty-string tokens.
-		if aws.ToString(out.NextPageToken) == "" {
-			break
-		}
-		nextToken = out.NextPageToken
+		return out.NextPageToken, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return buildDailySeries(byDate, region, lookbackDays)
@@ -221,7 +209,11 @@ func (c *Client) fetchOnDemandPage(ctx context.Context, input *costexplorer.GetC
 		if waitErr := rateLimiter.Wait(ctx); waitErr != nil {
 			return nil, fmt.Errorf("rate limiter wait: %w", waitErr)
 		}
+		if acqErr := concurrency.Acquire(ctx); acqErr != nil {
+			return nil, fmt.Errorf("concurrency acquire failed: %w", acqErr)
+		}
 		out, err := c.costExplorerClient.GetCostAndUsage(ctx, input)
+		concurrency.Release(ctx)
 		if !rateLimiter.ShouldRetry(err) {
 			if err != nil {
 				return nil, fmt.Errorf("GetCostAndUsage: %w", err)

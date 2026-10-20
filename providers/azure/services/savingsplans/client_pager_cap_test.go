@@ -3,6 +3,7 @@ package savingsplans
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/billingbenefits/armbillingbenefits"
 	"github.com/stretchr/testify/assert"
@@ -33,11 +34,13 @@ func (p *pagedListAllPager) NextPage(_ context.Context) (armbillingbenefits.Savi
 func ownedPlan(id string) *armbillingbenefits.SavingsPlanModel {
 	return &armbillingbenefits.SavingsPlanModel{
 		ID:         &id,
-		Properties: &armbillingbenefits.SavingsPlanModelProperties{BillingScopeID: toPtr("/subscriptions/sub-abc")},
+		SKU:        &armbillingbenefits.SKU{Name: toPtr("Compute_Savings_Plan")},
+		Properties: &armbillingbenefits.SavingsPlanModelProperties{BillingScopeID: toPtr("/subscriptions/sub-abc"), EffectiveDateTime: toPtr(time.Now())},
 	}
 }
 
 func TestGetExistingCommitments_PageCap(t *testing.T) {
+	t.Parallel()
 	t.Run("endless pager errors at the cap", func(t *testing.T) {
 		pager := &pagedListAllPager{limit: 10000}
 		c := NewClient(nil, "sub-abc", "eastus")

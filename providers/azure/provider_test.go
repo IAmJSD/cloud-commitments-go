@@ -110,6 +110,7 @@ func (m *mockCredentialProvider) NewDefaultAzureCredential() (azcore.TokenCreden
 }
 
 func TestNewAzureProvider(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		config         *provider.ProviderConfig
@@ -183,6 +184,7 @@ func TestNewAzureProvider(t *testing.T) {
 // on the provider so subsequent client builds skip the DefaultAzureCredential
 // lazy initialisation path.
 func TestNewAzureProvider_TokenCredentialInjection(t *testing.T) {
+	t.Parallel()
 	t.Run("Nil credential leaves cred unset", func(t *testing.T) {
 		p, err := NewAzureProvider(&provider.ProviderConfig{
 			AzureSubscriptionID: "sub-1",
@@ -217,16 +219,19 @@ func TestNewAzureProvider_TokenCredentialInjection(t *testing.T) {
 }
 
 func TestAzureProvider_Name(t *testing.T) {
+	t.Parallel()
 	p := &Provider{}
 	assert.Equal(t, "azure", p.Name())
 }
 
 func TestAzureProvider_DisplayName(t *testing.T) {
+	t.Parallel()
 	p := &Provider{}
 	assert.Equal(t, "Microsoft Azure", p.DisplayName())
 }
 
 func TestAzureProvider_GetDefaultRegion(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		provider       *Provider
@@ -257,6 +262,7 @@ func TestAzureProvider_GetDefaultRegion(t *testing.T) {
 }
 
 func TestAzureProvider_GetSupportedServices(t *testing.T) {
+	t.Parallel()
 	p := &Provider{}
 	services := p.GetSupportedServices()
 
@@ -272,6 +278,7 @@ func TestAzureProvider_GetSupportedServices(t *testing.T) {
 }
 
 func TestAzureProvider_IsConfigured(t *testing.T) {
+	t.Parallel()
 	t.Run("returns true when credential is already set", func(t *testing.T) {
 		p := &Provider{
 			cred: &mockTokenCredential{},
@@ -301,6 +308,7 @@ func TestAzureProvider_IsConfigured(t *testing.T) {
 }
 
 func TestAzureProvider_GetCredentials_NotConfigured(t *testing.T) {
+	t.Parallel()
 	// Test GetCredentials when Azure is not configured. Inject a mock
 	// credential provider that fails so IsConfigured() deterministically
 	// returns false, instead of falling through to the real
@@ -318,6 +326,7 @@ func TestAzureProvider_GetCredentials_NotConfigured(t *testing.T) {
 }
 
 func TestAzureProvider_ValidateCredentials(t *testing.T) {
+	t.Parallel()
 	t.Run("returns error when not configured", func(t *testing.T) {
 		p := &Provider{}
 		p.SetCredentialProvider(&mockCredentialProvider{
@@ -382,6 +391,7 @@ func TestAzureProvider_ValidateCredentials(t *testing.T) {
 }
 
 func TestAzureProvider_GetServiceClient_NotConfigured(t *testing.T) {
+	t.Parallel()
 	// Test GetServiceClient when Azure is not configured. Inject a mock
 	// credential provider that fails so IsConfigured() deterministically
 	// returns false, instead of falling through to the real
@@ -399,6 +409,7 @@ func TestAzureProvider_GetServiceClient_NotConfigured(t *testing.T) {
 }
 
 func TestAzureProvider_GetServiceClient_UnsupportedService(t *testing.T) {
+	t.Parallel()
 	// Create a mock credential for testing
 	p := &Provider{
 		cred:           &mockTokenCredential{},
@@ -413,6 +424,7 @@ func TestAzureProvider_GetServiceClient_UnsupportedService(t *testing.T) {
 }
 
 func TestAzureProvider_GetServiceClient_AllServiceTypes(t *testing.T) {
+	t.Parallel()
 	// Create a provider with mock credentials
 	p := &Provider{
 		cred:           &mockTokenCredential{},
@@ -474,6 +486,7 @@ func TestAzureClients_GetExistingCommitments_PagerConstructionError(t *testing.T
 }
 
 func TestAzureProvider_GetRecommendationsClient_NotConfigured(t *testing.T) {
+	t.Parallel()
 	// Test GetRecommendationsClient when Azure is not configured. Inject a
 	// mock credential provider that fails so IsConfigured() deterministically
 	// returns false, instead of falling through to the real
@@ -491,6 +504,7 @@ func TestAzureProvider_GetRecommendationsClient_NotConfigured(t *testing.T) {
 }
 
 func TestAzureProvider_GetRecommendationsClient(t *testing.T) {
+	t.Parallel()
 	// Create a provider with mock credentials
 	p := &Provider{
 		cred:           &mockTokenCredential{},
@@ -510,6 +524,7 @@ func (m *mockTokenCredential) GetToken(ctx context.Context, options policy.Token
 }
 
 func TestAzureProvider_GetAccounts(t *testing.T) {
+	t.Parallel()
 	t.Run("success with single subscription", func(t *testing.T) {
 		subID := "test-subscription-id"
 		subName := "Test Subscription"
@@ -868,6 +883,7 @@ func TestAzureProvider_GetRegions(t *testing.T) {
 }
 
 func TestAzureProvider_GetCredentials(t *testing.T) {
+	t.Parallel()
 	t.Run("returns error when not configured", func(t *testing.T) {
 		p := &Provider{}
 		p.SetCredentialProvider(&mockCredentialProvider{
@@ -891,6 +907,7 @@ func TestAzureProvider_GetCredentials(t *testing.T) {
 }
 
 func TestAzureProvider_SetterMethods(t *testing.T) {
+	t.Parallel()
 	t.Run("SetSubscriptionsClient", func(t *testing.T) {
 		p := &Provider{}
 		mockClient := &mockSubscriptionsClient{}
@@ -997,6 +1014,7 @@ func TestAzureProvider_GetServiceClient_WithSubscriptionLookup(t *testing.T) {
 }
 
 func TestAzureProvider_GetRecommendationsClient_WithSubscriptionLookup(t *testing.T) {
+	t.Parallel()
 	t.Run("fetches subscription when subscriptionID not set", func(t *testing.T) {
 		subID := "fetched-subscription"
 		subName := "Fetched Sub"
@@ -1204,6 +1222,7 @@ func TestAzureProvider_GetAccounts_IsDefault(t *testing.T) {
 }
 
 func TestGetDefaultSubscriptionID(t *testing.T) {
+	t.Parallel()
 	t.Run("returns IsDefault account when present", func(t *testing.T) {
 		accounts := []common.Account{
 			{ID: "sub-1", IsDefault: false},
@@ -1223,6 +1242,7 @@ func TestGetDefaultSubscriptionID(t *testing.T) {
 }
 
 func TestAzureProvider_GetServiceClientForAccount(t *testing.T) {
+	t.Parallel()
 	t.Run("returns client for explicit subscription", func(t *testing.T) {
 		p := &Provider{cred: &mockTokenCredential{}}
 
@@ -1269,6 +1289,7 @@ func TestAzureProvider_GetServiceClientForAccount(t *testing.T) {
 }
 
 func TestAzureProvider_GetRecommendationsClientForAccount(t *testing.T) {
+	t.Parallel()
 	t.Run("returns client for explicit subscription", func(t *testing.T) {
 		p := &Provider{cred: &mockTokenCredential{}}
 		client, err := p.GetRecommendationsClientForAccount(context.Background(), "explicit-sub")
@@ -1559,11 +1580,13 @@ func TestAzureProvider_ConcurrentCredentialSwapAndFetch_NoDataRace(t *testing.T)
 				// Both readers of the swapped fields: GetAccounts reaches
 				// fetchAccounts, GetServiceClientForAccount builds a client
 				// straight from the credential.
-				if _, err := p.GetAccounts(context.Background()); err != nil {
+				// The swappers invalidate constantly, so a fetch failing as
+				// stale is the expected outcome here, not a defect.
+				if _, err := p.GetAccounts(context.Background()); err != nil && !errors.Is(err, errAccountsStale) {
 					errs <- err
 					return
 				}
-				if _, err := p.GetServiceClientForAccount(context.Background(), common.ServiceCompute, "eastus", "sub-1"); err != nil {
+				if _, err := p.GetServiceClientForAccount(context.Background(), common.ServiceCompute, "eastus", "sub-1"); err != nil && !errors.Is(err, errAccountsStale) {
 					errs <- err
 					return
 				}
@@ -1702,9 +1725,9 @@ func TestAzureProvider_InvalidateAccountsCache_DuringInFlightFetch(t *testing.T)
 	close(gated.release)
 
 	first := <-done
-	require.NoError(t, first.err)
-	require.Len(t, first.accounts, 1)
-	assert.Equal(t, "sub-gen-1", first.accounts[0].ID)
+	require.ErrorIs(t, first.err, errAccountsStale,
+		"a fetch invalidated mid-flight must fail, not hand back the stale snapshot")
+	assert.Empty(t, first.accounts)
 
 	// The invalidated snapshot must not have been published: this read has to
 	// re-hit ARM and observe the current subscription list.
@@ -1715,6 +1738,39 @@ func TestAzureProvider_InvalidateAccountsCache_DuringInFlightFetch(t *testing.T)
 	require.Len(t, second, 1)
 	assert.Equal(t, "sub-gen-2", second[0].ID,
 		"read after invalidation must see fresh data, not the resurrected pre-invalidation snapshot")
+}
+
+// A credential swap landing during an in-flight fetch must not hand the old
+// credential's subscription list to the caller that joined the singleflight
+// (GetRecommendationsClient would fan out over it using the new credential),
+// and must not populate the cache.
+func TestAzureProvider_SetCredential_DuringInFlightFetch_ReturnsError(t *testing.T) {
+	clearAzureSubscriptionEnv(t)
+	gated := &gatedGenerationSubscriptionsClient{
+		firstInFlight: make(chan struct{}),
+		release:       make(chan struct{}),
+	}
+	p := &Provider{cred: &mockTokenCredential{}}
+	p.SetSubscriptionsClient(gated)
+
+	type fetchResult struct {
+		accounts []common.Account
+		err      error
+	}
+	done := make(chan fetchResult, 1)
+	go func() {
+		accts, err := p.getOrFetchAccounts(context.Background())
+		done <- fetchResult{accounts: accts, err: err}
+	}()
+
+	<-gated.firstInFlight
+	p.SetCredential(&mockTokenCredential{})
+	close(gated.release)
+
+	res := <-done
+	require.ErrorIs(t, res.err, errAccountsStale)
+	assert.Nil(t, res.accounts)
+	assert.Nil(t, p.readCachedAccounts(), "stale fetch must not write the cache")
 }
 
 func TestAzureProvider_GetRecommendationsClient_MultiSubscriptionFanOut(t *testing.T) {
@@ -1959,6 +2015,7 @@ func TestAzureProvider_ResolveSubscription_InvisibleConfiguredTargetErrors(t *te
 // what makes the detector's chances additive instead of resting on a single
 // interleaving.
 func TestAzureProvider_ConcurrentCredentialProviderSwapAndIsConfigured_NoDataRace(t *testing.T) {
+	t.Parallel()
 	const (
 		instances = 50
 		readers   = 4

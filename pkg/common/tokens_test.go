@@ -2,6 +2,7 @@ package common //nolint:revive // pkg/common is the module's core domain package
 
 import (
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -9,6 +10,7 @@ import (
 )
 
 func TestGenerateApprovalToken_LengthAndHex(t *testing.T) {
+	t.Parallel()
 	tok, err := GenerateApprovalToken()
 	require.NoError(t, err)
 	assert.Len(t, tok, 64, "32 bytes hex-encoded should be 64 chars")
@@ -19,6 +21,7 @@ func TestGenerateApprovalToken_LengthAndHex(t *testing.T) {
 }
 
 func TestGenerateApprovalToken_Uniqueness(t *testing.T) {
+	t.Parallel()
 	// Generating 100 tokens should never collide.
 	seen := make(map[string]struct{}, 100)
 	for i := 0; i < 100; i++ {
@@ -31,6 +34,7 @@ func TestGenerateApprovalToken_Uniqueness(t *testing.T) {
 }
 
 func TestGenerateApprovalToken_NotZeroPrefix(t *testing.T) {
+	t.Parallel()
 	// 64 zero hex chars would be a sentinel for a clearly broken RNG.
 	tok, err := GenerateApprovalToken()
 	require.NoError(t, err)
@@ -38,6 +42,7 @@ func TestGenerateApprovalToken_NotZeroPrefix(t *testing.T) {
 }
 
 func TestDeriveIdempotencyToken_StableAcrossReDrive(t *testing.T) {
+	t.Parallel()
 	// The core idempotency guarantee (issue #636): re-deriving the token for
 	// the SAME execution + rec index must yield the IDENTICAL value, so a
 	// re-driven purchase reuses it and AWS / the EC2 dedupe guard collapse it
@@ -48,6 +53,7 @@ func TestDeriveIdempotencyToken_StableAcrossReDrive(t *testing.T) {
 }
 
 func TestDeriveIdempotencyToken_DiffersByExecutionAndIndex(t *testing.T) {
+	t.Parallel()
 	// Different recs within an execution, and the same rec index across
 	// executions, must NOT collide, or one purchase would suppress another.
 	base := DeriveIdempotencyToken("exec-abc-123", 0)
@@ -56,6 +62,7 @@ func TestDeriveIdempotencyToken_DiffersByExecutionAndIndex(t *testing.T) {
 }
 
 func TestDeriveIdempotencyToken_FitsClientTokenLimit(t *testing.T) {
+	t.Parallel()
 	// AWS ClientToken (and the SP ClientToken) cap at 64 chars; a SHA-256 hex
 	// digest is exactly 64, so the token can be used verbatim without truncation.
 	tok := DeriveIdempotencyToken("exec-abc-123", 7)
@@ -66,6 +73,7 @@ func TestDeriveIdempotencyToken_FitsClientTokenLimit(t *testing.T) {
 }
 
 func TestMaskToken_NeverEmitsFullToken(t *testing.T) {
+	t.Parallel()
 	// CodeRabbit PR #652: the "already exists" skip-purchase log lines must not
 	// emit the raw idempotency token (a stable per-execution identifier). The
 	// masked form keeps only an 8-char prefix for log correlation.
@@ -80,6 +88,7 @@ func TestMaskToken_NeverEmitsFullToken(t *testing.T) {
 }
 
 func TestMaskToken_EmptyAndShort(t *testing.T) {
+	t.Parallel()
 	assert.Equal(t, "(none)", MaskToken(""), "empty token must be reported as (none)")
 	// Short inputs (<=8 chars) are fully redacted, never echoed: an 8-char prefix
 	// of an 8-char value would leak the whole secret (CodeRabbit 10-L6).
@@ -90,6 +99,7 @@ func TestMaskToken_EmptyAndShort(t *testing.T) {
 }
 
 func TestIdempotencyGUID_DeterministicCanonicalForm(t *testing.T) {
+	t.Parallel()
 	token := DeriveIdempotencyToken("exec-1", 0)
 
 	a := IdempotencyGUID(token)
@@ -102,31 +112,65 @@ func TestIdempotencyGUID_DeterministicCanonicalForm(t *testing.T) {
 }
 
 func TestIdempotencyGUID_DistinctTokensDistinctGUIDs(t *testing.T) {
+	t.Parallel()
 	g0 := IdempotencyGUID(DeriveIdempotencyToken("exec-1", 0))
 	g1 := IdempotencyGUID(DeriveIdempotencyToken("exec-1", 1))
 	assert.NotEqual(t, g0, g1, "different recs must get different order IDs")
 }
 
 func TestIdempotencyGUID_ShortTokenReturnsEmpty(t *testing.T) {
+	t.Parallel()
 	assert.Equal(t, "", IdempotencyGUID(""), "empty token must yield empty so callers keep their fallback")
 	assert.Equal(t, "", IdempotencyGUID("abc"), "sub-32-char token must yield empty")
 }
 
-func TestReservationOrderID(t *testing.T) {
-	token := DeriveIdempotencyToken("exec-1", 0)
+func TestOrderIDFromToken(t *testing.T) {
+	t.Parallel()
+	hex32 := "0123456789abcdef0123456789abcdef"
+	derived := DeriveIdempotencyToken("exec-1", 0)
 
-	// With a token: deterministic GUID, never the fallback.
-	got := ReservationOrderID(token, "fallback-id")
-	assert.Equal(t, IdempotencyGUID(token), got, "a supplied token must derive the GUID")
-	assert.Equal(t, got, ReservationOrderID(token, "other-fallback"),
-		"same token must yield the same order ID regardless of fallback")
+	accepted := []struct {
+		name, token, want string
+	}{
+		{"empty returns fallback", "", "fallback-id"},
+		{"exactly 32 lowercase hex", hex32, "01234567-89ab-cdef-0123-456789abcdef"},
+		{"32 uppercase hex is lowercased", strings.ToUpper(hex32), "01234567-89ab-cdef-0123-456789abcdef"},
+		{"64 hex uses first 32", hex32 + hex32, "01234567-89ab-cdef-0123-456789abcdef"},
+		{"derived token", derived, IdempotencyGUID(derived)},
+	}
+	for _, tc := range accepted {
+		t.Run("accepted/"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := OrderIDFromToken(tc.token, "fallback-id")
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 
-	// No usable token: caller's fallback is returned verbatim.
-	assert.Equal(t, "fallback-id", ReservationOrderID("", "fallback-id"))
-	assert.Equal(t, "fallback-id", ReservationOrderID("abc", "fallback-id"))
+	rejected := []struct {
+		name, token string
+	}{
+		{"short", "abc"},
+		{"31 hex", hex32[:31]},
+		{"32 non-hex", strings.Repeat("g", 32)},
+		{"non-hex inside first 32 of 64", hex32[:10] + "z" + hex32[11:] + hex32},
+		{"dashed uuid", "01234567-89ab-cdef-0123-456789abcdef"},
+	}
+	for _, tc := range rejected {
+		t.Run("rejected/"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := OrderIDFromToken(tc.token, "fallback-id")
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrInvalidIdempotencyToken)
+			assert.Empty(t, got)
+			assert.NotContains(t, err.Error(), tc.token, "error must not echo the raw token")
+			assert.Contains(t, err.Error(), MaskToken(tc.token), "error must carry exactly the masked token")
+		})
+	}
 }
 
 func TestDeriveMuteToken_EmptyKeyReturnsEmpty(t *testing.T) {
+	t.Parallel()
 	// An empty key is a configuration error: the function must not silently sign
 	// with a well-known fallback, so it yields the empty string.
 	assert.Empty(t, DeriveMuteToken(nil, "user@example.com", "purchase_approvals"))
@@ -134,6 +178,7 @@ func TestDeriveMuteToken_EmptyKeyReturnsEmpty(t *testing.T) {
 }
 
 func TestVerifyMuteToken_EmptyKeyFailsClosed(t *testing.T) {
+	t.Parallel()
 	// With no key, verification of any non-empty token must fail (fail closed) so
 	// a missing secret cannot be exploited to accept a forged token. Crucially,
 	// even passing the empty string DeriveMuteToken(nil,...) returns must NOT

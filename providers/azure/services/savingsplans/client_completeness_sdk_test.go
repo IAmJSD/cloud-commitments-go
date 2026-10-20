@@ -29,6 +29,7 @@ func (inventoryCredential) GetToken(context.Context, policy.TokenRequestOptions)
 }
 
 func TestGetExistingCommitments_SDKPaginationCompleteness(t *testing.T) {
+	t.Parallel()
 	for _, ambiguous := range []bool{false, true} {
 		for _, dedupe := range []bool{false, true} {
 			t.Run(fmt.Sprintf("ambiguous=%t/dedupe=%t", ambiguous, dedupe), func(t *testing.T) {
@@ -44,7 +45,7 @@ func TestGetExistingCommitments_SDKPaginationCompleteness(t *testing.T) {
 					requests.Add(1)
 					switch r.URL.Query().Get("page") {
 					case "":
-						_, err := fmt.Fprintf(w, `{"value":[{"id":"owned","name":"Compute","properties":{"billingScopeId":"/subscriptions/sub-a","provisioningState":"Succeeded","effectiveDateTime":%q}}],"nextLink":%q}`,
+						_, err := fmt.Fprintf(w, `{"value":[{"id":"owned","name":"Compute","sku":{"name":"Compute_Savings_Plan"},"properties":{"billingScopeId":"/subscriptions/sub-a","provisioningState":"Succeeded","effectiveDateTime":%q}}],"nextLink":%q}`,
 							time.Now().UTC().Format(time.RFC3339), endpoint+"/providers/Microsoft.BillingBenefits/savingsPlans?api-version=2022-11-01&page=2")
 						assert.NoError(t, err)
 					case "2":
@@ -61,27 +62,7 @@ func TestGetExistingCommitments_SDKPaginationCompleteness(t *testing.T) {
 				}))
 				t.Cleanup(server.Close)
 				endpoint = server.URL
-				httpClient := server.Client()
-				transport := httpClient.Transport.(*http.Transport)
-				transport.Proxy = nil
-				transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-					if address != server.Listener.Addr().String() {
-						return nil, fmt.Errorf("blocked non-fixture address %s", address)
-					}
-					return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, network, address)
-				}
-				_, blocked := transport.DialContext(context.Background(), "tcp", "management.azure.com:443")
-				require.ErrorContains(t, blocked, "blocked non-fixture")
-				sdk, err := armbillingbenefits.NewSavingsPlanClient(nil, inventoryCredential{}, &arm.ClientOptions{
-					ClientOptions: policy.ClientOptions{
-						Transport: httpClient,
-						Retry:     policy.RetryOptions{MaxRetries: -1},
-						Cloud: cloud.Configuration{Services: map[cloud.ServiceName]cloud.ServiceConfiguration{
-							cloud.ResourceManager: {Endpoint: endpoint, Audience: cloud.AzurePublic.Services[cloud.ResourceManager].Audience},
-						}},
-					},
-				})
-				require.NoError(t, err)
+				sdk := newFixtureSavingsPlanClient(t, server)
 				client := NewClient(nil, "sub-a", "eastus")
 				client.SetListAllPager(sdk.NewListAllPager(nil))
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -110,6 +91,89 @@ func TestGetExistingCommitments_SDKPaginationCompleteness(t *testing.T) {
 					}
 				}
 				assert.Equal(t, int32(2), requests.Load())
+			})
+		}
+	}
+}
+
+// newFixtureSavingsPlanClient returns an SDK client that can only reach the
+// fixture server.
+func newFixtureSavingsPlanClient(t *testing.T, server *httptest.Server) *armbillingbenefits.SavingsPlanClient {
+	t.Helper()
+	httpClient := server.Client()
+	transport := httpClient.Transport.(*http.Transport)
+	transport.Proxy = nil
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if address != server.Listener.Addr().String() {
+			return nil, fmt.Errorf("blocked non-fixture address %s", address)
+		}
+		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, network, address)
+	}
+	_, blocked := transport.DialContext(context.Background(), "tcp", "management.azure.com:443")
+	require.ErrorContains(t, blocked, "blocked non-fixture")
+	sdk, err := armbillingbenefits.NewSavingsPlanClient(nil, inventoryCredential{}, &arm.ClientOptions{
+		ClientOptions: policy.ClientOptions{
+			Transport: httpClient,
+			Retry:     policy.RetryOptions{MaxRetries: -1},
+			Cloud: cloud.Configuration{Services: map[cloud.ServiceName]cloud.ServiceConfiguration{
+				cloud.ResourceManager: {Endpoint: server.URL, Audience: cloud.AzurePublic.Services[cloud.ResourceManager].Audience},
+			}},
+		},
+	})
+	require.NoError(t, err)
+	return sdk
+}
+
+func TestGetExistingCommitments_EffectiveDateTimeCompleteness(t *testing.T) {
+	t.Parallel()
+	const planID = "/providers/Microsoft.BillingBenefits/savingsPlanOrders/o1/savingsPlans/p1"
+	cases := []struct {
+		name    string
+		props   string
+		wantErr bool
+	}{
+		{"live state without start", `"provisioningState":"Succeeded"`, true},
+		{"pending state without start", `"provisioningState":"PendingBilling"`, true},
+		{"no state without start", ``, true},
+		{"canceled-state without start", `"provisioningState":"Cancelled"`, false}, //nolint:misspell // Azure wire value
+		{"expired without start", `"provisioningState":"Expired"`, false},
+		{"failed without start", `"provisioningState":"Failed"`, false},
+		{"live state with start", `"provisioningState":"Succeeded","effectiveDateTime":"2026-01-02T03:04:05Z"`, false},
+	}
+	for _, tc := range cases {
+		for _, dedupe := range []bool{false, true} {
+			if dedupe && !tc.wantErr {
+				continue
+			}
+			t.Run(fmt.Sprintf("%s/dedupe=%t", tc.name, dedupe), func(t *testing.T) {
+				props := `"billingScopeId":"/subscriptions/sub-a"`
+				if tc.props != "" {
+					props += "," + tc.props
+				}
+				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, err := fmt.Fprintf(w, `{"value":[{"id":%q,"sku":{"name":"Compute_Savings_Plan"},"properties":{%s}}]}`, planID, props)
+					assert.NoError(t, err)
+				}))
+				t.Cleanup(server.Close)
+				client := NewClient(nil, "sub-a", "eastus")
+				client.SetListAllPager(newFixtureSavingsPlanClient(t, server).NewListAllPager(nil))
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if dedupe {
+					recs := []common.Recommendation{{Provider: common.ProviderAzure, Service: common.ServiceSavingsPlansAll, ResourceType: "Compute", Count: 1}}
+					_, _, err := recfilter.NewDuplicateChecker(24).AdjustRecommendationsForExisting(ctx, recs, client)
+					require.ErrorContains(t, err, planID)
+					return
+				}
+				got, err := client.GetExistingCommitments(ctx)
+				if tc.wantErr {
+					require.ErrorContains(t, err, "incomplete savings plan inventory")
+					require.ErrorContains(t, err, planID)
+					return
+				}
+				require.NoError(t, err)
+				require.Len(t, got, 1)
 			})
 		}
 	}

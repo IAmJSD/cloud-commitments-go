@@ -145,12 +145,17 @@ func (c *Client) GetRecommendations(ctx context.Context, params *common.Recommen
 		return c.getSavingsPlansRecommendations(ctx, params)
 	}
 
+	scope, err := convertAccountScope(params.RIAccountScope, "RI")
+	if err != nil {
+		return nil, err
+	}
+
 	input := &costexplorer.GetReservationPurchaseRecommendationInput{
 		Service:              aws.String(getServiceStringForCostExplorer(params.Service)),
 		PaymentOption:        convertPaymentOption(params.PaymentOption),
 		TermInYears:          convertTermInYears(params.Term),
 		LookbackPeriodInDays: convertLookbackPeriod(params.LookbackPeriod),
-		AccountScope:         types.AccountScopeLinked,
+		AccountScope:         scope,
 	}
 
 	if isEC2Service(params.Service) {
@@ -187,33 +192,18 @@ func (c *Client) fetchRIAllPages(
 	service common.ServiceType,
 ) ([]types.ReservationPurchaseRecommendation, error) {
 	var allRecs []types.ReservationPurchaseRecommendation
-	var nextPageToken *string
-
-	for pageIdx := 0; ; pageIdx++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if pageIdx >= maxRecommendationPages {
-			return nil, fmt.Errorf(
-				"pagination cap reached after %d pages for RI %s (issue #692)",
-				maxRecommendationPages, service,
-			)
-		}
-		input.NextPageToken = nextPageToken
-
+	err := paginateCE(ctx, maxRecommendationPages, "RI "+string(service), func(token *string) (*string, error) {
+		input.NextPageToken = token
 		result, err := c.fetchRIPageWithRetry(ctx, input)
 		if err != nil {
 			return nil, err
 		}
-
 		allRecs = append(allRecs, result.Recommendations...)
-
-		if result.NextPageToken == nil || aws.ToString(result.NextPageToken) == "" {
-			break
-		}
-		nextPageToken = result.NextPageToken
+		return result.NextPageToken, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-
 	return allRecs, nil
 }
 

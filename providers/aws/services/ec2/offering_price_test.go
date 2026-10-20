@@ -32,6 +32,7 @@ func priceOffering(mut func(*types.ReservedInstancesOffering)) types.ReservedIns
 		InstanceType:                types.InstanceTypeT3Micro,
 		ProductDescription:          types.RIProductDescriptionLinuxUnix,
 		InstanceTenancy:             types.TenancyDefault,
+		OfferingClass:               types.OfferingClassTypeConvertible,
 		OfferingType:                types.OfferingTypeValuesPartialUpfront,
 		Duration:                    aws.Int64(94608000),
 		FixedPrice:                  aws.Float32(500),
@@ -47,11 +48,17 @@ func priceOffering(mut func(*types.ReservedInstancesOffering)) types.ReservedIns
 	return o
 }
 
-func detailsFor(t *testing.T, rec common.Recommendation, o types.ReservedInstancesOffering) (*common.OfferingDetails, error) {
+func detailsFor(t *testing.T, rec common.Recommendation, o types.ReservedInstancesOffering, byID ...types.ReservedInstancesOffering) (*common.OfferingDetails, error) {
 	t.Helper()
 	m := &MockEC2Client{}
+	byIDOffering := o
+	if len(byID) > 0 {
+		byIDOffering = byID[0]
+	}
 	m.On("DescribeReservedInstancesOfferings", mock.Anything, mock.Anything).
-		Return(&ec2.DescribeReservedInstancesOfferingsOutput{ReservedInstancesOfferings: []types.ReservedInstancesOffering{o}}, nil)
+		Return(&ec2.DescribeReservedInstancesOfferingsOutput{ReservedInstancesOfferings: []types.ReservedInstancesOffering{o}}, nil).Once()
+	m.On("DescribeReservedInstancesOfferings", mock.Anything, mock.Anything).
+		Return(&ec2.DescribeReservedInstancesOfferingsOutput{ReservedInstancesOfferings: []types.ReservedInstancesOffering{byIDOffering}}, nil)
 	return (&Client{client: m, region: "us-east-1"}).GetOfferingDetails(context.Background(), rec)
 }
 
@@ -74,23 +81,30 @@ func TestGetOfferingDetails_ShapesAndUsagePriceRules(t *testing.T) {
 		total  float64
 		hourly float64
 		err    string
+		idOnly bool // mut applies only to the by-id re-describe: the lookup must still find the offering
 	}{
-		{"all upfront", func(o *types.ReservedInstancesOffering) { o.RecurringCharges = nil }, 500, 0, ""},
-		{"usage 0 plus hourly charge", nil, 500 + 0.03*26280, 0.03, ""},
+		{"all upfront", func(o *types.ReservedInstancesOffering) { o.RecurringCharges = nil }, 500, 0, "", false},
+		{"usage 0 plus hourly charge", nil, 500 + 0.03*26280, 0.03, "", false},
 		{"usage only, no charges", func(o *types.ReservedInstancesOffering) {
 			o.RecurringCharges, o.UsagePrice = nil, aws.Float32(0.05)
-		}, 500 + 0.05*26280, 0.05, ""},
-		{"both nonzero", func(o *types.ReservedInstancesOffering) { o.UsagePrice = aws.Float32(0.05) }, 0, 0, "refusing to guess"},
+		}, 500 + 0.05*26280, 0.05, "", false},
+		{"both nonzero", func(o *types.ReservedInstancesOffering) { o.UsagePrice = aws.Float32(0.05) }, 0, 0, "refusing to guess", false},
 		{"non-hourly charge", func(o *types.ReservedInstancesOffering) {
 			o.RecurringCharges = []types.RecurringCharge{{Amount: aws.Float64(1), Frequency: "Monthly"}}
-		}, 0, 0, "only \"Hourly\""},
-		{"empty currency", func(o *types.ReservedInstancesOffering) { o.CurrencyCode = "" }, 0, 0, "no currency"},
-		{"nil fixed price", func(o *types.ReservedInstancesOffering) { o.FixedPrice = nil }, 0, 0, "no FixedPrice"},
-		{"duration disagrees with term", func(o *types.ReservedInstancesOffering) { o.Duration = aws.Int64(31536000) }, 0, 0, "does not match"},
+		}, 0, 0, "only \"Hourly\"", false},
+		{"empty currency", func(o *types.ReservedInstancesOffering) { o.CurrencyCode = "" }, 0, 0, "no currency", false},
+		{"nil fixed price", func(o *types.ReservedInstancesOffering) { o.FixedPrice = nil }, 0, 0, "no FixedPrice", false},
+		{"duration disagrees with term", func(o *types.ReservedInstancesOffering) { o.Duration = aws.Int64(31536000) }, 0, 0, "does not match", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			d, err := detailsFor(t, priceRec("3yr"), priceOffering(tc.mut))
+			var d *common.OfferingDetails
+			var err error
+			if tc.idOnly {
+				d, err = detailsFor(t, priceRec("3yr"), priceOffering(nil), priceOffering(tc.mut))
+			} else {
+				d, err = detailsFor(t, priceRec("3yr"), priceOffering(tc.mut))
+			}
 			if tc.err != "" {
 				require.ErrorContains(t, err, tc.err)
 				assert.Nil(t, d)
@@ -138,4 +152,74 @@ func TestGetOfferingDetails_OneYearTermAndMultipleHourlyChargesSum(t *testing.T)
 	require.NoError(t, err)
 	assert.InDelta(t, 0.05, d.RecurringCost, 1e-12, "multiple Hourly charges are summed")
 	assert.InDelta(t, 500+0.05*8760, d.TotalCost, 1e-9)
+}
+
+func classPricedMock() *MockEC2Client {
+	m := &MockEC2Client{}
+	conv := priceOffering(func(o *types.ReservedInstancesOffering) {
+		o.ReservedInstancesOfferingId = aws.String("off-convertible")
+	})
+	std := priceOffering(func(o *types.ReservedInstancesOffering) {
+		o.ReservedInstancesOfferingId = aws.String("off-standard")
+		o.OfferingClass = types.OfferingClassTypeStandard
+		o.FixedPrice = aws.Float32(400)
+		o.RecurringCharges = []types.RecurringCharge{{Amount: aws.Float64(0.02), Frequency: types.RecurringChargeFrequencyHourly}}
+	})
+	out := func(o types.ReservedInstancesOffering) *ec2.DescribeReservedInstancesOfferingsOutput {
+		return &ec2.DescribeReservedInstancesOfferingsOutput{ReservedInstancesOfferings: []types.ReservedInstancesOffering{o}}
+	}
+	m.On("DescribeReservedInstancesOfferings", mock.Anything, mock.MatchedBy(func(in *ec2.DescribeReservedInstancesOfferingsInput) bool {
+		return in.OfferingClass == types.OfferingClassTypeStandard
+	})).Return(out(std), nil)
+	m.On("DescribeReservedInstancesOfferings", mock.Anything, mock.MatchedBy(func(in *ec2.DescribeReservedInstancesOfferingsInput) bool {
+		return in.OfferingClass == types.OfferingClassTypeConvertible
+	})).Return(out(conv), nil)
+	m.On("DescribeReservedInstancesOfferings", mock.Anything, mock.MatchedBy(func(in *ec2.DescribeReservedInstancesOfferingsInput) bool {
+		return len(in.ReservedInstancesOfferingIds) == 1 && in.ReservedInstancesOfferingIds[0] == "off-standard"
+	})).Return(out(std), nil)
+	m.On("DescribeReservedInstancesOfferings", mock.Anything, mock.MatchedBy(func(in *ec2.DescribeReservedInstancesOfferingsInput) bool {
+		return len(in.ReservedInstancesOfferingIds) == 1 && in.ReservedInstancesOfferingIds[0] == "off-convertible"
+	})).Return(out(conv), nil)
+	return m
+}
+
+func TestGetOfferingDetailsForClass_PricesTheRequestedClass(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		class   string
+		upfront float64
+		hourly  float64
+	}{
+		{"standard", 400, 0.02},
+		{"convertible", 500, 0.03},
+		{"", 500, 0.03},
+	}
+	for _, tc := range cases {
+		t.Run("class="+tc.class, func(t *testing.T) {
+			t.Parallel()
+			c := &Client{client: classPricedMock(), region: "us-east-1"}
+			d, err := c.GetOfferingDetailsForClass(context.Background(), priceRec("3yr"), tc.class)
+			require.NoError(t, err)
+			assert.Equal(t, tc.upfront, d.UpfrontCost)
+			assert.InDelta(t, tc.hourly, d.RecurringCost, 1e-12)
+		})
+	}
+}
+
+func TestGetOfferingDetails_DefaultsToConvertible(t *testing.T) {
+	t.Parallel()
+	c := &Client{client: classPricedMock(), region: "us-east-1"}
+	d, err := c.GetOfferingDetails(context.Background(), priceRec("3yr"))
+	require.NoError(t, err)
+	assert.Equal(t, 500.0, d.UpfrontCost)
+}
+
+func TestGetOfferingDetailsForClass_UnknownClassErrors(t *testing.T) {
+	t.Parallel()
+	m := &MockEC2Client{}
+	c := &Client{client: m, region: "us-east-1"}
+	_, err := c.GetOfferingDetailsForClass(context.Background(), priceRec("3yr"), "premium")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown EC2 RI offering class")
+	m.AssertNotCalled(t, "DescribeReservedInstancesOfferings", mock.Anything, mock.Anything)
 }

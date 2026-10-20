@@ -6,6 +6,8 @@ import (
 	"math"
 	"sort"
 	"strings"
+
+	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
 )
 
 // RIInfo describes a Reserved Instance for reshape analysis.
@@ -305,16 +307,33 @@ func isARMFamily(family string) bool {
 	return suffix == "g" || suffix == "gd" || suffix == "gn"
 }
 
+// Confidence bucket cut-offs shared with the API layer's confidence badge.
+// Consumers must import these instead of inlining the literals so the badge
+// and the reshape ranking cannot drift apart.
+const (
+	// ConfidenceHighSavingsUSD is the minimum SavingsAbs, in USD per month,
+	// for the high bucket (which also needs ConfidenceHighMinCount).
+	ConfidenceHighSavingsUSD = 200.0
+	// ConfidenceHighMinCount is the minimum RecommendationCount, in
+	// instances, for the high bucket.
+	ConfidenceHighMinCount = 3
+	// ConfidenceMediumSavingsUSD is the minimum SavingsAbs, in USD per
+	// month, for the medium bucket.
+	ConfidenceMediumSavingsUSD = 50.0
+)
+
 // confidenceComponent maps SavingsAbs + RecommendationCount to a [0,1]
-// confidence score using the same thresholds as the API layer:
+// confidence score using the exported Confidence* thresholds:
 //
-//	high   ($200+ savings, 3+ instances) -> 1.0
-//	medium ($50+ savings)                -> 0.5
-//	low    (otherwise)                   -> 0.0
+//	high:   savings >= ConfidenceHighSavingsUSD and count >= ConfidenceHighMinCount -> 1.0
+//	medium: savings >= ConfidenceMediumSavingsUSD -> 0.5
+//	low:    otherwise -> 0.0
 //
 // When SavingsAbs is nil (not supplied) or RecommendationCount is zero
 // (missing) the component returns 0.5 (neutral) so that an absent field
-// doesn't tilt the ranking.
+// doesn't tilt the ranking. This intentionally differs from the API
+// layer's badge, which clamps a missing count to 1: a badge must always
+// show a bucket, while a ranking score should stay neutral on missing data.
 func confidenceComponent(off OfferingOption) float64 {
 	if off.SavingsAbs == nil {
 		return 0.5
@@ -325,9 +344,9 @@ func confidenceComponent(off OfferingOption) float64 {
 	savings := *off.SavingsAbs
 	count := off.RecommendationCount
 	switch {
-	case savings >= 200 && count >= 3:
+	case savings >= ConfidenceHighSavingsUSD && count >= ConfidenceHighMinCount:
 		return 1.0
-	case savings >= 50:
+	case savings >= ConfidenceMediumSavingsUSD:
 		return 0.5
 	default:
 		return 0.0
@@ -343,7 +362,7 @@ func nfProximityComponent(off OfferingOption, src RIInfo) float64 {
 	srcNF := src.NormalizationFactor
 	if srcNF <= 0 {
 		_, size := parseInstanceType(src.InstanceType)
-		srcNF = normalizationFactors[size]
+		srcNF = common.EC2NormalizationFactor(size)
 	}
 	if srcNF <= 0 || off.NormalizationFactor <= 0 {
 		return 0.5
@@ -356,35 +375,12 @@ func nfProximityComponent(off OfferingOption, src RIInfo) float64 {
 	return 1.0 - deviation
 }
 
-// normalizationFactors maps EC2 instance sizes to their AWS normalization factors.
-// See: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ri-modification-instancemove.html
-var normalizationFactors = map[string]float64{
-	"nano":     0.25,
-	"micro":    0.5,
-	"small":    1,
-	"medium":   2,
-	"large":    4,
-	"xlarge":   8,
-	"2xlarge":  16,
-	"3xlarge":  24,
-	"4xlarge":  32,
-	"6xlarge":  48,
-	"8xlarge":  64,
-	"9xlarge":  72,
-	"10xlarge": 80,
-	"12xlarge": 96,
-	"16xlarge": 128,
-	"18xlarge": 144,
-	"24xlarge": 192,
-	"metal":    192,
-}
-
 // sizeOrder lists instance sizes from smallest to largest for iteration.
 var sizeOrder = []string{
 	"nano", "micro", "small", "medium", "large", "xlarge",
 	"2xlarge", "3xlarge", "4xlarge", "6xlarge", "8xlarge",
 	"9xlarge", "10xlarge", "12xlarge", "16xlarge", "18xlarge",
-	"24xlarge", "metal",
+	"24xlarge",
 }
 
 // parseInstanceType splits "m5.xlarge" into ("m5", "xlarge").
@@ -398,9 +394,9 @@ func parseInstanceType(instanceType string) (family, size string) {
 }
 
 // NormalizationFactorForSize returns the normalization factor for a given instance size.
-// Returns 0 if the size is unknown.
+// Returns 0 if the size is unknown, including "metal" (family-dependent).
 func NormalizationFactorForSize(size string) float64 {
-	return normalizationFactors[size]
+	return common.EC2NormalizationFactor(size)
 }
 
 // AnalyzeReshaping identifies underutilized convertible RIs and suggests optimal
@@ -433,7 +429,7 @@ func resolveNormFactor(ri RIInfo, size string) float64 {
 	if ri.NormalizationFactor != 0 {
 		return ri.NormalizationFactor
 	}
-	return normalizationFactors[size]
+	return common.EC2NormalizationFactor(size)
 }
 
 // analyzeRI evaluates a single RI and returns a reshape recommendation if it is
@@ -455,7 +451,18 @@ func analyzeRI(ri RIInfo, utilMap map[string]float64, threshold float64) *Reshap
 
 	normFactor := resolveNormFactor(ri, size)
 	if normFactor == 0 {
-		return nil
+		// Surface the skip instead of dropping the RI silently (metal sizes
+		// land here unless the caller supplies the real factor).
+		return &ReshapeRecommendation{
+			SourceRIID:         ri.ID,
+			SourceInstanceType: ri.InstanceType,
+			SourceCount:        ri.InstanceCount,
+			UtilizationPercent: util,
+			Reason: fmt.Sprintf(
+				"No normalization factor known for %s (size %q); set the RI's NormalizationFactor to analyze it. No exchange target recommended.",
+				ri.InstanceType, size,
+			),
+		}
 	}
 
 	normalizedPurchased := normFactor * float64(ri.InstanceCount)
@@ -478,7 +485,7 @@ func analyzeRI(ri RIInfo, utilMap map[string]float64, threshold float64) *Reshap
 		}
 	}
 
-	targetSize, targetCount := findBestFit(normalizedUsed)
+	targetSize, targetCount := findBestFit(normalizedUsed, normalizedPurchased)
 	if targetSize == "" {
 		return nil
 	}
@@ -687,32 +694,34 @@ func pricingGatePasses(src RIInfo, off OfferingOption, hasSrc bool) bool {
 	return passesDollarUnitsCheck(srcNF, src.MonthlyCost, src.CurrencyCode, off)
 }
 
-// findBestFit finds the instance size and count that best fits normalizedUsed units.
-// Strategy: find the largest single-instance size that doesn't exceed normalizedUsed,
-// then round up to that size. This gives a practical 1-instance recommendation.
-// If no size is small enough for a single instance, use the smallest size with min count.
-func findBestFit(normalizedUsed float64) (size string, count int32) {
-	if normalizedUsed <= 0 {
+// findBestFit finds the instance size and count that covers normalizedUsed units
+// without exceeding normalizedPurchased, the units the source RI owns.
+// Strategy: take the largest size whose factor fits in normalizedUsed and round the
+// count up to cover the usage; if that over-allocates past normalizedPurchased, try
+// the next smaller size. Returns ("", 0) when nothing fits, so the caller skips the RI.
+func findBestFit(normalizedUsed, normalizedPurchased float64) (size string, count int32) {
+	if !(normalizedUsed > 0) { // also rejects NaN
 		return "", 0
 	}
 
-	// Find the largest size where normFactor <= normalizedUsed (fits in 1 instance)
-	bestIdx := -1
-	for i, s := range sizeOrder {
-		nf := normalizationFactors[s]
-		if nf > 0 && nf <= normalizedUsed {
-			bestIdx = i
+	for i := len(sizeOrder) - 1; i >= 0; i-- {
+		s := sizeOrder[i]
+		nf := common.EC2NormalizationFactor(s)
+		if nf <= 0 || nf > normalizedUsed {
+			continue
+		}
+		needed := math.Ceil(normalizedUsed / nf)
+		if needed*nf <= normalizedPurchased {
+			return s, int32(needed)
 		}
 	}
 
-	if bestIdx >= 0 {
-		s := sizeOrder[bestIdx]
-		nf := normalizationFactors[s]
-		needed := int32(math.Ceil(normalizedUsed / nf))
-		return s, needed
-	}
-
-	// normalizedUsed is smaller than the smallest size — use the smallest
+	// Only usage below the smallest size's factor falls back to that size;
+	// anything else that reached here simply does not fit.
 	s := sizeOrder[0]
-	return s, 1
+	nf := common.EC2NormalizationFactor(s)
+	if normalizedUsed < nf && nf <= normalizedPurchased {
+		return s, 1
+	}
+	return "", 0
 }

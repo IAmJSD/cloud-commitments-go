@@ -383,6 +383,7 @@ func TestClient_ValidateOffering(t *testing.T) {
 					OfferingType:                types.OfferingTypeValuesPartialUpfront,
 					ProductDescription:          types.RIProductDescriptionLinuxUnix,
 					InstanceTenancy:             types.TenancyDefault,
+					OfferingClass:               types.OfferingClassTypeConvertible,
 				},
 			},
 		}, nil)
@@ -423,6 +424,7 @@ func TestClient_PurchaseCommitment(t *testing.T) {
 					OfferingType:                types.OfferingTypeValuesPartialUpfront,
 					ProductDescription:          types.RIProductDescriptionLinuxUnix,
 					InstanceTenancy:             types.TenancyDefault,
+					OfferingClass:               types.OfferingClassTypeConvertible,
 					FixedPrice:                  aws.Float32(100.0),
 				},
 			},
@@ -448,6 +450,7 @@ func TestClient_PurchaseCommitment(t *testing.T) {
 }
 
 func TestClient_PurchaseCommitment_UpfrontCost(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name  string
 		price *float32
@@ -467,7 +470,7 @@ func TestClient_PurchaseCommitment_UpfrontCost(t *testing.T) {
 			m.On("DescribeReservedInstancesOfferings", mock.Anything, mock.Anything).Return(&ec2.DescribeReservedInstancesOfferingsOutput{
 				ReservedInstancesOfferings: []types.ReservedInstancesOffering{{ReservedInstancesOfferingId: aws.String("offer"),
 					InstanceType: types.InstanceTypeT3Micro, Duration: aws.Int64(94608000), OfferingType: types.OfferingTypeValuesPartialUpfront,
-					ProductDescription: types.RIProductDescriptionLinuxUnix, InstanceTenancy: types.TenancyDefault, FixedPrice: tt.price}},
+					ProductDescription: types.RIProductDescriptionLinuxUnix, InstanceTenancy: types.TenancyDefault, OfferingClass: types.OfferingClassTypeConvertible, FixedPrice: tt.price}},
 			}, nil).Once()
 			m.On("PurchaseReservedInstancesOffering", mock.Anything, mock.MatchedBy(func(in *ec2.PurchaseReservedInstancesOfferingInput) bool {
 				return int(aws.ToInt32(in.InstanceCount)) == tt.count
@@ -514,6 +517,7 @@ func TestClient_PurchaseCommitment_StampsPurchaseAutomationTag(t *testing.T) {
 				OfferingType:                types.OfferingTypeValuesAllUpfront,
 				ProductDescription:          types.RIProductDescriptionLinuxUnix,
 				InstanceTenancy:             types.TenancyDefault,
+				OfferingClass:               types.OfferingClassTypeConvertible,
 			}},
 		}, nil)
 
@@ -569,6 +573,7 @@ func TestClient_GetOfferingDetails(t *testing.T) {
 					InstanceType:                types.InstanceTypeT3Micro,
 					ProductDescription:          types.RIProductDescriptionLinuxUnix,
 					InstanceTenancy:             types.TenancyDefault,
+					OfferingClass:               types.OfferingClassTypeConvertible,
 					OfferingType:                types.OfferingTypeValuesPartialUpfront,
 					Duration:                    aws.Int64(94608000),
 					UsagePrice:                  aws.Float32(0.05),
@@ -760,6 +765,10 @@ func TestFindOfferingID_WrongVariantRejected(t *testing.T) {
 				{
 					ReservedInstancesOfferingId: aws.String("wrong-offering"),
 					InstanceType:                types.InstanceTypeT4gNano,
+					Duration:                    aws.Int64(OneYearSeconds),
+					ProductDescription:          types.RIProductDescriptionLinuxUnix,
+					InstanceTenancy:             types.TenancyDefault,
+					OfferingClass:               types.OfferingClassTypeConvertible,
 					OfferingType:                types.OfferingTypeValuesAllUpfront, // mismatch
 				},
 			},
@@ -770,6 +779,7 @@ func TestFindOfferingID_WrongVariantRejected(t *testing.T) {
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "no offerings found")
 		assert.Contains(t, err.Error(), "t4g.nano")
+		assert.Contains(t, err.Error(), "offering-type=1")
 	}
 }
 
@@ -798,6 +808,10 @@ func TestFindOfferingID_HappyPath(t *testing.T) {
 				{
 					ReservedInstancesOfferingId: aws.String("offering-ok"),
 					InstanceType:                types.InstanceTypeT4gNano,
+					Duration:                    aws.Int64(OneYearSeconds),
+					ProductDescription:          types.RIProductDescriptionLinuxUnix,
+					InstanceTenancy:             types.TenancyDefault,
+					OfferingClass:               types.OfferingClassTypeConvertible,
 					OfferingType:                types.OfferingTypeValuesNoUpfront,
 				},
 			},
@@ -915,6 +929,7 @@ func TestClient_PurchaseCommitment_NameTagInCreateTagsRequest(t *testing.T) {
 				OfferingType:                types.OfferingTypeValuesNoUpfront,
 				ProductDescription:          types.RIProductDescriptionLinuxUnix,
 				InstanceTenancy:             types.TenancyDefault,
+				OfferingClass:               types.OfferingClassTypeConvertible,
 			}},
 		}, nil)
 
@@ -951,6 +966,7 @@ func TestClient_PurchaseCommitment_NameTagInCreateTagsRequest(t *testing.T) {
 // populates Platform from the recommendation payload; an empty value signals a
 // malformed rec, not a value to be fabricated.
 func TestBuildEC2OfferingQuery_EmptyPlatformErrors(t *testing.T) {
+	t.Parallel()
 	rec := common.Recommendation{
 		ResourceType:  "m5.large",
 		PaymentOption: "all-upfront",
@@ -971,6 +987,7 @@ func TestBuildEC2OfferingQuery_EmptyPlatformErrors(t *testing.T) {
 
 // TestBuildEC2OfferingQuery_ValidPlatform asserts the happy path still works.
 func TestBuildEC2OfferingQuery_ValidPlatform(t *testing.T) {
+	t.Parallel()
 	rec := common.Recommendation{
 		ResourceType:  "m5.large",
 		PaymentOption: "all-upfront",
@@ -1296,6 +1313,9 @@ func TestFindOfferingID_OfferingClassReachesSDKCall(t *testing.T) {
 			{
 				ReservedInstancesOfferingId: aws.String("offering-std-123"),
 				InstanceType:                types.InstanceTypeM5Large,
+				Duration:                    aws.Int64(OneYearSeconds),
+				ProductDescription:          types.RIProductDescriptionLinuxUnix,
+				InstanceTenancy:             types.TenancyDefault,
 				OfferingType:                types.OfferingTypeValuesAllUpfront,
 			},
 		},
@@ -1328,9 +1348,13 @@ func TestFindOfferingID_OfferingClassReachesSDKCall(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
+			o := offeringOutput.ReservedInstancesOfferings[0]
+			o.OfferingClass = tc.wantOfferingClass
 			cap := &capturingMockEC2Client{}
 			cap.On("DescribeReservedInstancesOfferings", mock.Anything, mock.Anything).
-				Return(offeringOutput, nil).Once()
+				Return(&ec2.DescribeReservedInstancesOfferingsOutput{
+					ReservedInstancesOfferings: []types.ReservedInstancesOffering{o},
+				}, nil).Once()
 
 			client := &Client{client: cap, region: "us-east-1"}
 
@@ -1664,6 +1688,7 @@ func TestPurchaseCommitment_ExistingCommitmentFlag(t *testing.T) {
 			OfferingType:                types.OfferingTypeValuesAllUpfront,
 			ProductDescription:          types.RIProductDescriptionLinuxUnix,
 			InstanceTenancy:             types.TenancyDefault,
+			OfferingClass:               types.OfferingClassTypeConvertible,
 			FixedPrice:                  aws.Float32(100.0),
 		}},
 	}
@@ -1742,15 +1767,9 @@ func zonalRec(az string) common.Recommendation {
 }
 
 func azOffering(id, az string) types.ReservedInstancesOffering {
-	o := types.ReservedInstancesOffering{
-		ReservedInstancesOfferingId: aws.String(id),
-		InstanceType:                types.InstanceTypeM5Large,
-		OfferingType:                types.OfferingTypeValuesAllUpfront,
-	}
-	if az != "" {
-		o.AvailabilityZone = aws.String(az)
-	}
-	return o
+	return fullOffering(id, az, func(o *types.ReservedInstancesOffering) {
+		o.OfferingType = types.OfferingTypeValuesAllUpfront
+	})
 }
 
 // Issue #289: the query builder must refuse zonal scope without an AZ and
@@ -1809,14 +1828,14 @@ func TestScanEC2OfferingPage_AvailabilityZone(t *testing.T) {
 		azOffering("in-1b", "us-east-1b"),
 	}
 	zonal := ec2OfferingQuery{availabilityZone: "us-east-1b", wantOfferingType: types.OfferingTypeValuesAllUpfront}
-	got := scanEC2OfferingPage(offerings, zonal)
+	got := scanEC2OfferingPage(offerings, zonal, offeringSkips{})
 	require.NotNil(t, got)
 	assert.Equal(t, "in-1b", aws.ToString(got.ReservedInstancesOfferingId))
 
-	assert.Nil(t, scanEC2OfferingPage(offerings[:2], zonal), "no 1b offering must yield nil, not a 1a buy")
+	assert.Nil(t, scanEC2OfferingPage(offerings[:2], zonal, offeringSkips{}), "no 1b offering must yield nil, not a 1a buy")
 
 	regional := ec2OfferingQuery{wantOfferingType: types.OfferingTypeValuesAllUpfront}
-	got = scanEC2OfferingPage(offerings, regional)
+	got = scanEC2OfferingPage(offerings, regional, offeringSkips{})
 	require.NotNil(t, got)
 	assert.Equal(t, "nil-az", aws.ToString(got.ReservedInstancesOfferingId))
 }

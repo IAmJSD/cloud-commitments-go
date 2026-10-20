@@ -67,8 +67,9 @@ func n2AmericasSKUs() []*cloudbilling.Sku {
 //	on demand  8*0.031611 + 32*0.004237 = 0.388472 USD/h
 //	commitment 8*0.019915 + 32*0.002669 = 0.244728 USD/h  (37.0% off)
 func TestGetComputePricing_N2StandardFromLiveShapedCatalog(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	client, _ := NewClient(ctx, "p", "us-central1")
+	client, _ := NewClient("p", "us-central1")
 	client.SetBillingService(&MockBillingService{skus: &cloudbilling.ListSkusResponse{Skus: n2AmericasSKUs()}})
 	res := computeResources{vcpus: 8, memoryGiB: 32}
 
@@ -88,32 +89,39 @@ func TestGetComputePricing_N2StandardFromLiveShapedCatalog(t *testing.T) {
 }
 
 func TestFindFamilyRates_ErrorsAreLoud(t *testing.T) {
+	t.Parallel()
 	t.Run("region without SKUs", func(t *testing.T) {
+		t.Parallel()
 		_, err := findFamilyRates(n2AmericasSKUs(), "n2-standard-8", "asia-east1", 1)
 		require.ErrorContains(t, err, "no on-demand core and RAM pricing")
 	})
 	t.Run("family without commitment SKUs", func(t *testing.T) {
+		t.Parallel()
 		_, err := findFamilyRates(n2AmericasSKUs()[:2], "n2-standard-8", "us-central1", 1)
 		require.ErrorContains(t, err, "no commitment pricing")
 	})
 	t.Run("unit mismatch", func(t *testing.T) {
+		t.Parallel()
 		skus := n2AmericasSKUs()
 		skus[0].PricingInfo[0].PricingExpression.UsageUnit = "mo"
 		_, err := findFamilyRates(skus, "n2-standard-8", "us-central1", 1)
 		require.ErrorContains(t, err, "expected \"h\"")
 	})
 	t.Run("conflicting duplicate", func(t *testing.T) {
+		t.Parallel()
 		skus := append(n2AmericasSKUs(), catalogSKU("dup", "N2 Instance Core running in Americas", "CPU", "OnDemand", "h", 1, americas))
 		_, err := findFamilyRates(skus, "n2-standard-8", "us-central1", 1)
 		require.ErrorContains(t, err, "ambiguous catalog")
 	})
 	t.Run("usage type disagrees with description", func(t *testing.T) {
+		t.Parallel()
 		skus := n2AmericasSKUs()
 		skus[2].Category.UsageType = "Commit3Yr"
 		_, err := findFamilyRates(skus, "n2-standard-8", "us-central1", 1)
 		require.ErrorContains(t, err, "usage type")
 	})
 	t.Run("missing currency", func(t *testing.T) {
+		t.Parallel()
 		skus := n2AmericasSKUs()
 		skus[0].PricingInfo[0].PricingExpression.TieredRates[0].UnitPrice.CurrencyCode = ""
 		_, err := findFamilyRates(skus, "n2-standard-8", "us-central1", 1)
@@ -122,6 +130,7 @@ func TestFindFamilyRates_ErrorsAreLoud(t *testing.T) {
 }
 
 func TestResourcesFromRecommendation_RequiresCountAndMemory(t *testing.T) {
+	t.Parallel()
 	_, err := resourcesFromRecommendation(newRec("n2-standard-8", 0, 32))
 	require.Error(t, err)
 	_, err = resourcesFromRecommendation(newRec("n2-standard-8", 8, 0))
@@ -131,6 +140,7 @@ func TestResourcesFromRecommendation_RequiresCountAndMemory(t *testing.T) {
 // Monthly figures for n2-standard-8 (8 vCPU, 32 GiB), live-shaped rates, per term.
 // A division by 12 instead of termYears*12 would triple the 3-year amounts.
 func TestEnrichRecWithPricing_MonthlyFiguresPerTerm(t *testing.T) {
+	t.Parallel()
 	cases := map[string]struct {
 		term                   string
 		commitHourly, odHourly float64
@@ -140,8 +150,9 @@ func TestEnrichRecWithPricing_MonthlyFiguresPerTerm(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
-			client, _ := NewClient(ctx, "p", "us-central1")
+			client, _ := NewClient("p", "us-central1")
 			client.SetBillingService(&MockBillingService{skus: &cloudbilling.ListSkusResponse{Skus: n2AmericasSKUs()}})
 			rec := newRec("n2-standard-8", 8, 32)
 			rec.Term = tc.term
@@ -158,10 +169,12 @@ func TestEnrichRecWithPricing_MonthlyFiguresPerTerm(t *testing.T) {
 }
 
 func TestEnrichRecWithPricing_InvalidCurrency(t *testing.T) {
+	t.Parallel()
 	for _, currency := range []string{"", "EUR"} {
 		t.Run("commitment currency "+currency, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
-			client, err := NewClient(ctx, "test-project", "us-central1")
+			client, err := NewClient("test-project", "us-central1")
 			require.NoError(t, err)
 			skus := n2AmericasSKUs()
 			skus[2].PricingInfo[0].PricingExpression.TieredRates[0].UnitPrice.CurrencyCode = currency
@@ -173,4 +186,69 @@ func TestEnrichRecWithPricing_InvalidCurrency(t *testing.T) {
 			assert.Nil(t, rec.RecurringMonthlyCost)
 		})
 	}
+}
+
+func TestClassify_LegacyCommitmentNames(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		desc, machine, usage string
+		term                 int
+		matched, isRAM       bool
+	}{
+		{"Commitment: Compute optimized Core running in Americas for 1 Year", "c2-standard-8", "Commit1Yr", 1, true, false},
+		{"Commitment: Compute optimized Ram running in Americas for 1 Year", "c2-standard-8", "Commit1Yr", 1, true, true},
+		{"Commitment: Compute optimized Core running in Americas for 3 Year", "c2-standard-8", "Commit3Yr", 3, true, false},
+		{"Commitment: Compute optimized Ram running in Americas for 3 Year", "c2-standard-8", "Commit3Yr", 3, true, true},
+		// Wrong term for the requested one: skipped, not an error.
+		{"Commitment: Compute optimized Core running in Americas for 3 Year", "c2-standard-8", "Commit3Yr", 1, false, false},
+		// Families off the legacy allowlist never match the legacy form.
+		{"Commitment: N2 Core running in Americas for 1 Year", "n2-standard-8", "Commit1Yr", 1, false, false},
+		{"Commitment: Compute optimized Core running in Americas for 1 Year", "n2-standard-8", "Commit1Yr", 1, false, false},
+		{"Commitment: Memory-optimized Core running in Americas for 1 Year", "m1-megamem-96", "Commit1Yr", 1, false, false},
+		// c2 machine, other family labels or a longer label: anchoring must reject them.
+		{"Commitment: C2D AMD Core running in Americas for 1 Year", "c2-standard-8", "Commit1Yr", 1, false, false},
+		{"Commitment: Memory-optimized Core running in Americas for 1 Year", "c2-standard-8", "Commit1Yr", 1, false, false},
+		{"Commitment: Compute optimized-X Ram running in Americas for 1 Year", "c2-standard-8", "Commit1Yr", 1, false, false},
+		// Existing v1 form still resolves for c2.
+		{"Commitment v1: Compute optimized Cpu in Americas for 1 Year", "c2-standard-8", "Commit1Yr", 1, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc+"/"+tc.machine, func(t *testing.T) {
+			t.Parallel()
+			labels, err := familyLabels(tc.machine)
+			require.NoError(t, err)
+			sku := catalogSKU("x", tc.desc, "CPU", tc.usage, "h", 1, americas)
+			_, isRAM, matched, err := newRateMatcher(labels, "us-central1", tc.term).classify(sku)
+			require.NoError(t, err)
+			assert.Equal(t, tc.matched, matched)
+			assert.Equal(t, tc.isRAM, isRAM)
+		})
+	}
+}
+
+func TestFindFamilyRates_C2LegacyCommitmentCatalog(t *testing.T) {
+	t.Parallel()
+	skus := []*cloudbilling.Sku{
+		catalogSKU("c2-od-core", "Compute optimized Core running in Americas", "CPU", "OnDemand", "h", 33174000, americas),
+		catalogSKU("c2-od-ram", "Compute optimized Ram running in Americas", "RAM", "OnDemand", "GiBy.h", 4446000, americas),
+		catalogSKU("c2-l1-core", "Commitment: Compute optimized Core running in Americas for 1 Year", "CPU", "Commit1Yr", "h", 20900000, americas),
+		catalogSKU("c2-l1-ram", "Commitment: Compute optimized Ram running in Americas for 1 Year", "RAM", "Commit1Yr", "GiBy.h", 2800000, americas),
+	}
+	rates, err := findFamilyRates(skus, "c2-standard-8", "us-central1", 1)
+	require.NoError(t, err)
+	assert.InDelta(t, 0.0209, rates.commitment.cpu, 1e-9)
+	assert.InDelta(t, 0.0028, rates.commitment.ram, 1e-9)
+}
+
+func TestFindFamilyRates_C2V1AndLegacyDisagreeIsAmbiguous(t *testing.T) {
+	t.Parallel()
+	skus := []*cloudbilling.Sku{
+		catalogSKU("c2-od-core", "Compute optimized Core running in Americas", "CPU", "OnDemand", "h", 33174000, americas),
+		catalogSKU("c2-od-ram", "Compute optimized Ram running in Americas", "RAM", "OnDemand", "GiBy.h", 4446000, americas),
+		catalogSKU("c2-v1-core", "Commitment v1: Compute optimized Cpu in Americas for 1 Year", "CPU", "Commit1Yr", "h", 20900000, americas),
+		catalogSKU("c2-l1-core", "Commitment: Compute optimized Core running in Americas for 1 Year", "CPU", "Commit1Yr", "h", 21900000, americas),
+		catalogSKU("c2-v1-ram", "Commitment v1: Compute optimized Ram in Americas for 1 Year", "RAM", "Commit1Yr", "GiBy.h", 2800000, americas),
+	}
+	_, err := findFamilyRates(skus, "c2-standard-8", "us-central1", 1)
+	require.ErrorContains(t, err, "ambiguous catalog")
 }

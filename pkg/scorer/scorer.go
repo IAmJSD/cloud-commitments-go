@@ -12,13 +12,31 @@ import (
 )
 
 // Config controls which recommendations are allowed through the scorer.
-// Zero values mean "no filter" for numeric thresholds; empty slice means "all services".
+// Zero values mean "no filter" for numeric thresholds, except that MinSavingsPctSet makes a zero MinSavingsPct a real floor; empty slice means "all services".
 type Config struct {
-	MinSavingsPct      float64  // Minimum savings percentage. 0 = no filter.
-	MaxBreakEvenMonths int      // Maximum break-even months. 0 = no filter. No-upfront recs pass; recs whose break-even cannot be computed are filtered.
-	MinCount           int      // Minimum count per recommendation. 0 = no filter.
+	MinSavingsPct      float64  // Minimum savings percentage. 0 with MinSavingsPctSet false = no filter.
+	MinSavingsPctSet   bool     // True makes MinSavingsPct a real floor even at 0 (drops recs with negative savings).
+	MaxBreakEvenMonths int      // Maximum break-even months. 0 = no filter. No-upfront recs pass; recs whose break-even cannot be computed are filtered (an upfront payment option with no upfront price as FilterReasonPriceUnknown).
+	MinCount           int      // Minimum count per recommendation. 0 = no filter. Does not apply to Savings Plans (dollar-denominated; their Count is always 1).
 	EnabledServices    []string // Empty = all services. E.g. ["ec2", "rds"].
 }
+
+// Validate rejects a MinSavingsPct that is NaN, infinite or negative. Callers
+// must run it before Score, which filters on whatever it is given.
+func (c Config) Validate() error {
+	if math.IsNaN(c.MinSavingsPct) || math.IsInf(c.MinSavingsPct, 0) {
+		return fmt.Errorf("min_savings_pct must be a finite number")
+	}
+	if c.MinSavingsPct < 0 {
+		return fmt.Errorf("min_savings_pct must be ≥ 0")
+	}
+	return nil
+}
+
+// FilterReasonPriceUnknown prefixes the FilterReason of a recommendation
+// dropped by MaxBreakEvenMonths because its upfront price is unknown
+// (common.UpfrontPriceUnknown).
+const FilterReasonPriceUnknown = "price-unknown"
 
 // FilteredRecommendation holds a recommendation that did not pass a filter, with the reason.
 type FilteredRecommendation struct {
@@ -85,24 +103,45 @@ func filterReason(rec common.Recommendation, cfg Config, enabledServices map[str
 		}
 	}
 
-	if cfg.MinSavingsPct > 0 && rec.SavingsPercentage < cfg.MinSavingsPct {
+	if (cfg.MinSavingsPct > 0 || cfg.MinSavingsPctSet) && !(rec.SavingsPercentage >= cfg.MinSavingsPct) { // negated so a NaN floor fails closed
 		return fmt.Sprintf("savings %.1f%% below minimum %.1f%%", rec.SavingsPercentage, cfg.MinSavingsPct)
 	}
 
 	if cfg.MaxBreakEvenMonths > 0 {
-		months, known := common.BreakEven(rec)
-		if !known {
-			return fmt.Sprintf("break-even cannot be computed (upfront %.2f, savings %.2f, term %q); --max-break-even-months %d cannot be enforced", rec.CommitmentCost, rec.EstimatedSavings, rec.Term, cfg.MaxBreakEvenMonths)
-		}
-		if months > float64(cfg.MaxBreakEvenMonths) {
-			return fmt.Sprintf("break-even %.1f months exceeds maximum %d months", months, cfg.MaxBreakEvenMonths)
+		if reason := breakEvenReason(rec, cfg.MaxBreakEvenMonths); reason != "" {
+			return reason
 		}
 	}
 
-	if cfg.MinCount > 0 && rec.Count < cfg.MinCount {
-		return fmt.Sprintf("count %d below minimum %d", rec.Count, cfg.MinCount)
+	if reason := minCountReason(rec, cfg.MinCount); reason != "" {
+		return reason
 	}
 
+	return ""
+}
+
+// minCountReason returns why rec fails a positive minCount, or "" if it passes.
+// Savings Plans are exempt: they are dollar-denominated and always carry Count 1.
+func minCountReason(rec common.Recommendation, minCount int) string {
+	if minCount > 0 && rec.CommitmentType != common.CommitmentSavingsPlan && rec.Count < minCount {
+		return fmt.Sprintf("count %d below minimum %d", rec.Count, minCount)
+	}
+	return ""
+}
+
+// breakEvenReason returns why rec fails a positive maxMonths break-even
+// filter, or "" if it passes. Unknown break-even fails closed.
+func breakEvenReason(rec common.Recommendation, maxMonths int) string {
+	months, known := common.BreakEven(rec)
+	if !known {
+		if common.UpfrontPriceUnknown(rec) {
+			return fmt.Sprintf("%s: no upfront price for payment option %q; --max-break-even-months %d cannot be enforced", FilterReasonPriceUnknown, rec.PaymentOption, maxMonths)
+		}
+		return fmt.Sprintf("break-even cannot be computed (upfront %.2f, savings %.2f, term %q); --max-break-even-months %d cannot be enforced", rec.CommitmentCost, rec.EstimatedSavings, rec.Term, maxMonths)
+	}
+	if months > float64(maxMonths) {
+		return fmt.Sprintf("break-even %.1f months exceeds maximum %d months", months, maxMonths)
+	}
 	return ""
 }
 
