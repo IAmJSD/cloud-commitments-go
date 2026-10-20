@@ -187,6 +187,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Duplicate guard counts an existing RDS reservation against other sizes of
+  the same family** (#323): an AWS RDS reservation now pays for recommendations
+  of any size in the same instance family, engine, region and deployment, by
+  normalized units, instead of matching only the exact instance class. Only
+  MySQL, MariaDB, PostgreSQL and Aurora are size-flexible; SQL Server, Oracle
+  (until both paths carry the license model, #342), Db2 and unknown engines
+  still match the exact class.
+
 - **MemoryDB reserved-node and offering listings are page-capped and
   cancellable** (#556): `GetExistingCommitments` and `GetValidResourceTypes`
   now check the context per page and fail loudly after 50 pages instead of
