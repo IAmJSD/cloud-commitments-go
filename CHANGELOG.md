@@ -126,6 +126,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- **`azure`:** managedredis and synapse reservations now get the same generated display name as the other services (`redis-<region>-<sku>-<n>x-<term>-<payment>-...` and `synapse-...`) instead of the fixed `Azure Cache for Redis Reservation - <sku>` / `Synapse SQL Pool Reservation - <sku>`. This also removes the stray space before the idempotency marker on managedredis. Idempotency lookup keys on the tag or the marker suffix, not the base name (#538).
 - **BREAKING `gcp`: Cloud SQL and Memorystore no longer return CUD
   recommendations (#294).** They came from the project-scoped
   `PerformanceRecommender`s, which give per-instance tuning advice, and were
@@ -185,6 +186,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **`azure`:** compute `PurchaseCommitment` now checks the term before the payment option and returns the term error unwrapped (no `failed to marshal request:` prefix), like the other six services (#538).
+- **`azure`:** synapse's zero-quantity purchase error now includes the quantity (`..., got 0`), like the other six services (#538).
+- **`azure`:** `PurchaseCommitment` for cache, compute, cosmosdb, database, managedredis and search now rejects a blank resource type before any HTTP call, as synapse already did, instead of sending an empty `sku.name` (#538).
 - **`azure`:** The shared `CUDLY_MAX_PARALLELISM` slot is now held per outbound call (page fetch, pricing page, SKU or capability request) instead of across a whole per-service sweep, so a long Azure sweep no longer starves AWS and GCP calls (#8).
 - **`scorer`:** `MinCount` no longer applies to Savings Plans. Their `Count`
   is always 1 (the commitment is dollar-denominated), so `--min-count 2`
