@@ -32,6 +32,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **`exchange.WithOfferedInstanceTypes` / `RunAutoExchangeParams.OfferedInstanceTypes`:**
+  restrict RI reshape targets to the instance types the region offers.
+  `AnalyzeReshaping` and `AnalyzeReshapingWithRecs` take it as a variadic
+  `ReshapeOption`; an empty list keeps the previous size ladder, and a family
+  missing from a non-empty list gets a recommendation with the reason
+  "instance family not offered in region". Auto exchange now reports the
+  recommendation's own reason for every skipped RI without a target (#563).
 - **`RecommendationParams.RIAccountScope`:** selects the Cost Explorer account
   scope (`linked` default, or `payer`) for Reserved Instance recommendations,
   mirroring `SPAccountScope`. Empty keeps the previous linked behaviour; an
@@ -199,6 +206,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **`exchange.AnalyzeReshaping`:** no longer proposes a same-capacity reshape
+  (1x m5.24xlarge to 2x m5.12xlarge); it frees no units and AWS needs an
+  equal-or-greater exchange value, so such RIs now get no recommendation and
+  no quote (#563).
+- **`common.EC2NormalizationFactor`:** knows the 32xlarge, 48xlarge, 56xlarge,
+  96xlarge and 112xlarge sizes (256 to 896), so RI exchange analysis no longer
+  skips RIs of those sizes with "No normalization factor known" (#563).
 - **exchange:** `RunAutoExchange` now stops and returns the error when cancelling stale pending exchanges fails, instead of logging it and creating new exchanges while a stale pending one may still be approvable.
 - **exchange:** `RunAutoExchange` now rejects any mode other than `auto` or `manual` (including empty) with an error before any store or exchange call; previously every non-`manual` value auto-executed exchanges.
 - **common:** `BuildReservationName` no longer drops its random uniqueness suffix when a long SKU overflows the 60-char cap (it dropped it first, so long-SKU purchases got deterministic, colliding names). The timestamp and payment segments drop first, then the SKU is truncated; the suffix is always kept (#123).
