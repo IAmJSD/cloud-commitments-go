@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v5"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/consumption/armconsumption"
@@ -25,6 +27,7 @@ import (
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/httpclient"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/pricing"
 	azrecs "github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/recommendations"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/slot"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/services/internal/reservations"
 )
 
@@ -60,9 +63,10 @@ type HTTPClient interface {
 //   - vCPUs: Capabilities[Name=="vCPUs"].Value, parsed as int.
 //   - memoryGB: Capabilities[Name=="MemoryGB"].Value, parsed as float64.
 //
-// Either field stays at the zero value when the capability is missing
-// or unparseable; common.ComputeDetails treats 0 as "unknown" (the
-// JSON tags on VCPU/MemoryGB are omitempty).
+// A field stays at the zero value when its capability is missing;
+// common.ComputeDetails treats 0 as "unknown" (the JSON tags on
+// VCPU/MemoryGB are omitempty). A SKU with a present but unparseable
+// capability is omitted from the catalog entirely.
 
 // maxRecsPages caps Consumption API recommendation pagination to avoid
 // burning a Lambda deadline on a stalled or unexpectedly deep result set.
@@ -127,6 +131,12 @@ type Client struct {
 	// hermetically and make the LRO synchronous.
 	calculateExchangeCaller CalculateExchangeCallerFunc
 	doExchangeCaller        DoExchangeCallerFunc
+
+	// Optional ARM client options for the real CalculateExchange and
+	// Exchange SDK clients. Nil in production (SDK defaults); tests set a
+	// fake HTTP transport so the production LRO wrappers and the SDK's own
+	// request serialization run without reaching Azure.
+	exchangeClientOptions *arm.ClientOptions
 }
 
 // NewClient creates a new Azure Compute client.
@@ -140,7 +150,14 @@ func NewClient(cred azcore.TokenCredential, subscriptionID, region string) *Clie
 }
 
 // NewClientWithHTTP creates a new Azure Compute client with a custom HTTP client (for testing).
+// When httpClient is nil, the SSRF-hardened httpclient.New() is used so the nil
+// fallback also blocks IMDS connections. A non-nil httpClient is used as-is and
+// bypasses that guard: metadata, NAT64/6to4 and unspecified addresses are
+// dialable unless the caller's client blocks them itself.
 func NewClientWithHTTP(cred azcore.TokenCredential, subscriptionID, region string, httpClient HTTPClient) *Client {
+	if httpClient == nil {
+		httpClient = httpclient.New()
+	}
 	return &Client{
 		cred:           cred,
 		subscriptionID: subscriptionID,
@@ -223,7 +240,7 @@ func (c *Client) GetRecommendations(ctx context.Context, _ *common.Recommendatio
 		if pageIdx >= maxRecsPages {
 			return nil, fmt.Errorf("compute: GetRecommendations pagination cap (%d pages) reached", maxRecsPages)
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get VM recommendations: %w", err)
 		}
@@ -409,38 +426,20 @@ func (c *Client) triggerCapacityProviderRegistration(ctx context.Context, bearer
 // in the portal AND a re-driven purchase can find it via tag lookup before
 // buying a duplicate (issue #721).
 func (c *Client) buildReservationBody(rec common.Recommendation, billingPlan armreservations.ReservationBillingPlan, source, idempotencyToken string) ([]byte, error) {
-	termYears, err := reservations.ParseTermYears(rec.Term)
-	if err != nil {
-		return nil, err
-	}
-	term, termEnumErr := reservations.ReservationTermForYears(termYears)
-	if termEnumErr != nil {
-		return nil, termEnumErr
-	}
-	requestBody := map[string]interface{}{
-		"sku":      map[string]string{"name": rec.ResourceType},
-		"location": c.region,
-		"properties": map[string]interface{}{
-			"reservedResourceType": string(armreservations.ReservedResourceTypeVirtualMachines),
-			"billingScopeId":       fmt.Sprintf("/subscriptions/%s", c.subscriptionID),
-			"billingPlan":          string(billingPlan),
-			"term":                 string(term),
-			"quantity":             rec.Count,
-			"displayName": reservations.BuildDisplayName(reservations.DisplayNameFields{
+	return reservations.BuildPurchaseBody(reservations.PurchaseParams{
+		ReservedResourceType: string(armreservations.ReservedResourceTypeVirtualMachines),
+		DisplayName: func(r common.Recommendation) string {
+			return reservations.BuildDisplayName(reservations.DisplayNameFields{
 				Service:      "vm",
 				Region:       c.region,
-				ResourceType: rec.ResourceType,
-				Count:        rec.Count,
-				Term:         rec.Term,
-				Payment:      rec.PaymentOption,
+				ResourceType: r.ResourceType,
+				Count:        r.Count,
+				Term:         r.Term,
+				Payment:      r.PaymentOption,
 				Now:          time.Now(),
-			}),
-			"appliedScopeType": string(armreservations.AppliedScopeTypeShared),
-			"renew":            false,
+			})
 		},
-	}
-	reservations.ApplyPurchaseTags(requestBody, source, idempotencyToken)
-	return json.Marshal(requestBody)
+	}, rec, common.PurchaseOptions{Source: source, IdempotencyToken: idempotencyToken}, c.region, c.subscriptionID, billingPlan)
 }
 
 // PurchaseCommitment purchases a VM Reserved Instance using the two-step
@@ -475,17 +474,29 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		result.Error = fmt.Errorf("purchase source is required for Azure reservation purchases")
 		return result, result.Error
 	}
+	if strings.TrimSpace(rec.ResourceType) == "" {
+		result.Error = fmt.Errorf("resource type is required")
+		return result, result.Error
+	}
 	if rec.Count <= 0 {
 		result.Error = fmt.Errorf("quantity must be greater than zero, got %d", rec.Count)
 		return result, result.Error
 	}
 
-	// Validate the payment option and build the request body BEFORE any
-	// side-effecting call. Microsoft.Capacity provider registration below is
-	// a real ARM operation (a GET, and a POST to register when unregistered);
-	// every fallible local parse -- payment option AND term (buildReservationBody
-	// calls reservations.ParseTermYears) -- must be rejected here first so a
-	// doomed purchase never triggers it.
+	// Validate the term and payment option and build the request body BEFORE
+	// any side-effecting call. Microsoft.Capacity provider registration below
+	// is a real ARM operation (a GET, and a POST to register when
+	// unregistered); every fallible local parse must be rejected here first so
+	// a doomed purchase never triggers it.
+	termYears, termErr := reservations.ParseTermYears(rec.Term)
+	if termErr != nil {
+		result.Error = termErr
+		return result, result.Error
+	}
+	if _, termEnumErr := reservations.ReservationTermForYears(termYears); termEnumErr != nil {
+		result.Error = termEnumErr
+		return result, result.Error
+	}
 	billingPlan, err := reservations.BillingPlanForPaymentOption(rec.PaymentOption)
 	if err != nil {
 		result.Error = err
@@ -501,15 +512,7 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 	// Ensure Microsoft.Capacity provider is registered (cached after first call).
 	c.ensureCapacityProviderRegistered(ctx)
 
-	token, err := c.cred.GetToken(ctx, policy.TokenRequestOptions{
-		Scopes: []string{"https://management.azure.com/.default"},
-	})
-	if err != nil {
-		result.Error = fmt.Errorf("failed to get access token: %w", err)
-		return result, result.Error
-	}
-
-	reservationOrderID, existing, err := reservations.DoIdempotentPurchaseTwoStep(ctx, c.httpClient, reservations.CalculatePriceURL(), bodyBytes, token.Token, opts.IdempotencyToken)
+	reservationOrderID, existing, err := reservations.Submit(ctx, c.cred, c.httpClient, bodyBytes, opts)
 	if err != nil {
 		result.Error = err
 		return result, result.Error
@@ -626,7 +629,7 @@ func (c *Client) collectVMSizesFromSKUs(ctx context.Context, pager ResourceSKUsP
 		if pageIdx >= maxSKUPages {
 			return nil, fmt.Errorf("compute: GetValidResourceTypes pagination cap (%d pages) reached", maxSKUPages)
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			return nil, fmt.Errorf("failed to list VM sizes: %w", err)
 		}
@@ -671,17 +674,23 @@ func (c *Client) isAvailableInRegion(sku *armcompute.ResourceSKU, region string)
 
 // VMPricing contains VM pricing information.
 type VMPricing struct {
-	HourlyRate        float64
-	ReservationPrice  float64
-	OnDemandPrice     float64
-	Currency          string
-	SavingsPercentage float64
+	HourlyRate       float64
+	ReservationPrice float64
+	Currency         string
 }
 
 // getVMPricing gets real VM pricing from Azure Retail Prices API.
 func (c *Client) getVMPricing(ctx context.Context, vmSize, region string, termYears int) (*VMPricing, error) {
-	filter := fmt.Sprintf("serviceName eq 'Virtual Machines' and armRegionName eq '%s' and armSkuName eq '%s' and priceType eq 'Reservation'",
-		strings.ReplaceAll(region, "'", "''"), strings.ReplaceAll(vmSize, "'", "''"))
+	qRegion, err := pricing.ODataString(region)
+	if err != nil {
+		return nil, err
+	}
+	qSKU, err := pricing.ODataString(vmSize)
+	if err != nil {
+		return nil, err
+	}
+	filter := fmt.Sprintf("serviceName eq 'Virtual Machines' and armRegionName eq %s and armSkuName eq %s and priceType eq 'Reservation'",
+		qRegion, qSKU)
 
 	priceData, err := c.fetchAzurePricing(ctx, filter)
 	if err != nil {
@@ -701,7 +710,7 @@ func (c *Client) getVMPricing(ctx context.Context, vmSize, region string, termYe
 	}
 
 	return &VMPricing{
-		HourlyRate:       item.RetailPrice / (8760.0 * float64(termYears)),
+		HourlyRate:       item.RetailPrice / (common.HoursPerYear * float64(termYears)),
 		ReservationPrice: item.RetailPrice,
 		Currency:         item.CurrencyCode,
 	}, nil
@@ -841,7 +850,7 @@ func (c *Client) fetchSKUCatalogue(ctx context.Context) map[string]vmSKUEntry {
 			logging.Warnf("azure compute: SKU catalog pagination cap (%d pages) reached for region %s; partial cache (%d entries) used", maxSKUPages, c.region, len(out))
 			break
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			logging.Warnf("azure compute: SKU catalog page fetch failed for region %s: %v; partial cache (%d entries) discarded, Details.VCPU/MemoryGB left at 0", c.region, err, len(out))
 			return nil
@@ -874,35 +883,59 @@ func (c *Client) populateVMSKUMapFromPage(out map[string]vmSKUEntry, skus []*arm
 		if _, exists := out[*sku.Name]; exists {
 			continue
 		}
-		vCPUs, memoryGB := extractVMSKUCapabilities(sku)
+		vCPUs, memoryGB, err := extractVMSKUCapabilities(sku)
+		if err != nil {
+			logging.Warnf("azure compute: SKU %s in region %s skipped from catalog: %v", *sku.Name, c.region, err)
+			continue
+		}
 		out[*sku.Name] = vmSKUEntry{vCPUs: vCPUs, memoryGB: memoryGB}
 	}
 }
 
 // extractVMSKUCapabilities pulls the vCPUs and MemoryGB capabilities
 // out of an armcompute.ResourceSKU's Capabilities name/value list.
-// Returns (0, 0) when the capability is missing or unparseable —
-// callers treat the zero value as "unknown" (omitempty JSON tag on
-// common.ComputeDetails).
+// A missing capability yields 0, which callers treat as "unknown"
+// (omitempty JSON tag on common.ComputeDetails). A present but
+// unparseable, non-finite or negative value returns an error rather
+// than being coerced to 0.
 //
 // Extracted out of fetchSKUCatalogue to keep that function under the
 // cyclomatic-complexity threshold enforced by the pre-commit hook
 // (matches the cache/database extraction pattern from PR #81).
-func extractVMSKUCapabilities(sku *armcompute.ResourceSKU) (vCPUs int, memoryGB float64) {
+func extractVMSKUCapabilities(sku *armcompute.ResourceSKU) (vCPUs int, memoryGB float64, err error) {
 	for _, cb := range sku.Capabilities {
 		if cb == nil || cb.Name == nil || cb.Value == nil {
 			continue
 		}
 		switch *cb.Name {
 		case "vCPUs":
-			if v, err := strconv.Atoi(*cb.Value); err == nil {
-				vCPUs = v
+			if vCPUs, err = parseSKUVCPUs(*cb.Value); err != nil {
+				return 0, 0, err
 			}
 		case "MemoryGB":
-			if v, err := strconv.ParseFloat(*cb.Value, 64); err == nil {
-				memoryGB = v
+			if memoryGB, err = parseSKUMemoryGB(*cb.Value); err != nil {
+				return 0, 0, err
 			}
 		}
 	}
-	return vCPUs, memoryGB
+	return vCPUs, memoryGB, nil
+}
+
+// parseSKUVCPUs parses a vCPUs capability value as a non-negative integer.
+func parseSKUVCPUs(raw string) (int, error) {
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 0 {
+		return 0, fmt.Errorf("capability vCPUs %q is not a non-negative integer", raw)
+	}
+	return v, nil
+}
+
+// parseSKUMemoryGB parses a MemoryGB capability value as a finite,
+// non-negative float.
+func parseSKUMemoryGB(raw string) (float64, error) {
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		return 0, fmt.Errorf("capability MemoryGB %q is not a finite non-negative number", raw)
+	}
+	return v, nil
 }

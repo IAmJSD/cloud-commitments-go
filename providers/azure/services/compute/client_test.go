@@ -27,6 +27,7 @@ import (
 )
 
 func TestNewClient(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 
 	require.NotNil(t, client)
@@ -36,6 +37,7 @@ func TestNewClient(t *testing.T) {
 }
 
 func TestNewClientWithHTTP(t *testing.T) {
+	t.Parallel()
 	mockHTTP := &mocks.MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
 
@@ -46,11 +48,13 @@ func TestNewClientWithHTTP(t *testing.T) {
 }
 
 func TestComputeClient_GetServiceType(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "sub", "region")
 	assert.Equal(t, common.ServiceCompute, client.GetServiceType())
 }
 
 func TestComputeClient_GetRegion(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		region   string
@@ -82,6 +86,7 @@ func TestComputeClient_GetRegion(t *testing.T) {
 }
 
 func TestComputeClient_isAvailableInRegion(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "sub", "eastus")
 
 	eastus := "eastus"
@@ -137,22 +142,20 @@ func TestComputeClient_isAvailableInRegion(t *testing.T) {
 }
 
 func TestVMPricingStructure(t *testing.T) {
+	t.Parallel()
 	pricing := VMPricing{
-		HourlyRate:        0.10,
-		ReservationPrice:  876.0,
-		OnDemandPrice:     1752.0,
-		Currency:          "USD",
-		SavingsPercentage: 50.0,
+		HourlyRate:       0.10,
+		ReservationPrice: 876.0,
+		Currency:         "USD",
 	}
 
 	assert.Equal(t, 0.10, pricing.HourlyRate)
 	assert.Equal(t, 876.0, pricing.ReservationPrice)
-	assert.Equal(t, 1752.0, pricing.OnDemandPrice)
 	assert.Equal(t, "USD", pricing.Currency)
-	assert.Equal(t, 50.0, pricing.SavingsPercentage)
 }
 
 func TestAzureRetailPriceStructure(t *testing.T) {
+	t.Parallel()
 	price := AzureRetailPrice{
 		Items: []AzureRetailPriceItem{
 			{
@@ -176,6 +179,7 @@ func TestAzureRetailPriceStructure(t *testing.T) {
 }
 
 func TestComputeClient_Fields(t *testing.T) {
+	t.Parallel()
 	// Test that client stores fields correctly
 	client := NewClient(nil, "test-sub", "westus2")
 
@@ -227,6 +231,7 @@ func (p *fakeOrderPager) NextPage(context.Context) (armreservations.ReservationC
 }
 
 func TestComputeClient_SetPagers(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "sub", "eastus")
 
 	recPager := &mocks.MockRecommendationsPager{}
@@ -250,6 +255,7 @@ func TestComputeClient_SetPagers(t *testing.T) {
 }
 
 func TestComputeClient_GetRecommendations_WithMock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -275,6 +281,7 @@ func TestComputeClient_GetRecommendations_WithMock(t *testing.T) {
 // entries — "upfront" and "monthly" — with correct cashflow split and
 // identical savings figures.
 func TestComputeClient_GetRecommendations_EmitsBothPaymentVariants(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	// Synthetic reservation retail rows (1y $500, 3y $1200 per unit).
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", &mocks.PricingHTTP{Items: []map[string]any{
@@ -331,6 +338,7 @@ func TestComputeClient_GetRecommendations_EmitsBothPaymentVariants(t *testing.T)
 }
 
 func TestComputeClient_GetExistingCommitments_WithMock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -420,6 +428,7 @@ func TestComputeClient_GetExistingCommitments_WithMock(t *testing.T) {
 }
 
 func TestComputeClient_GetExistingCommitments_Empty(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 	client.SetInventoryFactories(&reservations.InventoryFactories{
@@ -437,6 +446,7 @@ func TestComputeClient_GetExistingCommitments_Empty(t *testing.T) {
 }
 
 func TestComputeClient_GetExistingCommitments_ListerError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 	client.SetInventoryFactories(&reservations.InventoryFactories{
@@ -454,6 +464,7 @@ func TestComputeClient_GetExistingCommitments_ListerError(t *testing.T) {
 }
 
 func TestComputeClient_GetValidResourceTypes_WithMock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -473,6 +484,7 @@ func TestComputeClient_GetValidResourceTypes_WithMock(t *testing.T) {
 }
 
 func TestComputeClient_GetValidResourceTypes_NoSKUs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -489,6 +501,7 @@ func TestComputeClient_GetValidResourceTypes_NoSKUs(t *testing.T) {
 }
 
 func TestComputeClient_ValidateOffering_Valid(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -508,6 +521,7 @@ func TestComputeClient_ValidateOffering_Valid(t *testing.T) {
 }
 
 func TestComputeClient_ValidateOffering_Invalid(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -528,6 +542,7 @@ func TestComputeClient_ValidateOffering_Invalid(t *testing.T) {
 }
 
 func TestComputeClient_ValidateOffering_CaseInsensitive(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	t.Run("case_insensitive", func(t *testing.T) {
@@ -556,6 +571,7 @@ func TestComputeClient_ValidateOffering_CaseInsensitive(t *testing.T) {
 }
 
 func TestComputeClient_GetOfferingDetails_WithMock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	mockHTTP := &mocks.MockHTTPClient{}
@@ -585,6 +601,7 @@ func TestComputeClient_GetOfferingDetails_WithMock(t *testing.T) {
 }
 
 func TestComputeClient_GetOfferingDetails_3YearTerm(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	mockHTTP := &mocks.MockHTTPClient{}
@@ -613,6 +630,7 @@ func TestComputeClient_GetOfferingDetails_3YearTerm(t *testing.T) {
 }
 
 func TestComputeClient_GetOfferingDetails_APIError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	mockHTTP := &mocks.MockHTTPClient{}
@@ -639,6 +657,7 @@ func TestComputeClient_GetOfferingDetails_APIError(t *testing.T) {
 }
 
 func TestComputeClient_GetOfferingDetails_NoPricing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	mockHTTP := &mocks.MockHTTPClient{}
@@ -671,6 +690,7 @@ func TestComputeClient_GetOfferingDetails_NoPricing(t *testing.T) {
 // branch. Pre-fix the default branch set upfrontCost = totalCost and returned a
 // valid OfferingDetails with no error.
 func TestComputeClient_GetOfferingDetails_UnsupportedPaymentOption(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	mockHTTP := &mocks.MockHTTPClient{}
@@ -701,6 +721,7 @@ func TestComputeClient_GetOfferingDetails_UnsupportedPaymentOption(t *testing.T)
 // multiplier (issue #1020 H4). Pre-fix this would have silently surfaced a
 // fabricated TotalCost/SavingsPercentage as a real quote.
 func TestComputeClient_GetOfferingDetails_NoReservationPricing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	onDemandOnly := `{
@@ -780,6 +801,7 @@ func mockCapacityProviderCheck(t *testing.T, m *mocks.MockHTTPClient) {
 }
 
 func TestComputeClient_PurchaseCommitment_Success(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &mocks.MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -821,6 +843,7 @@ func TestComputeClient_PurchaseCommitment_Success(t *testing.T) {
 }
 
 func TestComputeClient_PurchaseCommitment_UpfrontCost(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name     string
 		payment  string
@@ -876,6 +899,7 @@ func TestComputeClient_PurchaseCommitment_UpfrontCost(t *testing.T) {
 }
 
 func TestComputeClient_PurchaseCommitment_3YearTerm(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &mocks.MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -913,6 +937,7 @@ func TestComputeClient_PurchaseCommitment_3YearTerm(t *testing.T) {
 }
 
 func TestComputeClient_PurchaseCommitment_Accepted(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &mocks.MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -949,6 +974,7 @@ func TestComputeClient_PurchaseCommitment_Accepted(t *testing.T) {
 }
 
 func TestComputeClient_PurchaseCommitment_TokenError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &mocks.MockHTTPClient{}
 	mockCred := &MockTokenCredential{err: errors.New("token error")}
@@ -968,6 +994,7 @@ func TestComputeClient_PurchaseCommitment_TokenError(t *testing.T) {
 }
 
 func TestComputeClient_PurchaseCommitment_HTTPError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &mocks.MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -993,6 +1020,7 @@ func TestComputeClient_PurchaseCommitment_HTTPError(t *testing.T) {
 }
 
 func TestComputeClient_PurchaseCommitment_BadStatus(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &mocks.MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1036,6 +1064,7 @@ func TestComputeClient_PurchaseCommitment_BadStatus(t *testing.T) {
 // POST purchase, and that the CommitmentID is the Azure-minted order ID (not a
 // client-generated GUID). This is the regression test for issue #677.
 func TestComputeClient_PurchaseCommitment_TwoStepFlow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &mocks.MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1085,6 +1114,7 @@ func TestComputeClient_PurchaseCommitment_TwoStepFlow(t *testing.T) {
 // "Session timed out" 400 on the purchase endpoint causes PurchaseCommitment to
 // re-run calculatePrice and retry the purchase (issue #677 regression test).
 func TestComputeClient_PurchaseCommitment_SessionTimeoutRetry(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &mocks.MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1142,6 +1172,7 @@ func TestComputeClient_PurchaseCommitment_SessionTimeoutRetry(t *testing.T) {
 // the call would succeed without the tag and re-driven purchases would
 // duplicate reservations server-side.
 func TestComputeClient_PurchaseCommitment_TagInjection(t *testing.T) {
+	t.Parallel()
 	const orderID = "compute-tag-test"
 	const source = common.PurchaseSourceWeb
 
@@ -1195,6 +1226,7 @@ func TestComputeClient_PurchaseCommitment_TagInjection(t *testing.T) {
 // signal CUDly controls -- proceeding without it would allow a re-driven
 // purchase to create a duplicate reservation.
 func TestComputeClient_PurchaseCommitment_RequiresSource(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &mocks.MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1219,6 +1251,7 @@ func TestComputeClient_PurchaseCommitment_RequiresSource(t *testing.T) {
 // Microsoft.Capacity GET before buildReservationBody ever validated
 // PaymentOption.
 func TestComputeClient_PurchaseCommitment_RejectsInvalidPaymentOptionBeforeSideEffects(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &mocks.MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1242,6 +1275,7 @@ func TestComputeClient_PurchaseCommitment_RejectsInvalidPaymentOptionBeforeSideE
 // after it, so an invalid term still triggered the provider-registration
 // side effect before the purchase was rejected.
 func TestComputeClient_PurchaseCommitment_RejectsInvalidTermBeforeSideEffects(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &mocks.MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1261,6 +1295,7 @@ func TestComputeClient_PurchaseCommitment_RejectsInvalidTermBeforeSideEffects(t 
 // this converter was wired through the shared Extract helper the stub
 // returned a non-nil but useless recommendation for every nil input.
 func TestComputeClient_ConvertAzureVMRecommendation_NilGuards(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	assert.Nil(t, client.convertAzureVMRecommendation(context.Background(), nil))
 }
@@ -1270,6 +1305,7 @@ func TestComputeClient_ConvertAzureVMRecommendation_NilGuards(t *testing.T) {
 // applies the Compute-service-specific constants (Service, CommitmentType,
 // PaymentOption). Subscription/Account comes from the client, not the rec.
 func TestComputeClient_ConvertAzureVMRecommendation_PopulatesAllFields(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	client.SetResourceSKUsPager(&mocks.MockResourceSKUsPager{})
 	rec := mocks.BuildLegacyReservationRecommendation(
@@ -1316,6 +1352,7 @@ func TestComputeClient_ConvertAzureVMRecommendation_PopulatesAllFields(t *testin
 // providers/azure/internal/pricing/retail_prices_test.go and is not
 // duplicated here.
 func TestFetchAzurePricing_WrapperSmokeTest(t *testing.T) {
+	t.Parallel()
 	mockHTTP := &mocks.MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
 
@@ -1349,6 +1386,7 @@ func TestFetchAzurePricing_WrapperSmokeTest(t *testing.T) {
 // this test mirrors that same call order rather than duplicating validation
 // inside buildReservationBody.
 func TestBuildReservationBody_BillingPlan(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name          string
 		paymentOption string
@@ -1388,6 +1426,7 @@ func TestBuildReservationBody_BillingPlan(t *testing.T) {
 }
 
 func TestBuildReservationBody_IncludesPurchaseAutomationTag(t *testing.T) {
+	t.Parallel()
 	c := &Client{region: "eastus", subscriptionID: "sub-abc"}
 	rec := common.Recommendation{ResourceType: "Standard_D2s_v3", Count: 1, Term: "1yr", PaymentOption: "no-upfront"}
 	billingPlan, err := reservations.BillingPlanForPaymentOption(rec.PaymentOption)
@@ -1404,6 +1443,7 @@ func TestBuildReservationBody_IncludesPurchaseAutomationTag(t *testing.T) {
 }
 
 func TestBuildReservationBody_OmitsTagsWhenSourceAndTokenEmpty(t *testing.T) {
+	t.Parallel()
 	c := &Client{region: "eastus", subscriptionID: "sub-abc"}
 	rec := common.Recommendation{ResourceType: "Standard_D2s_v3", Count: 1, Term: "1yr", PaymentOption: "no-upfront"}
 	billingPlan, err := reservations.BillingPlanForPaymentOption(rec.PaymentOption)
@@ -1424,6 +1464,7 @@ func TestBuildReservationBody_OmitsTagsWhenSourceAndTokenEmpty(t *testing.T) {
 // can find the prior reservation via FindReservationOrderByIdempotencyToken
 // and skip the duplicate buy.
 func TestBuildReservationBody_IncludesIdempotencyTokenTag(t *testing.T) {
+	t.Parallel()
 	c := &Client{region: "eastus", subscriptionID: "sub-abc"}
 	rec := common.Recommendation{ResourceType: "Standard_D2s_v3", Count: 1, Term: "1yr", PaymentOption: "no-upfront"}
 	token := common.DeriveIdempotencyToken("exec-721-compute", 0)
@@ -1500,6 +1541,7 @@ func buildVMSKU(name string, vCPUs int, memoryGB string) *armcompute.ResourceSKU
 // and ComputeDetails.MemoryGB when the catalog contains the SKU named
 // in the recommendation. Pin for issue #148.
 func TestComputeClient_ConvertAzureVMRecommendation_PopulatesVCPUAndMemoryFromSKUCache(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 
 	mockPager := &vmSKUCatalogueMockPager{
@@ -1536,6 +1578,7 @@ func TestComputeClient_ConvertAzureVMRecommendation_PopulatesVCPUAndMemoryFromSK
 // populated from the recommendation payload. Graceful-degradation
 // contract from PR #81, now extended to compute.
 func TestComputeClient_ConvertAzureVMRecommendation_PagerErrorFallsBack(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	mockPager := &vmSKUCatalogueMockPager{
 		pages: []armcompute.ResourceSKUsClientListResponse{{}},
@@ -1562,6 +1605,7 @@ func TestComputeClient_ConvertAzureVMRecommendation_PagerErrorFallsBack(t *testi
 // (e.g. SKU listed for another region only), VCPU/MemoryGB stay at 0
 // and the conversion still produces a usable recommendation.
 func TestComputeClient_ConvertAzureVMRecommendation_NoMatchLeavesFieldsZero(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	mockPager := &vmSKUCatalogueMockPager{
 		pages: []armcompute.ResourceSKUsClientListResponse{
@@ -1595,6 +1639,7 @@ func TestComputeClient_ConvertAzureVMRecommendation_NoMatchLeavesFieldsZero(t *t
 // many converter calls in the same GetRecommendations run trigger
 // exactly ONE catalog fetch.
 func TestComputeClient_CachedSKULookup_FetchedOnce(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	mockPager := &vmSKUCatalogueMockPager{
 		pages: []armcompute.ResourceSKUsClientListResponse{
@@ -1621,6 +1666,7 @@ func TestComputeClient_CachedSKULookup_FetchedOnce(t *testing.T) {
 // but the conversion itself succeeds (graceful-degradation contract).
 // Pins feedback_ctx_cancel_terminal.md for the compute SKU path.
 func TestComputeClient_FetchSKUCatalogue_CancelledContextFallsBack(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1648,6 +1694,7 @@ func TestComputeClient_FetchSKUCatalogue_CancelledContextFallsBack(t *testing.T)
 // against regression: displayName in the calculatePrice body must match
 // [A-Za-z0-9_-]{1,64} (Azure rejects DisplayNameInvalid otherwise).
 func TestComputeClient_PurchaseCommitment_DisplayNameConformsToAzureAllowlist(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &mocks.MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1712,6 +1759,7 @@ func TestComputeClient_PurchaseCommitment_DisplayNameConformsToAzureAllowlist(t 
 // non-JSON body would produce a misleading "decode provider state" error
 // instead of a clear HTTP status error.
 func TestCheckAndRegisterCapacityProvider_NonTwoxx(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &mocks.MockHTTPClient{}
 	t.Cleanup(func() { mockHTTP.AssertExpectations(t) })
@@ -1735,16 +1783,32 @@ func TestCheckAndRegisterCapacityProvider_NonTwoxx(t *testing.T) {
 	assert.Contains(t, err.Error(), "403", "error must surface the HTTP status code")
 }
 
-func TestGetVMPricing_EscapesOData(t *testing.T) {
+func TestGetVMPricing_RejectsInjectedFilterValues(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, vmSize, region string }{
+		{"vmSize", "x' or armSkuName ne '", "eastus"},
+		{"region", "Standard_D2s_v3", "eastus' or '1' eq '1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewClientWithHTTP(nil, "test-subscription", "eastus", &mocks.MockHTTPClient{})
+			_, err := client.getVMPricing(context.Background(), tc.vmSize, tc.region, 1)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "Retail Prices filter")
+		})
+	}
+}
+
+func TestGetVMPricing_LegitimateValuesBuildExactFilter(t *testing.T) {
+	t.Parallel()
 	mockHTTP := &mocks.MockHTTPClient{}
-	client := NewClientWithHTTP(nil, "test-subscription", "east'us", mockHTTP)
+	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
 	response := mocks.CreateMockHTTPResponse(http.StatusOK, `{"Items": []}`)
 	t.Cleanup(func() { require.NoError(t, response.Body.Close()) })
 	mockHTTP.On("Do", mock.Anything).Run(func(args mock.Arguments) {
 		req := args.Get(0).(*http.Request)
-		assert.Equal(t, "serviceName eq 'Virtual Machines' and armRegionName eq 'east''us' and armSkuName eq 'Standard_D2''s_v3' and priceType eq 'Reservation'", req.URL.Query().Get("$filter"))
+		assert.Equal(t, "serviceName eq 'Virtual Machines' and armRegionName eq 'eastus' and armSkuName eq 'Standard_D2s_v3' and priceType eq 'Reservation'", req.URL.Query().Get("$filter"))
 	}).Return(response, nil).Once()
-	_, err := client.getVMPricing(context.Background(), "Standard_D2's_v3", "east'us", 1)
+	_, err := client.getVMPricing(context.Background(), "Standard_D2s_v3", "eastus", 1)
 	require.Error(t, err)
 	mockHTTP.AssertExpectations(t)
 }
@@ -1752,6 +1816,7 @@ func TestGetVMPricing_EscapesOData(t *testing.T) {
 // TestComputeClient_PurchaseCommitment_ZeroCountRejected is a regression test
 // for M6: PurchaseCommitment must reject Count==0 before any HTTP call.
 func TestComputeClient_PurchaseCommitment_ZeroCountRejected(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &mocks.MockHTTPClient{}
 	t.Cleanup(func() { mockHTTP.AssertExpectations(t) })
@@ -1778,6 +1843,7 @@ func TestComputeClient_PurchaseCommitment_ZeroCountRejected(t *testing.T) {
 // quantity that must accompany it. Asserting only that the old mismatched pair
 // is gone would pass against a converter that produced nothing.
 func TestPurchaseBody_SKUAndQuantityStayInMatchingUnits(t *testing.T) {
+	t.Parallel()
 	// Azure recommends 4 x Standard_D8s_v3, normalized to 16 x Standard_D2s_v3.
 	const (
 		actualSKU  = "Standard_D8s_v3"
@@ -1849,5 +1915,100 @@ func TestPurchaseBody_SKUAndQuantityStayInMatchingUnits(t *testing.T) {
 					"normalized SKU %q must never be bought at the un-normalized count", normalized)
 			}
 		})
+	}
+}
+
+// TestNewClientWithHTTP_NilFallbackIsHardened verifies that passing nil as the
+// httpClient falls back to the SSRF-hardened httpclient.New(), which rejects
+// IMDS connections, instead of leaving a nil client that panics on first use.
+func TestNewClientWithHTTP_NilFallbackIsHardened(t *testing.T) {
+	t.Parallel()
+	c := NewClientWithHTTP(nil, "sub-123", "eastus", nil)
+	require.NotNil(t, c.httpClient)
+	require.NotEqual(t, http.DefaultClient, c.httpClient,
+		"nil fallback must never be http.DefaultClient")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://169.254.169.254/metadata/instance", nil)
+	require.NoError(t, err)
+	resp, err := c.httpClient.Do(req)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	require.Error(t, err, "nil-fallback client must reject IMDS connections")
+	assert.Contains(t, err.Error(), "blocked")
+}
+
+func TestExtractVMSKUCapabilities_FailsLoudOnBadValues(t *testing.T) {
+	t.Parallel()
+	sku := func(vcpus, mem *string) *armcompute.ResourceSKU {
+		n1, n2 := "vCPUs", "MemoryGB"
+		var caps []*armcompute.ResourceSKUCapabilities
+		if vcpus != nil {
+			caps = append(caps, &armcompute.ResourceSKUCapabilities{Name: &n1, Value: vcpus})
+		}
+		if mem != nil {
+			caps = append(caps, &armcompute.ResourceSKUCapabilities{Name: &n2, Value: mem})
+		}
+		return &armcompute.ResourceSKU{Capabilities: caps}
+	}
+	s := func(v string) *string { return &v }
+
+	tests := []struct {
+		name       string
+		sku        *armcompute.ResourceSKU
+		wantErr    bool
+		errParts   []string
+		wantVCPUs  int
+		wantMemory float64
+	}{
+		{"valid", sku(s("4"), s("16.5")), false, nil, 4, 16.5},
+		{"both missing is unknown", sku(nil, nil), false, nil, 0, 0},
+		{"memory missing is unknown", sku(s("4"), nil), false, nil, 4, 0},
+		{"vCPUs unparseable", sku(s("four"), s("16")), true, []string{"vCPUs", "four"}, 0, 0},
+		{"vCPUs decimal", sku(s("2.5"), s("16")), true, []string{"vCPUs", "2.5"}, 0, 0},
+		{"vCPUs negative", sku(s("-1"), s("16")), true, []string{"vCPUs", "-1"}, 0, 0},
+		{"memory unparseable", sku(s("4"), s("lots")), true, []string{"MemoryGB", "lots"}, 0, 0},
+		{"memory NaN", sku(s("4"), s("NaN")), true, []string{"MemoryGB", "NaN"}, 0, 0},
+		{"memory +Inf", sku(s("4"), s("+Inf")), true, []string{"MemoryGB", "+Inf"}, 0, 0},
+		{"memory -Inf", sku(s("4"), s("-Inf")), true, []string{"MemoryGB", "-Inf"}, 0, 0},
+		{"memory Inf", sku(s("4"), s("Inf")), true, []string{"MemoryGB", "Inf"}, 0, 0},
+		{"memory negative", sku(s("4"), s("-2")), true, []string{"MemoryGB", "-2"}, 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v, m, err := extractVMSKUCapabilities(tt.sku)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("want error, got vCPUs=%d memoryGB=%v", v, m)
+				}
+				for _, part := range tt.errParts {
+					if !strings.Contains(err.Error(), part) {
+						t.Fatalf("error %q does not contain %q", err, part)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if v != tt.wantVCPUs || m != tt.wantMemory {
+				t.Fatalf("got (%d, %v), want (%d, %v)", v, m, tt.wantVCPUs, tt.wantMemory)
+			}
+		})
+	}
+}
+
+func TestPopulateVMSKUMapFromPage_SkipsSKUWithUnparseableCapability(t *testing.T) {
+	t.Parallel()
+	client := NewClient(nil, "test-subscription", "eastus")
+	out := map[string]vmSKUEntry{}
+	client.populateVMSKUMapFromPage(out, []*armcompute.ResourceSKU{
+		buildVMSKU("Good", 2, "8"),
+		buildVMSKU("Bad", 2, "lots"),
+	})
+	if _, ok := out["Bad"]; ok {
+		t.Fatal("SKU with unparseable MemoryGB must be skipped, not cached with zero")
+	}
+	if e, ok := out["Good"]; !ok || e.vCPUs != 2 || e.memoryGB != 8 {
+		t.Fatalf("Good entry wrong: %+v ok=%v", e, ok)
 	}
 }

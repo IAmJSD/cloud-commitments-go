@@ -16,6 +16,7 @@ import (
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/offeringprice"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/purchasecfg"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/purchaseguard"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/reservationexpiry"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/reservationstate"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/tagging"
@@ -69,7 +70,13 @@ func (c *Client) GetExistingCommitments(ctx context.Context) ([]common.Commitmen
 	commitments := make([]common.Commitment, 0)
 	var marker *string
 
-	for {
+	for page := 0; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if page >= maxListPages {
+			return nil, fmt.Errorf("pagination cap reached after %d pages for ElastiCache reserved cache nodes (issue #561)", maxListPages)
+		}
 		input := &elasticache.DescribeReservedCacheNodesInput{
 			Marker:     marker,
 			MaxRecords: aws.Int32(100),
@@ -234,43 +241,19 @@ func (c *Client) findReservationByID(ctx context.Context, reservationID string) 
 	return "", false, nil
 }
 
-// idempotencyGuard short-circuits a re-drive (issue #641): when token is set, it
-// reports (existingID, true, nil) if a reservation already exists under
-// reservationID, ("", false, nil) for a first-time purchase, or a fail-loud
-// error on lookup failure. With an empty token it is a no-op.
+// idempotencyGuard short-circuits a re-drive (issue #641); see purchaseguard.Guard.
 func (c *Client) idempotencyGuard(ctx context.Context, token, reservationID string) (existingID string, found bool, err error) {
-	if token == "" {
-		return "", false, nil
-	}
-	existingID, found, lookupErr := c.findReservationByID(ctx, reservationID)
-	if lookupErr != nil {
-		return "", false, fmt.Errorf("idempotency lookup failed before ElastiCache purchase (refusing to purchase to avoid a possible double-buy): %w", lookupErr)
-	}
-	if found {
-		log.Printf("ElastiCache reservation for idempotency token %s already exists (%s); skipping purchase (issue #641 re-drive)", common.MaskToken(token), existingID)
-		return existingID, true, nil
-	}
-	return "", false, nil
+	return purchaseguard.Guard(ctx, token, "ElastiCache reservation", func(ctx context.Context) (string, bool, error) {
+		return c.findReservationByID(ctx, reservationID)
+	})
 }
 
-// recoverAlreadyExists handles the native server-side dedupe backstop (issue
-// #641): if the by-ID guard missed the existing reservation but AWS rejected the
-// duplicate ID with ReservedCacheNodeAlreadyExistsFault, it re-Describes by ID
-// and returns (existingID, true) so the re-drive recovers it instead of erroring.
+// recoverAlreadyExists adopts the existing reservation when AWS rejects a
+// duplicate ID (issue #641); see purchaseguard.Recover.
 func (c *Client) recoverAlreadyExists(ctx context.Context, token, reservationID string, purchaseErr error) (string, bool) {
-	if token == "" {
-		return "", false
-	}
-	var already *types.ReservedCacheNodeAlreadyExistsFault
-	if !errors.As(purchaseErr, &already) {
-		return "", false
-	}
-	existingID, found, lookupErr := c.findReservationByID(ctx, reservationID)
-	if lookupErr == nil && found {
-		log.Printf("ElastiCache reservation %s already existed at purchase time; treating as idempotent re-drive (issue #641)", existingID)
-		return existingID, true
-	}
-	return "", false
+	return purchaseguard.Recover[*types.ReservedCacheNodeAlreadyExistsFault](ctx, token, "ElastiCache reservation", purchaseErr, func(ctx context.Context) (string, bool, error) {
+		return c.findReservationByID(ctx, reservationID)
+	})
 }
 
 // maxOfferingPages is the maximum number of DescribeReservedCacheNodesOfferings
@@ -278,6 +261,12 @@ func (c *Client) recoverAlreadyExists(ctx context.Context, token, reservationID 
 // search at 500 offerings. Exceeding the cap returns a diagnostic error instead
 // of timing out the Lambda budget (issue #688).
 const maxOfferingPages = 5
+
+// maxListPages bounds the full-list scans (existing commitments and the
+// valid-resource-types sweep). At 100 per page this is far above any real
+// account; hitting it means a token cycle or runaway API, so the scan fails
+// loud instead of looping or returning a partial list (issue #561).
+const maxListPages = 50
 
 // findOfferingID finds the appropriate Reserved Cache Node offering ID.
 // execID is the purchase execution UUID for log correlation; pass "" when
@@ -440,7 +429,13 @@ func (c *Client) GetValidResourceTypes(ctx context.Context) ([]string, error) {
 	instanceTypesMap := make(map[string]bool)
 	var marker *string
 
-	for {
+	for page := 0; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if page >= maxListPages {
+			return nil, fmt.Errorf("pagination cap reached after %d pages for ElastiCache offerings (issue #561)", maxListPages)
+		}
 		input := &elasticache.DescribeReservedCacheNodesOfferingsInput{
 			Marker:     marker,
 			MaxRecords: aws.Int32(100),

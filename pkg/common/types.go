@@ -217,7 +217,10 @@ type Recommendation struct {
 	Term           string         `json:"term" csv:"Term"`                      // 1yr, 3yr
 	PaymentOption  string         `json:"payment_option" csv:"PaymentOption"`   // all-upfront, partial, no-upfront, monthly
 
-	// Cost information
+	// Cost information. OnDemandCost, EstimatedSavings and SavingsPercentage are
+	// USD: providers skip a recommendation whose source reports an explicit
+	// non-USD currency; an AWS Cost Explorer detail with no CurrencyCode is
+	// accepted as is. CommitmentCurrency covers only the commitment legs.
 	OnDemandCost      float64 `json:"on_demand_cost" csv:"OnDemandCost"`
 	CommitmentCost    float64 `json:"commitment_cost" csv:"CommitmentCost"`
 	EstimatedSavings  float64 `json:"estimated_savings" csv:"EstimatedSavings"`
@@ -423,6 +426,12 @@ type PurchaseOptions struct {
 	// defaults to "convertible" to preserve pre-694 behavior.
 	// Only meaningful for EC2 RI purchases; ignored by other providers.
 	OfferingClass string
+	// RequestedAt is the first-dispatch time of this purchase lineage, stable
+	// across re-drives of the same IdempotencyToken. Providers use it to bound
+	// idempotency lookups for services that have no client token (Redshift
+	// reserved nodes). A zero value means unknown; a provider that requires it
+	// must refuse the purchase rather than guess.
+	RequestedAt time.Time
 }
 
 // NormalizeSource lowercases s and returns it when it matches an allowed
@@ -545,6 +554,10 @@ type RecommendationParams struct {
 	// recommendations: "linked" or "payer" (case-insensitive). Empty means
 	// linked. Payer scope only applies to a management account.
 	SPAccountScope string
+	// RIAccountScope selects the Cost Explorer account scope for Reserved
+	// Instance recommendations, with the same values as SPAccountScope:
+	// "linked" or "payer" (case-insensitive). Empty means linked.
+	RIAccountScope string
 	// ExperimentalGCPPlanTerm (GCP Compute Engine only, ignored elsewhere)
 	// takes the CUD term from the recommendation's root Commitment plan
 	// instead of Term. EXPERIMENTAL: the payload shape is unverified against a

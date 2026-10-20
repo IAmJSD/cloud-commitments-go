@@ -7,8 +7,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/api/cloudbilling/v1"
-
-	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
 )
 
 func currencySKU(id, description, usageType, region, currency string, nanos int64) *cloudbilling.Sku {
@@ -28,6 +26,7 @@ func currencySKU(id, description, usageType, region, currency string, nanos int6
 }
 
 func TestGetSQLPricing_Currency(t *testing.T) {
+	t.Parallel()
 	const tier, region = "db-n1-standard-1", "us-central1"
 	tests := []struct {
 		name         string
@@ -44,6 +43,7 @@ func TestGetSQLPricing_Currency(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			client, err := NewClient(ctx, "test-project", region)
 			require.NoError(t, err)
@@ -53,19 +53,13 @@ func TestGetSQLPricing_Currency(t *testing.T) {
 			}}})
 
 			got, err := client.getSQLPricing(ctx, tier, region, 1)
-			rec := common.Recommendation{ResourceType: tier, Term: "1yr"}
-			client.fillSQLPricing(ctx, &rec, 1)
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
-				assert.Empty(t, rec.CommitmentCurrency)
-				assert.Nil(t, rec.RecurringMonthlyCost)
 				return
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantCurrency, got.Currency)
-			assert.Equal(t, tt.wantCurrency, rec.CommitmentCurrency)
-			require.NotNil(t, rec.RecurringMonthlyCost)
 		})
 	}
 }

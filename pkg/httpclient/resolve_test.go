@@ -47,12 +47,20 @@ func newContainedClient(t *testing.T) *http.Client {
 // getaddrinfo for decimal/hex/octal IPv4 spellings) resolves in production.
 func useFakeResolver(t *testing.T) {
 	t.Helper()
+	useFakeResolverWith(t, netip.AddrFrom4(imdsIPv4))
+}
+
+// useFakeResolverWith points New's dialer at an in-process DNS server that
+// answers A queries with the IPv4 entries of answers and AAAA queries with the
+// IPv6 entries (an IPv4-mapped entry is an IPv6 answer).
+func useFakeResolverWith(t *testing.T, answers ...netip.Addr) {
+	t.Helper()
 	prev := resolver
 	resolver = &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			client, server := net.Pipe()
-			go serveOneDNSQuery(server)
+			go serveOneDNSQuery(server, answers)
 			return client, nil
 		},
 	}
@@ -60,9 +68,9 @@ func useFakeResolver(t *testing.T) {
 }
 
 // serveOneDNSQuery answers one TCP-framed query (net.Pipe is not a PacketConn,
-// so the Go resolver uses length-prefixed framing). A queries get imdsIPv4;
-// anything else gets an empty answer section.
-func serveOneDNSQuery(conn net.Conn) {
+// so the Go resolver uses length-prefixed framing) with the answers matching
+// its QTYPE; other query types get an empty answer section.
+func serveOneDNSQuery(conn net.Conn, answers []netip.Addr) {
 	defer conn.Close()
 	var l [2]byte
 	if _, err := io.ReadFull(conn, l[:]); err != nil {
@@ -80,15 +88,26 @@ func serveOneDNSQuery(conn net.Conn) {
 	if end > len(q) {
 		return
 	}
-	isA := binary.BigEndian.Uint16(q[end-4:end-2]) == 1
+	qtype := binary.BigEndian.Uint16(q[end-4 : end-2])
 
 	resp := append([]byte{}, q[:2]...)                      // ID
 	resp = append(resp, 0x81, 0x80, 0, 1, 0, 0, 0, 0, 0, 0) // flags, QD=1, AN/NS/AR=0
 	resp = append(resp, q[12:end]...)
-	if isA {
-		resp[7] = 1 // ANCOUNT
-		resp = append(resp, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4)
-		resp = append(resp, imdsIPv4[:]...)
+	for _, a := range answers {
+		var rdata []byte
+		switch {
+		case qtype == 1 && a.Is4():
+			b := a.As4()
+			rdata = b[:]
+		case qtype == 28 && a.Is6():
+			b := a.As16()
+			rdata = b[:]
+		default:
+			continue
+		}
+		resp[7]++ // ANCOUNT
+		resp = append(resp, 0xc0, 0x0c, byte(qtype>>8), byte(qtype), 0, 1, 0, 0, 0, 60, 0, byte(len(rdata)))
+		resp = append(resp, rdata...)
 	}
 	out := binary.BigEndian.AppendUint16(nil, uint16(len(resp)))
 	_, _ = conn.Write(append(out, resp...))
@@ -122,13 +141,17 @@ func TestNew_BlocksHostnameResolvingToIMDS(t *testing.T) {
 		// decodes it (and the decimal/octal forms) to 169.254.169.254.
 		"http://0xa9fea9fe/latest/meta-data/",
 	} {
-		t.Run(url, func(t *testing.T) { assertBlocked(t, c, url) })
+		t.Run(url, func(t *testing.T) {
+			t.Parallel()
+			assertBlocked(t, c, url)
+		})
 	}
 }
 
 // Literal addresses outside the old two-entry map: the IPv4-mapped IPv6 form
 // of IMDS, and the ECS / EKS Pod Identity credential endpoints.
 func TestNew_BlocksMetadataLiteralsOutsideExactMatch(t *testing.T) {
+	t.Parallel()
 	c := newContainedClient(t)
 	for _, url := range []string{
 		"http://[::ffff:169.254.169.254]/metadata/identity/oauth2/token",
@@ -139,13 +162,17 @@ func TestNew_BlocksMetadataLiteralsOutsideExactMatch(t *testing.T) {
 		"http://[fe80::1]/",
 		"http://[fe80::1%251]/",
 	} {
-		t.Run(url, func(t *testing.T) { assertBlocked(t, c, url) })
+		t.Run(url, func(t *testing.T) {
+			t.Parallel()
+			assertBlocked(t, c, url)
+		})
 	}
 }
 
 // Metadata services on routable addresses outside link-local (Azure WireServer,
 // Alibaba Cloud IMDS), reached directly, IPv4-mapped, or via a redirect.
 func TestNew_BlocksRoutableMetadataAddresses(t *testing.T) {
+	t.Parallel()
 	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "http://168.63.129.16/machine?comp=goalstate", http.StatusFound)
 	}))
@@ -159,12 +186,16 @@ func TestNew_BlocksRoutableMetadataAddresses(t *testing.T) {
 		"http://100.100.100.200/latest/meta-data/",
 		redirect.URL,
 	} {
-		t.Run(url, func(t *testing.T) { assertBlocked(t, c, url) })
+		t.Run(url, func(t *testing.T) {
+			t.Parallel()
+			assertBlocked(t, c, url)
+		})
 	}
 }
 
 // GCP's IPv6 metadata server (fd20:ce::254) is a ULA, outside fe80::/10.
 func TestNew_BlocksGCPIPv6Metadata(t *testing.T) {
+	t.Parallel()
 	const target = "http://[fd20:ce::254]/computeMetadata/v1/instance/service-accounts/default/token"
 	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, target, http.StatusFound)
@@ -173,7 +204,10 @@ func TestNew_BlocksGCPIPv6Metadata(t *testing.T) {
 
 	c := newContainedClient(t)
 	for _, url := range []string{target, redirect.URL} {
-		t.Run(url, func(t *testing.T) { assertBlocked(t, c, url) })
+		t.Run(url, func(t *testing.T) {
+			t.Parallel()
+			assertBlocked(t, c, url)
+		})
 	}
 }
 
@@ -190,6 +224,7 @@ func TestNew_BlocksRedirectToIMDS(t *testing.T) {
 }
 
 func TestContainedClient_AllowsLoopback(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -206,6 +241,7 @@ func TestContainedClient_AllowsLoopback(t *testing.T) {
 }
 
 func TestContainedClient_DeniesDocumentationAddress(t *testing.T) {
+	t.Parallel()
 	resp, err := newContainedClient(t).Get("http://192.0.2.1/")
 	if err == nil {
 		resp.Body.Close()

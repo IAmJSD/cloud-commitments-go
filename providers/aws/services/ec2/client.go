@@ -357,6 +357,12 @@ func parseEC2Scope(s string) (types.Scope, error) {
 // of timing out the Lambda budget (issue #688).
 const maxOfferingPages = 5
 
+// maxListPages bounds the full-list scans (existing commitments and the
+// valid-resource-types sweep). At 100 per page this is far above any real
+// account; hitting it means a token cycle or runaway API, so the scan fails
+// loud instead of looping or returning a partial list (issue #561).
+const maxListPages = 50
+
 // convertEC2PaymentOption maps a rec payment-option slug to the AWS
 // DescribeReservedInstancesOfferings OfferingType enum value.
 func convertEC2PaymentOption(option string) (types.OfferingTypeValues, error) {
@@ -616,14 +622,23 @@ func (c *Client) ValidateOffering(ctx context.Context, rec common.Recommendation
 	return err
 }
 
-// GetOfferingDetails retrieves offering details. All prices are per ONE
-// reservation (callers multiply by rec.Count): UpfrontCost is FixedPrice,
-// RecurringCost is the hourly rate, TotalCost is upfront plus hourly over the
-// term. The offering class does not change any price field.
-// Uses the convertible class (empty = convertible default) since the
-// details-fetch path has no GlobalConfig context.
+// GetOfferingDetails prices the convertible offering (the PurchaseCommitment
+// default when PurchaseOptions.OfferingClass is empty). Callers that purchase
+// a standard RI must use GetOfferingDetailsForClass: the classes are distinct
+// offerings with different prices.
 func (c *Client) GetOfferingDetails(ctx context.Context, rec common.Recommendation) (*common.OfferingDetails, error) {
-	match, err := c.findOffering(ctx, rec, "", "")
+	return c.GetOfferingDetailsForClass(ctx, rec, "")
+}
+
+// GetOfferingDetailsForClass retrieves the details of the offering the
+// purchase would buy for offeringClass, resolved exactly as PurchaseCommitment
+// resolves PurchaseOptions.OfferingClass: "" and "convertible" select the
+// convertible offering, "standard" the standard one, anything else errors.
+// All prices are per ONE reservation (callers multiply by rec.Count):
+// UpfrontCost is FixedPrice, RecurringCost is the hourly rate, TotalCost is
+// upfront plus hourly over the term.
+func (c *Client) GetOfferingDetailsForClass(ctx context.Context, rec common.Recommendation, offeringClass string) (*common.OfferingDetails, error) {
+	match, err := c.findOffering(ctx, rec, "", offeringClass)
 	if err != nil {
 		return nil, err
 	}
@@ -693,7 +708,13 @@ func (c *Client) GetValidResourceTypes(ctx context.Context) ([]string, error) {
 	instanceTypesMap := make(map[string]bool)
 	var nextToken *string
 
-	for {
+	for page := 0; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if page >= maxListPages {
+			return nil, fmt.Errorf("pagination cap reached after %d pages for EC2 instance type offerings (issue #561)", maxListPages)
+		}
 		input := &ec2.DescribeInstanceTypeOfferingsInput{
 			LocationType: types.LocationTypeRegion,
 			NextToken:    nextToken,

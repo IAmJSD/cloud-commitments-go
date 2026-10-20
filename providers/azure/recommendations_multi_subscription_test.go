@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/stretchr/testify/assert"
@@ -78,6 +79,7 @@ func twoTestAccounts() []common.Account {
 }
 
 func TestNewMultiSubscriptionRecommendationsClient_EmptyAccounts(t *testing.T) {
+	t.Parallel()
 	client, err := NewMultiSubscriptionRecommendationsClient(&mockAzureTokenCredential{}, nil)
 	require.Error(t, err)
 	assert.Nil(t, client)
@@ -236,6 +238,7 @@ func TestMultiSubscriptionRecommendationsClient_PartialFailureKeepsSuccessfulRes
 // must not panic on Failed[0] -- an error type that crashes when logged fails
 // at exactly the moment the operator needs its message.
 func TestPartialSubscriptionFailureError_ErrorWithNoFailures(t *testing.T) {
+	t.Parallel()
 	var zero PartialSubscriptionFailureError
 
 	require.NotPanics(t, func() { _ = fmt.Sprintf("%v", &zero) },
@@ -262,6 +265,7 @@ func TestMultiSubscriptionRecommendationsClient_GetRecommendations_AllFail(t *te
 }
 
 func TestMultiSubscriptionRecommendationsClient_GetRecommendations_NilParams(t *testing.T) {
+	t.Parallel()
 	client := &MultiSubscriptionRecommendationsClient{}
 	recs, err := client.GetRecommendations(context.Background(), nil)
 	require.EqualError(t, err, "params cannot be nil")
@@ -516,4 +520,63 @@ func TestNewMultiSubscriptionRecommendationsClient_DeduplicatesAccounts(t *testi
 		assert.Equal(t, 2, partial.Attempted)
 		assert.Len(t, partial.Failed, 1)
 	})
+}
+
+// peakRecommendationsClient records the maximum number of concurrently
+// in-flight GetRecommendations calls across all instances sharing the same
+// counters.
+type peakRecommendationsClient struct {
+	inFlight *atomic.Int64
+	peak     *atomic.Int64
+}
+
+func (p *peakRecommendationsClient) GetRecommendations(ctx context.Context, _ *common.RecommendationParams) ([]common.Recommendation, error) {
+	cur := p.inFlight.Add(1)
+	defer p.inFlight.Add(-1)
+	for {
+		old := p.peak.Load()
+		if cur <= old || p.peak.CompareAndSwap(old, cur) {
+			break
+		}
+	}
+	select {
+	case <-time.After(5 * time.Millisecond):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return nil, nil
+}
+
+func (p *peakRecommendationsClient) GetRecommendationsForService(ctx context.Context, service common.ServiceType) ([]common.Recommendation, error) {
+	return p.GetRecommendations(ctx, &common.RecommendationParams{Service: service})
+}
+
+func (p *peakRecommendationsClient) GetAllRecommendations(ctx context.Context) ([]common.Recommendation, error) {
+	return p.GetRecommendations(ctx, &common.RecommendationParams{})
+}
+
+// The fan-out must not exceed CUDLY_MAX_PARALLELISM concurrent subscriptions,
+// otherwise a tenant with many subscriptions issues unbounded ARM calls.
+func TestMultiSubscriptionRecommendationsClient_GetRecommendations_BoundsConcurrency(t *testing.T) {
+	const limit, subs = 3, 24
+	t.Setenv("CUDLY_MAX_PARALLELISM", fmt.Sprint(limit))
+
+	var inFlight, peak atomic.Int64
+	orig := newSubscriptionRecommendationsClientFn
+	t.Cleanup(func() { newSubscriptionRecommendationsClientFn = orig })
+	newSubscriptionRecommendationsClientFn = func(azcore.TokenCredential, string) (provider.RecommendationsClient, error) {
+		return &peakRecommendationsClient{inFlight: &inFlight, peak: &peak}, nil
+	}
+
+	accounts := make([]common.Account, subs)
+	for i := range accounts {
+		accounts[i] = common.Account{Provider: common.ProviderAzure, ID: fmt.Sprintf("sub-%d", i)}
+	}
+	client, err := NewMultiSubscriptionRecommendationsClient(&mockAzureTokenCredential{}, accounts)
+	require.NoError(t, err)
+
+	_, err = client.GetAllRecommendations(context.Background())
+	require.NoError(t, err)
+	assert.LessOrEqual(t, peak.Load(), int64(limit))
+	assert.Greater(t, peak.Load(), int64(1), "fan-out should still run subscriptions concurrently")
 }

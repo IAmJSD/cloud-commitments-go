@@ -98,6 +98,7 @@ func (m *mockRPValidate) ValidatePurchase(
 // --- constructor tests ---
 
 func TestNewClient(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub-123", "eastus")
 	require.NotNil(t, c)
 	assert.Equal(t, "sub-123", c.subscriptionID)
@@ -106,11 +107,13 @@ func TestNewClient(t *testing.T) {
 }
 
 func TestGetServiceType(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	assert.Equal(t, common.ServiceSavingsPlansAll, c.GetServiceType())
 }
 
 func TestGetRegion(t *testing.T) {
+	t.Parallel()
 	regions := []string{"eastus", "westeurope", "japaneast"}
 	for _, r := range regions {
 		c := NewClient(nil, "sub", r)
@@ -123,6 +126,7 @@ func TestGetRegion(t *testing.T) {
 // --- GetValidResourceTypes ---
 
 func TestGetValidResourceTypes(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	types, err := c.GetValidResourceTypes(context.Background())
 	require.NoError(t, err)
@@ -132,6 +136,7 @@ func TestGetValidResourceTypes(t *testing.T) {
 // --- GetExistingCommitments ---
 
 func TestGetExistingCommitments_Empty(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	c.SetListAllPager(&mockListAllPager{results: nil})
 
@@ -141,6 +146,7 @@ func TestGetExistingCommitments_Empty(t *testing.T) {
 }
 
 func TestGetExistingCommitments_Happy(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	expiry := now.Add(365 * 24 * time.Hour)
 	prov := armbillingbenefits.ProvisioningStateSucceeded
@@ -153,6 +159,7 @@ func TestGetExistingCommitments_Happy(t *testing.T) {
 	sp := &armbillingbenefits.SavingsPlanModel{
 		ID:   &spID,
 		Name: &spName,
+		SKU:  &armbillingbenefits.SKU{Name: toPtr("Compute_Savings_Plan")},
 		Properties: &armbillingbenefits.SavingsPlanModelProperties{
 			BillingScopeID:    toPtr("/subscriptions/sub-abc"),
 			ProvisioningState: &prov,
@@ -178,18 +185,21 @@ func TestGetExistingCommitments_Happy(t *testing.T) {
 	assert.Equal(t, common.CommitmentSavingsPlan, got.CommitmentType)
 	assert.Equal(t, common.ServiceSavingsPlansAll, got.Service)
 	assert.Equal(t, spID, got.CommitmentID)
-	assert.Equal(t, spName, got.ResourceType)
+	assert.Equal(t, "Compute", got.ResourceType)
 	assert.Equal(t, common.CommitmentStateActive, got.State)
 	assert.Equal(t, amount, got.Cost)
 	assert.False(t, got.StartDateIsDay, "EffectiveDateTime is a timestamp, not a calendar date")
 }
 
 func TestGetExistingCommitments_SubscriptionOwnership(t *testing.T) {
+	t.Parallel()
 	plan := func(id, scope string, applied armbillingbenefits.AppliedScopeType, subscription string) *armbillingbenefits.SavingsPlanModel {
 		return &armbillingbenefits.SavingsPlanModel{
-			ID: toPtr(id),
+			ID:  toPtr(id),
+			SKU: &armbillingbenefits.SKU{Name: toPtr("Compute_Savings_Plan")},
 			Properties: &armbillingbenefits.SavingsPlanModelProperties{
 				BillingScopeID:         toPtr(scope),
+				EffectiveDateTime:      toPtr(time.Now()),
 				AppliedScopeType:       toPtr(applied),
 				AppliedScopeProperties: &armbillingbenefits.AppliedScopeProperties{SubscriptionID: toPtr(subscription)},
 			},
@@ -259,6 +269,7 @@ func TestGetExistingCommitments_SubscriptionOwnership(t *testing.T) {
 }
 
 func TestGetExistingCommitments_PagerError(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	c.SetListAllPager(&mockListAllPager{err: errors.New("api error")})
 
@@ -282,6 +293,7 @@ func makeRec(term string) common.Recommendation {
 }
 
 func TestPurchaseCommitment_Success(t *testing.T) {
+	t.Parallel()
 	orderID := "/subscriptions/sub/providers/Microsoft.BillingBenefits/savingsPlanOrders/order1"
 	resp := armbillingbenefits.SavingsPlanOrderAliasClientCreateResponse{
 		SavingsPlanOrderAliasModel: armbillingbenefits.SavingsPlanOrderAliasModel{
@@ -301,6 +313,7 @@ func TestPurchaseCommitment_Success(t *testing.T) {
 }
 
 func TestPurchaseCommitment_BeginCreateError(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	c.SetOrderAliasClient(&mockOrderAliasClient{createErr: errors.New("begin failed")})
 
@@ -311,6 +324,7 @@ func TestPurchaseCommitment_BeginCreateError(t *testing.T) {
 }
 
 func TestPurchaseCommitment_PollError(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	c.SetOrderAliasClient(&mockOrderAliasClient{
 		createPoller: &mockPoller{err: errors.New("poll failed")},
@@ -323,6 +337,7 @@ func TestPurchaseCommitment_PollError(t *testing.T) {
 }
 
 func TestPurchaseCommitment_WrongDetails(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	rec := common.Recommendation{Term: "1yr", Details: nil}
 
@@ -333,6 +348,7 @@ func TestPurchaseCommitment_WrongDetails(t *testing.T) {
 }
 
 func TestPurchaseCommitment_BadTerm(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	result, err := c.PurchaseCommitment(context.Background(), makeRec("99yr"), common.PurchaseOptions{})
 	require.Error(t, err)
@@ -348,20 +364,22 @@ func TestPurchaseCommitment_BadTerm(t *testing.T) {
 // used a time.Now().UnixNano() alias name, so two re-drives produced two distinct
 // aliases (two purchases).
 func TestPurchaseCommitment_DeterministicAliasNameFromToken(t *testing.T) {
+	t.Parallel()
 	orderID := "/subscriptions/sub/providers/Microsoft.BillingBenefits/savingsPlanOrders/order1"
 	resp := armbillingbenefits.SavingsPlanOrderAliasClientCreateResponse{
 		SavingsPlanOrderAliasModel: armbillingbenefits.SavingsPlanOrderAliasModel{ID: &orderID},
 	}
 
 	token := common.DeriveIdempotencyToken("exec-1", 0)
-	wantName := common.ReservationOrderID(token, "")
+	wantName, err := common.OrderIDFromToken(token, "")
+	require.NoError(t, err)
 	require.NotEmpty(t, wantName, "token must yield a deterministic GUID")
 
 	// First drive.
 	mock1 := &mockOrderAliasClient{createPoller: &mockPoller{resp: resp}}
 	c1 := NewClient(nil, "sub", "eastus")
 	c1.SetOrderAliasClient(mock1)
-	_, err := c1.PurchaseCommitment(context.Background(), makeRec("1yr"), common.PurchaseOptions{IdempotencyToken: token})
+	_, err = c1.PurchaseCommitment(context.Background(), makeRec("1yr"), common.PurchaseOptions{IdempotencyToken: token})
 	require.NoError(t, err)
 	assert.Equal(t, wantName, mock1.capturedName)
 
@@ -375,9 +393,40 @@ func TestPurchaseCommitment_DeterministicAliasNameFromToken(t *testing.T) {
 		"re-drive with the same idempotency token must reuse the alias name (PUT is idempotent)")
 }
 
+// TestPurchaseCommitment_MalformedTokenFailsBeforePUT verifies a non-empty token
+// that yields no GUID is refused before BeginCreate. The case without an
+// injected alias client checks the error is the token error, not "failed to
+// create order alias client". Pre-fix the malformed token silently fell back to
+// a timestamp alias name and the purchase went ahead.
+func TestPurchaseCommitment_MalformedTokenFailsBeforePUT(t *testing.T) {
+	t.Parallel()
+	for _, token := range []string{"abc", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"} {
+		id := "/subscriptions/sub/providers/Microsoft.BillingBenefits/savingsPlanOrders/o"
+		mock := &mockOrderAliasClient{createPoller: &mockPoller{resp: armbillingbenefits.SavingsPlanOrderAliasClientCreateResponse{
+			SavingsPlanOrderAliasModel: armbillingbenefits.SavingsPlanOrderAliasModel{ID: &id},
+		}}}
+		c := NewClient(nil, "sub", "eastus")
+		c.SetOrderAliasClient(mock)
+		result, err := c.PurchaseCommitment(context.Background(), makeRec("1yr"), common.PurchaseOptions{IdempotencyToken: token})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, common.ErrInvalidIdempotencyToken)
+		assert.False(t, result.Success)
+		assert.Zero(t, mock.calls, "no BeginCreate for a malformed token")
+		assert.NotContains(t, err.Error(), token)
+	}
+
+	// No injected alias client and a nil credential: the token error must win
+	// over "failed to create order alias client".
+	c := NewClient(nil, "sub", "eastus")
+	_, err := c.PurchaseCommitment(context.Background(), makeRec("1yr"), common.PurchaseOptions{IdempotencyToken: "abc"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, common.ErrInvalidIdempotencyToken)
+}
+
 // TestPurchaseCommitment_EmptyTokenUsesTimestampName verifies the CLI path (no
 // idempotency token) retains a non-deterministic timestamp-based alias name.
 func TestPurchaseCommitment_EmptyTokenUsesTimestampName(t *testing.T) {
+	t.Parallel()
 	orderID := "/subscriptions/sub/providers/Microsoft.BillingBenefits/savingsPlanOrders/order1"
 	resp := armbillingbenefits.SavingsPlanOrderAliasClientCreateResponse{
 		SavingsPlanOrderAliasModel: armbillingbenefits.SavingsPlanOrderAliasModel{ID: &orderID},
@@ -394,6 +443,7 @@ func TestPurchaseCommitment_EmptyTokenUsesTimestampName(t *testing.T) {
 // --- ValidateOffering ---
 
 func TestValidateOffering_Valid(t *testing.T) {
+	t.Parallel()
 	valid := true
 	resp := armbillingbenefits.RPClientValidatePurchaseResponse{
 		SavingsPlanValidateResponse: armbillingbenefits.SavingsPlanValidateResponse{
@@ -411,6 +461,7 @@ func TestValidateOffering_Valid(t *testing.T) {
 }
 
 func TestValidateOffering_Invalid(t *testing.T) {
+	t.Parallel()
 	valid := false
 	reason := "unsupported SKU"
 	resp := armbillingbenefits.RPClientValidatePurchaseResponse{
@@ -430,6 +481,7 @@ func TestValidateOffering_Invalid(t *testing.T) {
 }
 
 func TestValidateOffering_APIError(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	c.SetRPValidateClient(&mockRPValidate{err: errors.New("rp error")})
 
@@ -439,6 +491,7 @@ func TestValidateOffering_APIError(t *testing.T) {
 }
 
 func TestValidateOffering_WrongDetails(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	rec := common.Recommendation{Term: "1yr", Details: nil}
 
@@ -450,6 +503,7 @@ func TestValidateOffering_WrongDetails(t *testing.T) {
 // --- GetOfferingDetails ---
 
 func TestGetOfferingDetails_1yr_NoUpfront(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	rec := common.Recommendation{
 		Term:          "1yr",
@@ -471,6 +525,7 @@ func TestGetOfferingDetails_1yr_NoUpfront(t *testing.T) {
 }
 
 func TestGetOfferingDetails_3yr_AllUpfront(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	rec := common.Recommendation{
 		Term:          "3yr",
@@ -488,6 +543,7 @@ func TestGetOfferingDetails_3yr_AllUpfront(t *testing.T) {
 }
 
 func TestGetOfferingDetails_5yr_AllUpfront(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	rec := common.Recommendation{
 		Term:          "5yr",
@@ -506,6 +562,7 @@ func TestGetOfferingDetails_5yr_AllUpfront(t *testing.T) {
 }
 
 func TestGetOfferingDetails_BadTerm(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	rec := common.Recommendation{
 		Term:          "99yr",
@@ -519,6 +576,7 @@ func TestGetOfferingDetails_BadTerm(t *testing.T) {
 }
 
 func TestGetOfferingDetails_BadPaymentOption(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	rec := common.Recommendation{
 		Term:          "1yr",
@@ -532,6 +590,7 @@ func TestGetOfferingDetails_BadPaymentOption(t *testing.T) {
 }
 
 func TestGetOfferingDetails_WrongDetails(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	rec := common.Recommendation{Term: "1yr", Details: nil}
 
@@ -566,6 +625,7 @@ func fakeHTTPResp(status int, body string) *http.Response {
 // bare &http.Client{}. Pre-fix this would have passed with a bare client that
 // allows IMDS connections (issue #1021 H1).
 func TestNewClient_UsesHardenedHTTPClient(t *testing.T) {
+	t.Parallel()
 	c := NewClient(nil, "sub", "eastus")
 	require.NotNil(t, c.httpClient)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://169.254.169.254/metadata/instance", nil)
@@ -583,6 +643,7 @@ func TestNewClient_UsesHardenedHTTPClient(t *testing.T) {
 // TestNewClientWithHTTP_NilFallbackIsHardened verifies that passing nil as the
 // httpClient falls back to httpclient.New() (SSRF-hardened), not bare &http.Client{}.
 func TestNewClientWithHTTP_NilFallbackIsHardened(t *testing.T) {
+	t.Parallel()
 	c := NewClientWithHTTP(nil, "sub", "eastus", nil)
 	require.NotNil(t, c.httpClient)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://169.254.169.254/metadata/instance", nil)
@@ -603,6 +664,7 @@ func TestNewClientWithHTTP_NilFallbackIsHardened(t *testing.T) {
 // silently corrupt downstream savings calculations (issue #1021 H3,
 // feedback_nullable_not_zero, feedback_empty_string_vs_error).
 func TestFetchOnDemandRate_NotFound(t *testing.T) {
+	t.Parallel()
 	h := &mockHTTPClient{}
 	t.Cleanup(func() { h.AssertExpectations(t) })
 	pricingResp1 := fakeHTTPResp(http.StatusOK, `{"Items":[],"NextPageLink":""}`)
@@ -620,6 +682,7 @@ func TestFetchOnDemandRate_NotFound(t *testing.T) {
 // TestFetchOnDemandRate_ReturnsFirstPositivePrice verifies the happy path:
 // when at least one item with RetailPrice > 0 exists, it is returned without error.
 func TestFetchOnDemandRate_ReturnsFirstPositivePrice(t *testing.T) {
+	t.Parallel()
 	h := &mockHTTPClient{}
 	t.Cleanup(func() { h.AssertExpectations(t) })
 	body := `{
@@ -644,6 +707,7 @@ func TestFetchOnDemandRate_ReturnsFirstPositivePrice(t *testing.T) {
 // with url.Values.Encode() so that spaces and quotes are percent-encoded rather
 // than passed raw in the URL (issue #1021 H3).
 func TestFetchOnDemandRate_URLEncoding(t *testing.T) {
+	t.Parallel()
 	h := &mockHTTPClient{}
 	t.Cleanup(func() { h.AssertExpectations(t) })
 	// Capture the request URL and assert it is properly encoded.
@@ -669,6 +733,7 @@ func TestFetchOnDemandRate_URLEncoding(t *testing.T) {
 // --- toAzureTerm ---
 
 func TestToAzureTerm(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected armbillingbenefits.Term
@@ -703,6 +768,7 @@ func TestToAzureTerm(t *testing.T) {
 // #142). Succeeded and the in-flight billing states are owned and must count in
 // duplicate detection; ended states must not.
 func TestAzureSavingsPlanState(t *testing.T) {
+	t.Parallel()
 	cases := map[armbillingbenefits.ProvisioningState]common.CommitmentState{
 		armbillingbenefits.ProvisioningStateSucceeded:        common.CommitmentStateActive,
 		armbillingbenefits.ProvisioningStateCreating:         common.CommitmentStatePaymentPending,
@@ -727,6 +793,7 @@ func currencyRec(currency string) common.Recommendation {
 }
 
 func TestCommitmentCurrency_SameAcrossPurchaseValidateOffering(t *testing.T) {
+	t.Parallel()
 	rec := currencyRec("JPY")
 	orderID := "order1"
 	alias := &mockOrderAliasClient{createPoller: &mockPoller{resp: armbillingbenefits.SavingsPlanOrderAliasClientCreateResponse{
@@ -751,6 +818,7 @@ func TestCommitmentCurrency_SameAcrossPurchaseValidateOffering(t *testing.T) {
 }
 
 func TestCommitmentCurrency_FailsClosed(t *testing.T) {
+	t.Parallel()
 	for _, bad := range []string{"", " eur", "EURO", "E1R", "us", "ınr", "ſek"} {
 		t.Run(bad, func(t *testing.T) {
 			alias := &mockOrderAliasClient{}
@@ -772,9 +840,18 @@ func TestCommitmentCurrency_FailsClosed(t *testing.T) {
 }
 
 func TestCommitmentCurrency_LowercaseNormalised(t *testing.T) {
+	t.Parallel()
 	rp := &mockRPValidate{}
 	c := NewClient(nil, "sub", "eastus")
 	c.SetRPValidateClient(rp)
 	require.NoError(t, c.ValidateOffering(context.Background(), currencyRec("eur")))
 	assert.Equal(t, "EUR", *rp.captured.Benefits[0].Properties.Commitment.CurrencyCode)
+}
+
+func TestFetchOnDemandRate_RejectsInjectedPlanType(t *testing.T) {
+	t.Parallel()
+	c := NewClientWithHTTP(nil, "sub", "eastus", &mockHTTPClient{})
+	_, err := c.fetchOnDemandRate(context.Background(), "x' or armSkuName ne '")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Retail Prices filter")
 }

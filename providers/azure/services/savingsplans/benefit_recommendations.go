@@ -3,6 +3,7 @@ package savingsplans
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/recommendations"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/slot"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/services/internal/reservations"
 )
 
@@ -141,13 +143,29 @@ func (c *Client) getBenefitRecommendations(ctx context.Context, params *common.R
 		if err != nil {
 			return nil, fmt.Errorf("azure savings plan recommendations (term %s): %w", term, err)
 		}
-		for i := range rows {
-			rec, err := convertBenefitRecommendation(&rows[i], c.subscriptionID)
-			if err != nil {
-				return nil, fmt.Errorf("azure savings plan recommendation %q (term %s): %w", rows[i].ID, term, err)
-			}
-			recs = append(recs, *rec)
+		converted, err := c.convertBenefitRows(ctx, rows, term)
+		if err != nil {
+			return nil, err
 		}
+		recs = append(recs, converted...)
+	}
+	return recs, nil
+}
+
+// convertBenefitRows maps rows to recommendations. A non-USD row is recorded in
+// the context's SkipLog and dropped; any other invalid row fails the call.
+func (c *Client) convertBenefitRows(ctx context.Context, rows []benefitRecommendation, term string) ([]common.Recommendation, error) {
+	recs := make([]common.Recommendation, 0, len(rows))
+	for i := range rows {
+		rec, err := convertBenefitRecommendation(&rows[i], c.subscriptionID)
+		if errors.Is(err, recommendations.ErrNotUSD) {
+			recommendations.RecordSkip(ctx, "savingsplans", fmt.Errorf("subscription %s recommendation %q (term %s): %w", c.subscriptionID, rows[i].ID, term, err))
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("azure savings plan recommendation %q (term %s): %w", rows[i].ID, term, err)
+		}
+		recs = append(recs, *rec)
 	}
 	return recs, nil
 }
@@ -162,7 +180,9 @@ func (c *Client) fetchBenefitPages(ctx context.Context, bearer, firstURL string)
 		if err := requireARMURL(next); err != nil {
 			return nil, fmt.Errorf("page %d: %w", pageIdx, err)
 		}
-		page, err := c.fetchBenefitPage(ctx, bearer, next, pageIdx)
+		page, err := slot.Do(ctx, func() (*benefitRecsPage, error) {
+			return c.fetchBenefitPage(ctx, bearer, next, pageIdx)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -236,7 +256,7 @@ func convertBenefitRecommendation(r *benefitRecommendation, subscriptionID strin
 		Provider:             common.ProviderAzure,
 		Account:              subscriptionID,
 		Service:              common.ServiceSavingsPlansAll,
-		ResourceType:         "Compute",
+		ResourceType:         computeResourceType,
 		Count:                1,
 		CommitmentType:       common.CommitmentSavingsPlan,
 		Term:                 term,
@@ -276,6 +296,9 @@ func validateBenefitRow(r *benefitRecommendation) (string, error) {
 		return "", fmt.Errorf("unsupported commitmentGranularity %q", p.CommitmentGranularity)
 	case !currencyCodePattern.MatchString(p.CurrencyCode):
 		return "", fmt.Errorf("currencyCode %q is not a 3-letter code", p.CurrencyCode)
+	}
+	if err := recommendations.RequireUSDCode(p.CurrencyCode); err != nil {
+		return "", err
 	}
 	if err := validateBenefitNumbers(p); err != nil {
 		return "", err

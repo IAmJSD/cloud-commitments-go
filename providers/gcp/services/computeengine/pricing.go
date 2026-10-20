@@ -16,8 +16,6 @@ const (
 	// computeServiceID is the Cloud Billing catalog service for Compute Engine.
 	computeServiceID = "services/6F81-5844-456A"
 
-	hoursPerYear = 8760.0
-
 	usageUnitHour    = "h"
 	usageUnitGiBHour = "GiBy.h"
 
@@ -298,7 +296,7 @@ func (c *Client) getComputePricing(ctx context.Context, machineType, region stri
 		return nil, err
 	}
 
-	hours := hoursPerYear * float64(termYears)
+	hours := common.HoursPerYear * float64(termYears)
 	commitHourly := float64(res.vcpus)*rates.commitment.cpu + res.memoryGiB*rates.commitment.ram
 	onDemandHourly := float64(res.vcpus)*rates.onDemand.cpu + res.memoryGiB*rates.onDemand.ram
 
@@ -323,7 +321,7 @@ func (c *Client) listComputeSKUs(ctx context.Context) ([]*cloudbilling.Sku, erro
 	if err != nil {
 		return nil, err
 	}
-	resp, err := svc.ListSKUs(computeServiceID)
+	resp, err := svc.ListSKUs(ctx, computeServiceID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list SKUs: %w", err)
 	}

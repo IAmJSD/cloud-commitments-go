@@ -35,7 +35,7 @@ func (c *Client) parseRecommendations(ctx context.Context, awsRecs []types.Reser
 				incomplete.FailedDetails++
 				incomplete.Causes = append(incomplete.Causes, fmt.Errorf("service %s term %s payment %s block %d detail %d: %w",
 					params.Service, params.Term, params.PaymentOption, r, i, err))
-				log.Printf("Warning: Failed to parse recommendation detail %d: %v", i, err)
+				log.Printf("Warning: Failed to parse recommendation detail %d, skipping (provider=aws service=%s): %v", i, params.Service, err)
 				continue
 			}
 
@@ -65,6 +65,10 @@ func (c *Client) parseRecommendationDetail(ctx context.Context, details *types.R
 		Timestamp:      time.Now(),
 	}
 
+	if err := requireUSD(aws.ToString(details.CurrencyCode)); err != nil {
+		return nil, fmt.Errorf("account %s: %w", aws.ToString(details.AccountId), err)
+	}
+
 	// Parse recommended quantity. RecommendedCount preserves AWS's pre-sizing
 	// count so the CSV can show what AWS proposed alongside what --coverage /
 	// --target-coverage chose; Count is the working value the sizing step
@@ -90,6 +94,12 @@ func (c *Client) parseRecommendationDetail(ctx context.Context, details *types.R
 	// Parse AWS-provided cost details
 	if err := c.parseAWSCostDetails(rec, details); err != nil {
 		return nil, fmt.Errorf("failed to parse AWS cost details: %w", err)
+	}
+
+	// Parse AWS's own break-even estimate so common.BreakEven prefers it over
+	// the upfront/savings derivation
+	if err := parseBreakEvenMonths(rec, details); err != nil {
+		return nil, fmt.Errorf("failed to parse break-even: %w", err)
 	}
 
 	// Parse RI utilization signals used by --target-coverage sizing
@@ -229,6 +239,27 @@ func (c *Client) parseAWSCostDetails(rec *common.Recommendation, details *types.
 		currency = ""
 	}
 	rec.CommitmentCurrency = commitmentCurrency(currency, rec.PaymentOption, details.UpfrontCost != nil, rec.CommitmentCost, rec.RecurringMonthlyCost)
+	return nil
+}
+
+// parseBreakEvenMonths copies Cost Explorer's EstimatedBreakEvenInMonths into
+// rec.BreakEvenMonths. common.BreakEven uses a positive provider value as is
+// and only derives one from upfront and savings when it is unset, so AWS's
+// own figure wins over the derivation, whose net-of-amortized-upfront reading
+// of EstimatedMonthlySavingsAmount the AWS docs never state.
+//
+// An absent field leaves BreakEvenMonths at 0 ("unknown", derivation
+// fallback). "0" is stored as 0 too, which BreakEven reads the same way, so a
+// zero never short-circuits the derivation for an RI that does have an
+// upfront. A present value that is unparsable, empty, non-finite or negative
+// fails the detail like the other CE numeric fields: it is never replaced by
+// a fabricated figure.
+func parseBreakEvenMonths(rec *common.Recommendation, details *types.ReservationPurchaseRecommendationDetail) error {
+	months, err := parseOptionalFloat("EstimatedBreakEvenInMonths", details.EstimatedBreakEvenInMonths)
+	if err != nil {
+		return err
+	}
+	rec.BreakEvenMonths = months
 	return nil
 }
 

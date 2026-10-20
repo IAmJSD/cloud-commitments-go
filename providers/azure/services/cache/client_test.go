@@ -157,6 +157,7 @@ func createSampleRedisPricingResponse() string {
 }
 
 func TestNewClient(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 
 	require.NotNil(t, client)
@@ -166,11 +167,13 @@ func TestNewClient(t *testing.T) {
 }
 
 func TestCacheClient_GetServiceType(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "sub", "region")
 	assert.Equal(t, common.ServiceCache, client.GetServiceType())
 }
 
 func TestCacheClient_GetRegion(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		region   string
@@ -202,6 +205,7 @@ func TestCacheClient_GetRegion(t *testing.T) {
 }
 
 func TestCacheClient_GetValidResourceTypes_Fallback(t *testing.T) {
+	t.Parallel()
 	// When API calls fail, GetValidResourceTypes should return common SKUs
 	client := NewClient(nil, "invalid-subscription", "eastus")
 	client.SetRedisCachesPager(&MockRedisCachesPager{})
@@ -217,6 +221,7 @@ func TestCacheClient_GetValidResourceTypes_Fallback(t *testing.T) {
 }
 
 func TestCacheClient_ValidateOffering_InvalidSKU(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "sub", "eastus")
 	client.SetRedisCachesPager(&MockRedisCachesPager{})
 	rec := common.Recommendation{
@@ -229,6 +234,7 @@ func TestCacheClient_ValidateOffering_InvalidSKU(t *testing.T) {
 }
 
 func TestAzureRetailPriceStructure(t *testing.T) {
+	t.Parallel()
 	price := AzureRetailPrice{
 		Items: []azpricing.RetailPriceItem{
 			{
@@ -253,22 +259,20 @@ func TestAzureRetailPriceStructure(t *testing.T) {
 }
 
 func TestRedisPricingStructure(t *testing.T) {
+	t.Parallel()
 	pricing := RedisPricing{
-		HourlyRate:        0.50,
-		ReservationPrice:  4380.0, // 1 year
-		OnDemandPrice:     8760.0, // 1 year at $1/hour
-		Currency:          "USD",
-		SavingsPercentage: 50.0,
+		HourlyRate:       0.50,
+		ReservationPrice: 4380.0, // 1 year
+		Currency:         "USD",
 	}
 
 	assert.Equal(t, 0.50, pricing.HourlyRate)
 	assert.Equal(t, 4380.0, pricing.ReservationPrice)
-	assert.Equal(t, 8760.0, pricing.OnDemandPrice)
 	assert.Equal(t, "USD", pricing.Currency)
-	assert.Equal(t, 50.0, pricing.SavingsPercentage)
 }
 
 func TestNewClientWithHTTP(t *testing.T) {
+	t.Parallel()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
 
@@ -279,6 +283,7 @@ func TestNewClientWithHTTP(t *testing.T) {
 }
 
 func TestCacheClient_GetOfferingDetails_WithMock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
@@ -306,6 +311,7 @@ func TestCacheClient_GetOfferingDetails_WithMock(t *testing.T) {
 }
 
 func TestCacheClient_GetOfferingDetails_3YearTerm(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
@@ -332,6 +338,7 @@ func TestCacheClient_GetOfferingDetails_3YearTerm(t *testing.T) {
 }
 
 func TestCacheClient_GetOfferingDetails_NoUpfront(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
@@ -358,6 +365,7 @@ func TestCacheClient_GetOfferingDetails_NoUpfront(t *testing.T) {
 }
 
 func TestCacheClient_GetOfferingDetails_APIError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
@@ -382,6 +390,7 @@ func TestCacheClient_GetOfferingDetails_APIError(t *testing.T) {
 }
 
 func TestCacheClient_GetOfferingDetails_NoPricing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
@@ -411,6 +420,7 @@ func TestCacheClient_GetOfferingDetails_NoPricing(t *testing.T) {
 // multiplier (issue #1020 H4). Pre-fix this would have silently surfaced a
 // fabricated TotalCost/SavingsPercentage as a real quote.
 func TestCacheClient_GetOfferingDetails_NoReservationPricing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	onDemandOnly := `{
@@ -446,6 +456,7 @@ func TestCacheClient_GetOfferingDetails_NoReservationPricing(t *testing.T) {
 }
 
 func TestCacheClient_GetExistingCommitments_Empty(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -462,6 +473,7 @@ func TestCacheClient_GetExistingCommitments_Empty(t *testing.T) {
 }
 
 func TestCacheClient_ValidateOffering_ValidSKU(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 	client.SetRedisCachesPager(&MockRedisCachesPager{})
@@ -476,6 +488,7 @@ func TestCacheClient_ValidateOffering_ValidSKU(t *testing.T) {
 }
 
 func TestCacheClient_ValidateOffering_CaseInsensitive(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	t.Run("case_insensitive", func(t *testing.T) {
@@ -496,6 +509,7 @@ func TestCacheClient_ValidateOffering_CaseInsensitive(t *testing.T) {
 }
 
 func TestCacheClient_GetRecommendations_WithMockPager(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -518,6 +532,7 @@ func TestCacheClient_GetRecommendations_WithMockPager(t *testing.T) {
 }
 
 func TestCacheClient_GetRecommendations_MultiplePages(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -545,6 +560,7 @@ func TestCacheClient_GetRecommendations_MultiplePages(t *testing.T) {
 }
 
 func TestCacheClient_GetExistingCommitments_WithMockPager(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -585,6 +601,7 @@ func TestCacheClient_GetExistingCommitments_WithMockPager(t *testing.T) {
 // rows for the same ReservationID (simulating a reservation held across
 // three usage days) must surface as a single commitment, not three.
 func TestCacheClient_GetExistingCommitments_DedupesDailyUsageRows(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -617,6 +634,7 @@ func TestCacheClient_GetExistingCommitments_DedupesDailyUsageRows(t *testing.T) 
 }
 
 func TestCacheClient_GetExistingCommitments_FilterNonRedis(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -658,6 +676,7 @@ func TestCacheClient_GetExistingCommitments_FilterNonRedis(t *testing.T) {
 }
 
 func TestCacheClient_GetExistingCommitments_NilProperties(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -684,6 +703,7 @@ func TestCacheClient_GetExistingCommitments_NilProperties(t *testing.T) {
 }
 
 func TestCacheClient_GetExistingCommitments_PagerError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -705,6 +725,7 @@ func TestCacheClient_GetExistingCommitments_PagerError(t *testing.T) {
 }
 
 func TestCacheClient_GetValidResourceTypes_WithMockPager(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -742,6 +763,7 @@ func TestCacheClient_GetValidResourceTypes_WithMockPager(t *testing.T) {
 }
 
 func TestCacheClient_GetValidResourceTypes_MultipleCaches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -791,6 +813,7 @@ func TestCacheClient_GetValidResourceTypes_MultipleCaches(t *testing.T) {
 }
 
 func TestCacheClient_GetValidResourceTypes_PagerError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -811,6 +834,7 @@ func TestCacheClient_GetValidResourceTypes_PagerError(t *testing.T) {
 }
 
 func TestCacheClient_GetValidResourceTypes_EmptyResults(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -834,6 +858,7 @@ func TestCacheClient_GetValidResourceTypes_EmptyResults(t *testing.T) {
 }
 
 func TestCacheClient_SetterMethods(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 
 	// Test SetRecommendationsPager
@@ -853,6 +878,7 @@ func TestCacheClient_SetterMethods(t *testing.T) {
 }
 
 func TestCacheClient_GetCommonSKUs(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	skus := client.getCommonSKUs()
 
@@ -867,6 +893,7 @@ func TestCacheClient_GetCommonSKUs(t *testing.T) {
 // TestCacheClient_ConvertAzureRedisRecommendation_NilGuards pins the new
 // contract: unusable SDK payloads produce a nil *Recommendation.
 func TestCacheClient_ConvertAzureRedisRecommendation_NilGuards(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	assert.Nil(t, client.convertAzureRedisRecommendation(context.Background(), nil))
 }
@@ -876,6 +903,7 @@ func TestCacheClient_ConvertAzureRedisRecommendation_NilGuards(t *testing.T) {
 // Cache-service-specific constants. An empty SKU catalog (no caches in
 // the subscription) is the "no signal" baseline — Shards stays 0.
 func TestCacheClient_ConvertAzureRedisRecommendation_PopulatesAllFields(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	// Inject empty mock pager so the cachedSKULookup hits the lazy-fetch
 	// codepath without making a real Azure API call.
@@ -920,6 +948,7 @@ func TestCacheClient_ConvertAzureRedisRecommendation_PopulatesAllFields(t *testi
 // SKU as the recommendation. Single ListBySubscription call per client
 // lifetime feeds many converter calls; this test pins the contract.
 func TestCacheClient_ConvertAzureRedisRecommendation_PopulatesShardsFromSKUCache(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 
 	premiumName := armredis.SKUNamePremium
@@ -971,6 +1000,7 @@ func TestCacheClient_ConvertAzureRedisRecommendation_PopulatesShardsFromSKUCache
 // populated from the recommendation payload as before. This is the
 // graceful-degradation contract the issue asks for.
 func TestCacheClient_ConvertAzureRedisRecommendation_PagerErrorFallsBack(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	mockPager := &MockRedisCachesPager{
 		pages: []armredis.ClientListBySubscriptionResponse{{}},
@@ -997,6 +1027,7 @@ func TestCacheClient_ConvertAzureRedisRecommendation_PagerErrorFallsBack(t *test
 // exactly ONE catalog fetch. The mock pager counts pages served; the
 // assertion verifies the count stays at 1 after multiple lookups.
 func TestCacheClient_CachedSKULookup_FetchedOnce(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 
 	premiumName := armredis.SKUNamePremium
@@ -1057,6 +1088,7 @@ func calcPriceRespJSON(orderID string) string {
 }
 
 func TestCacheClient_PurchaseCommitment_Success(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1095,6 +1127,7 @@ func TestCacheClient_PurchaseCommitment_Success(t *testing.T) {
 }
 
 func TestCacheClient_PurchaseCommitment_3YearTerm(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1131,6 +1164,7 @@ func TestCacheClient_PurchaseCommitment_3YearTerm(t *testing.T) {
 }
 
 func TestCacheClient_PurchaseCommitment_Accepted(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1166,6 +1200,7 @@ func TestCacheClient_PurchaseCommitment_Accepted(t *testing.T) {
 }
 
 func TestCacheClient_PurchaseCommitment_TokenError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{err: errors.New("token error")}
@@ -1185,6 +1220,7 @@ func TestCacheClient_PurchaseCommitment_TokenError(t *testing.T) {
 }
 
 func TestCacheClient_PurchaseCommitment_HTTPError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1208,6 +1244,7 @@ func TestCacheClient_PurchaseCommitment_HTTPError(t *testing.T) {
 }
 
 func TestCacheClient_PurchaseCommitment_BadStatus(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1249,6 +1286,7 @@ func TestCacheClient_PurchaseCommitment_BadStatus(t *testing.T) {
 // the call would succeed without the tag and re-driven purchases would
 // duplicate reservations server-side.
 func TestCacheClient_PurchaseCommitment_TagInjection(t *testing.T) {
+	t.Parallel()
 	const orderID = "cache-tag-test"
 	const source = common.PurchaseSourceWeb
 
@@ -1299,6 +1337,7 @@ func TestCacheClient_PurchaseCommitment_TagInjection(t *testing.T) {
 // ReservationBillingPlan value in the purchase body rather than silently
 // defaulting to Azure's Upfront behavior for a no-upfront/monthly rec.
 func TestCacheClient_PurchaseCommitment_BillingPlan(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name          string
 		paymentOption string
@@ -1377,6 +1416,7 @@ func TestCacheClient_PurchaseCommitment_BillingPlan(t *testing.T) {
 // signal CUDly controls -- proceeding without it would allow a re-driven
 // purchase to create a duplicate reservation.
 func TestCacheClient_PurchaseCommitment_RequiresSource(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1395,6 +1435,7 @@ func TestCacheClient_PurchaseCommitment_RequiresSource(t *testing.T) {
 // against regression: displayName in the calculatePrice body must match
 // [A-Za-z0-9_-]{1,64} (Azure rejects DisplayNameInvalid otherwise).
 func TestCacheClient_PurchaseCommitment_DisplayNameConformsToAzureAllowlist(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1464,6 +1505,7 @@ func (p *infiniteRedisCachesPager) NextPage(_ context.Context) (armredis.ClientL
 // canceled context is treated as a hard stop and surfaces an error rather than
 // returning a silent partial result (feedback_ctx_cancel_terminal).
 func TestCacheClient_GetValidResourceTypes_CtxCancelReturnsError(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
@@ -1478,6 +1520,7 @@ func TestCacheClient_GetValidResourceTypes_CtxCancelReturnsError(t *testing.T) {
 // page budget is enforced: an unbounded pager is stopped after maxCachesPages
 // iterations and the function returns an error rather than looping forever.
 func TestCacheClient_GetValidResourceTypes_PageCapFires(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	client.SetRedisCachesPager(&infiniteRedisCachesPager{})
 
@@ -1487,4 +1530,23 @@ func TestCacheClient_GetValidResourceTypes_PageCapFires(t *testing.T) {
 	skus, err := client.GetValidResourceTypes(context.Background())
 	require.NoError(t, err)
 	require.NotEmpty(t, skus, "page cap must trigger fallback to common SKUs, not an empty result")
+}
+
+// TestNewClientWithHTTP_NilFallbackIsHardened verifies that passing nil as the
+// httpClient falls back to the SSRF-hardened httpclient.New(), which rejects
+// IMDS connections, instead of leaving a nil client that panics on first use.
+func TestNewClientWithHTTP_NilFallbackIsHardened(t *testing.T) {
+	t.Parallel()
+	c := NewClientWithHTTP(nil, "sub-123", "eastus", nil)
+	require.NotNil(t, c.httpClient)
+	require.NotEqual(t, http.DefaultClient, c.httpClient,
+		"nil fallback must never be http.DefaultClient")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://169.254.169.254/metadata/instance", nil)
+	require.NoError(t, err)
+	resp, err := c.httpClient.Do(req)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	require.Error(t, err, "nil-fallback client must reject IMDS connections")
+	assert.Contains(t, err.Error(), "blocked")
 }

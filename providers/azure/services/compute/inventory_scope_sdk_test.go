@@ -70,43 +70,85 @@ func sdkInventoryClient(t *testing.T, subscriptionID string, transport inventory
 
 type sdkChild struct {
 	id, resourceType, scopeType, scopes, region, state string
-	quantity                                           int
+	// billingScope is emitted verbatim as properties.billingScopeId when
+	// non-empty (a JSON literal, e.g. `"/subscriptions/sub-a"` or `null`).
+	billingScope string
+	quantity     int
 }
 
 func sdkReservationChild(child sdkChild, purchaseDate, expiryDate time.Time) string {
-	return fmt.Sprintf(`{"id":%q,"location":%q,"sku":{"name":"Standard_D2s_v3"},"properties":{"reservedResourceType":%q,"provisioningState":%q,"appliedScopeType":%s,"appliedScopes":%s,"quantity":%d,"purchaseDate":%q,"expiryDate":%q}}`,
+	billing := ""
+	if child.billingScope != "" {
+		billing = `"billingScopeId":` + child.billingScope + `,`
+	}
+	return fmt.Sprintf(`{"id":%q,"location":%q,"sku":{"name":"Standard_D2s_v3"},"properties":{%s"reservedResourceType":%q,"provisioningState":%q,"appliedScopeType":%s,"appliedScopes":%s,"quantity":%d,"purchaseDate":%q,"expiryDate":%q}}`,
 		"/providers/Microsoft.Capacity/reservationOrders/order-one/reservations/"+child.id,
-		child.region, child.resourceType, child.state, child.scopeType, child.scopes, child.quantity,
+		child.region, billing, child.resourceType, child.state, child.scopeType, child.scopes, child.quantity,
 		purchaseDate.UTC().Format(time.DateOnly), expiryDate.UTC().Format(time.DateOnly))
 }
 
-func TestGetExistingCommitmentsSDKSharedVMFailsClosed(t *testing.T) {
-	now := time.Now()
-	child := sdkReservationChild(sdkChild{
-		id: "child-one", resourceType: "VirtualMachines", scopeType: `"Shared"`, scopes: `null`,
-		region: "eastus", state: "Succeeded", quantity: 1,
-	}, now, now.AddDate(1, 0, 0))
-	for _, subscriptionID := range []string{"sub-a", "sub-b"} {
-		t.Run(subscriptionID, func(t *testing.T) {
-			client := sdkInventoryClient(t, subscriptionID, inventorySDKTransport{child: child})
+// Issue #293: CUDly buys VM reservations with Shared scope and
+// billingScopeId=/subscriptions/{sub}. Such a reservation is attributed to the
+// subscription that bought it (so its duplicate guard keeps working) and to no
+// other subscription (so one Shared quantity is never credited twice). A
+// Shared reservation whose purchaser cannot be identified still fails closed.
+func TestGetExistingCommitmentsSDKSharedVMAttribution(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	cases := []struct {
+		name         string
+		billingScope string
+		subscription string
+		wantErr      string
+		wantCount    int
+	}{
+		{name: "purchaser counts it", billingScope: `"/subscriptions/sub-a"`, subscription: "sub-a", wantCount: 1},
+		{name: "purchaser match ignores case", billingScope: `"/Subscriptions/SUB-A"`, subscription: "sub-a", wantCount: 1},
+		{name: "other subscription skips it", billingScope: `"/subscriptions/sub-a"`, subscription: "sub-b"},
+		{name: "missing billing scope fails closed", subscription: "sub-a", wantErr: "cannot attribute"},
+		{name: "null billing scope fails closed", billingScope: `null`, subscription: "sub-a", wantErr: "cannot attribute"},
+		{name: "non-subscription billing scope fails closed", billingScope: `"/providers/Microsoft.Billing/billingAccounts/x"`, subscription: "sub-a", wantErr: "cannot attribute"},
+		{name: "resource-group billing scope fails closed", billingScope: `"/subscriptions/sub-a/resourceGroups/rg"`, subscription: "sub-a", wantErr: "cannot attribute"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			child := sdkReservationChild(sdkChild{
+				id: "child-one", resourceType: "VirtualMachines", scopeType: `"Shared"`, scopes: `null`,
+				billingScope: tc.billingScope, region: "eastus", state: "Succeeded", quantity: 1,
+			}, now, now.AddDate(1, 0, 0))
+			client := sdkInventoryClient(t, tc.subscription, inventorySDKTransport{child: child})
 			inventory, err := client.GetExistingCommitments(context.Background())
-			require.ErrorContains(t, err, "cannot attribute")
-			require.Nil(t, inventory)
-
 			recommendation := common.Recommendation{
 				Provider: common.ProviderAzure, Service: common.ServiceCompute,
-				Account: subscriptionID, Region: "eastus", ResourceType: "Standard_D2s_v3", Count: 1,
+				Account: tc.subscription, Region: "eastus", ResourceType: "Standard_D2s_v3", Count: 1,
 			}
-			passed, filtered, err := recfilter.NewDuplicateChecker(24).AdjustRecommendationsForExisting(
+			passed, filtered, guardErr := recfilter.NewDuplicateChecker(24).AdjustRecommendationsForExisting(
 				context.Background(), []common.Recommendation{recommendation}, client)
-			require.ErrorContains(t, err, "cannot attribute")
-			require.Len(t, passed, 1)
-			require.Empty(t, filtered)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				require.Nil(t, inventory)
+				require.ErrorContains(t, guardErr, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.NoError(t, guardErr)
+			require.Len(t, inventory, tc.wantCount)
+			if tc.wantCount == 0 {
+				require.Len(t, passed, 1)
+				require.Empty(t, filtered)
+				return
+			}
+			require.Equal(t, tc.subscription, inventory[0].Account)
+			require.Equal(t, 1, inventory[0].Count)
+			require.Equal(t, common.CommitmentStateActive, inventory[0].State)
+			require.Empty(t, passed, "a just-bought Shared reservation must suppress the same recommendation")
+			require.Len(t, filtered, 1)
 		})
 	}
 }
 
 func TestGetExistingCommitmentsSDKScopeBoundary(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	cases := []struct {
 		name         string
@@ -152,6 +194,7 @@ func TestGetExistingCommitmentsSDKScopeBoundary(t *testing.T) {
 }
 
 func TestGetExistingCommitmentsSDKSplitSingleAndTerminal(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	first := sdkReservationChild(sdkChild{
 		id: "child-a", resourceType: "VirtualMachines", scopeType: `"Single"`, scopes: `["/subscriptions/sub-a"]`,
@@ -188,6 +231,7 @@ func TestGetExistingCommitmentsSDKSplitSingleAndTerminal(t *testing.T) {
 }
 
 func TestGetExistingCommitmentsSDKPageFailureFailsClosed(t *testing.T) {
+	t.Parallel()
 	client := sdkInventoryClient(t, "sub-a", inventorySDKTransport{reservationStatus: http.StatusInternalServerError})
 	inventory, err := client.GetExistingCommitments(context.Background())
 	require.ErrorContains(t, err, "list reservations")
@@ -202,6 +246,7 @@ func TestGetExistingCommitmentsSDKPageFailureFailsClosed(t *testing.T) {
 }
 
 func TestGetExistingCommitmentsSDKExpiryTodayFailsClosed(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	child := sdkChild{
 		id: "expiry-today", resourceType: "VirtualMachines", scopeType: `"Single"`, scopes: `["/subscriptions/sub-a"]`,
@@ -230,6 +275,7 @@ func TestGetExistingCommitmentsSDKExpiryTodayFailsClosed(t *testing.T) {
 }
 
 func TestGetExistingCommitmentsSDKExpiryDateControls(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	cases := []struct {
 		name         string

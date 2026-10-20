@@ -3,9 +3,6 @@ package recommendations
 import (
 	"context"
 	"fmt"
-	"log"
-	"math"
-	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -64,6 +61,7 @@ func (c *Client) GetRIUtilization(ctx context.Context, lookbackDays int, region 
 	}
 
 	agg := make(map[string]*riAccumulator)
+	page := 0
 
 	err := paginateCE(ctx, maxUtilizationPages, "utilization", func(token *string) (*string, error) {
 		input.NextPageToken = token
@@ -71,9 +69,12 @@ func (c *Client) GetRIUtilization(ctx context.Context, lookbackDays int, region 
 		if err != nil {
 			return nil, err
 		}
+		page++
 		for _, group := range result.UtilizationsByTime {
 			for _, detail := range group.Groups {
-				aggregateUtilizationDetail(agg, detail)
+				if err := aggregateUtilizationDetail(agg, detail); err != nil {
+					return nil, fmt.Errorf("utilization page %d: %w", page, err)
+				}
 			}
 		}
 		return result.NextPageToken, nil
@@ -146,43 +147,53 @@ func (c *Client) fetchUtilizationPage(ctx context.Context, input *costexplorer.G
 }
 
 // aggregateUtilizationDetail accumulates hours from a single utilization detail
-// into the per-RI aggregation map.
-func aggregateUtilizationDetail(agg map[string]*riAccumulator, detail types.ReservationUtilizationGroup) {
+// into the per-RI aggregation map. A detail with no Utilization, or with all
+// three hours fields omitted, carries no usage signal and is skipped without
+// creating an accumulator. Otherwise all three fields are required: a missing
+// one would read as 0 hours and fake a utilization percent. A present but
+// unparseable, non-finite or negative value is an error for the same reason.
+func aggregateUtilizationDetail(agg map[string]*riAccumulator, detail types.ReservationUtilizationGroup) error {
 	if detail.Key == nil || detail.Utilization == nil {
-		return
+		return nil
+	}
+	id := aws.ToString(detail.Key)
+	u := detail.Utilization
+	if u.PurchasedHours == nil && u.TotalActualHours == nil && u.UnusedHours == nil {
+		return nil
+	}
+	purchased, actual, unused, err := parseUtilizationHours(u)
+	if err != nil {
+		return fmt.Errorf("reservation %s: %w", id, err)
 	}
 
-	id := aws.ToString(detail.Key)
 	a, ok := agg[id]
 	if !ok {
 		a = &riAccumulator{}
 		agg[id] = a
 	}
-
-	if detail.Utilization.PurchasedHours != nil {
-		a.purchasedHours += parseFloat(aws.ToString(detail.Utilization.PurchasedHours))
-	}
-	if detail.Utilization.TotalActualHours != nil {
-		a.totalActualHours += parseFloat(aws.ToString(detail.Utilization.TotalActualHours))
-	}
-	if detail.Utilization.UnusedHours != nil {
-		a.unusedHours += parseFloat(aws.ToString(detail.Utilization.UnusedHours))
-	}
+	a.purchasedHours += purchased
+	a.totalActualHours += actual
+	a.unusedHours += unused
+	return nil
 }
 
-func parseFloat(s string) float64 {
-	f, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		log.Printf("warning: failed to parse float %q: %v", s, err)
-		return 0
+// parseUtilizationHours strictly parses the three required hours fields.
+func parseUtilizationHours(u *types.ReservationAggregates) (purchased, actual, unused float64, err error) {
+	for _, f := range []struct {
+		name string
+		src  *string
+		dst  *float64
+	}{
+		{"PurchasedHours", u.PurchasedHours, &purchased},
+		{"TotalActualHours", u.TotalActualHours, &actual},
+		{"UnusedHours", u.UnusedHours, &unused},
+	} {
+		if f.src == nil {
+			return 0, 0, 0, fmt.Errorf("%s is missing while other utilization hours are present", f.name)
+		}
+		if *f.dst, err = parseOptionalFloat(f.name, f.src); err != nil {
+			return 0, 0, 0, err
+		}
 	}
-	// Degrade non-finite values to 0: strconv.ParseFloat accepts "NaN"/"Inf"
-	// with a nil error, and a single NaN accumulated into purchasedHours /
-	// totalActualHours / unusedHours would poison every downstream utilization
-	// aggregate (NaN propagates through all arithmetic).
-	if math.IsNaN(f) || math.IsInf(f, 0) {
-		log.Printf("warning: non-finite float %q treated as 0", s)
-		return 0
-	}
-	return f
+	return purchased, actual, unused, nil
 }
