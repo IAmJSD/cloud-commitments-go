@@ -71,29 +71,8 @@ type Credentials interface {
 	GetType() string // "environment", "file", "iam-role", "msi", "adc", etc.
 }
 
-// ProviderConfig represents configuration for a provider.
-//
-//nolint:revive // exported far beyond this repo (consumer-mcp references provider.ProviderConfig 100+ times); renaming to Config would break every consumer
-type ProviderConfig struct {
-	Name string
-
-	// Deprecated: Profile is overloaded with provider-specific semantics
-	// (AWS: named profile, Azure: subscription ID, GCP: project ID). Prefer
-	// the typed AWSProfile/AzureSubscriptionID/GCPProjectID fields below;
-	// when both are set, the typed field wins.
-	Profile string
-
-	// Typed per-provider identity fields. When set, these take precedence
-	// over Profile. Each provider only reads its own field and ignores the
-	// others, so a single ProviderConfig can be reused across providers.
-	AWSProfile          string // AWS named profile from ~/.aws/credentials or ~/.aws/config
-	AzureSubscriptionID string // Azure subscription ID (UUID)
-	GCPProjectID        string // GCP project ID (e.g. "my-project")
-
-	Region         string
-	CredentialPath string
-	Endpoint       string // For custom endpoints
-
+// Config represents configuration for a provider.
+type Config struct {
 	// Optional pre-resolved credentials. The AWS slot is typed because this
 	// module already depends on the AWS SDK core (see go.mod and the exchange
 	// package); the Azure and GCP slots are typed as `any` to keep this module
@@ -112,4 +91,31 @@ type ProviderConfig struct {
 	// going through the registry. Use this to inject a pre-built, pre-authenticated
 	// provider when the typed credential slots above aren't expressive enough.
 	ProviderOverride Provider
+
+	Name string
+
+	// Deprecated: Profile is overloaded with provider-specific semantics
+	// (AWS: named profile, Azure: subscription ID, GCP: project ID). Prefer
+	// the typed AWSProfile/AzureSubscriptionID/GCPProjectID fields below;
+	// when both are set, the typed field wins.
+	Profile string
+
+	// Typed per-provider identity fields. When set, these take precedence
+	// over Profile. Each provider only reads its own field and ignores the
+	// others, so a single Config can be reused across providers.
+	AWSProfile          string // AWS named profile from ~/.aws/credentials or ~/.aws/config
+	AzureSubscriptionID string // Azure subscription ID (UUID)
+	GCPProjectID        string // GCP project ID (e.g. "my-project")
+
+	Region         string
+	CredentialPath string
+	Endpoint       string // For custom endpoints
 }
+
+// ProviderConfig is the former name of Config, kept so external consumers keep
+// compiling.
+//
+// Deprecated: use Config.
+//
+//nolint:revive // kept for external consumers; remove once none reference it
+type ProviderConfig = Config

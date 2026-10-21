@@ -13,11 +13,18 @@ import (
 // RIInfo describes a Reserved Instance for reshape analysis.
 // Callers should pre-filter to convertible RIs only.
 type RIInfo struct {
-	ID                  string
-	InstanceType        string
-	InstanceCount       int32
-	OfferingClass       string  // must be "convertible" — standard RIs cannot be exchanged
+	ID            string
+	InstanceType  string
+	OfferingClass string // must be "convertible" — standard RIs cannot be exchanged
+
+	// CurrencyCode is the ISO-4217 currency the prices are denominated
+	// in (typically "USD"). Used by the cross-family check to refuse
+	// comparisons across currencies. Empty matches the same "skip"
+	// semantics as MonthlyCost == 0.
+	CurrencyCode string
+
 	NormalizationFactor float64 // AWS normalization factor for the instance size
+
 	// MonthlyCost is the effective per-instance per-month price (amortized
 	// upfront + recurring charges, AWS-canonical 730 hours per month).
 	// Used by the local passesDollarUnitsCheck pre-filter that gates
@@ -26,11 +33,7 @@ type RIInfo struct {
 	// pre-filter treats zero as "skip the check" so existing behavior
 	// is preserved.
 	MonthlyCost float64
-	// CurrencyCode is the ISO-4217 currency the prices are denominated
-	// in (typically "USD"). Used by the cross-family check to refuse
-	// comparisons across currencies. Empty matches the same "skip"
-	// semantics as MonthlyCost == 0.
-	CurrencyCode string
+
 	// TermSeconds is the RI commitment term in seconds (31_536_000 for
 	// 1y, 94_608_000 for 3y) — the same unit the AWS SDK uses on the
 	// ReservedInstance.Duration field and the unit ec2.ConvertibleRI.Duration
@@ -41,6 +44,8 @@ type RIInfo struct {
 	// the term filter is skipped for that rec to preserve today's
 	// behavior for older callers that don't populate it.
 	TermSeconds int64
+
+	InstanceCount int32
 }
 
 // UtilizationInfo provides utilization data for a specific RI.
@@ -59,9 +64,25 @@ type UtilizationInfo struct {
 // pkg/exchange stays AWS-free and providers/aws/services/ec2 imports
 // the type rather than defining its own.
 type OfferingOption struct {
-	InstanceType         string  `json:"instance_type"`
-	OfferingID           string  `json:"offering_id"`
+	// SavingsAbs is the absolute monthly savings (in CurrencyCode) that
+	// AWS Cost Explorer reported for this recommendation. Used by
+	// compositeScore to estimate savings % and derive a confidence
+	// signal. Zero means "not supplied" — the score component is omitted
+	// rather than coerced to 0 (which would falsely rank this offering
+	// last on the savings axis).
+	SavingsAbs *float64 `json:"savings_abs,omitempty"`
+
+	InstanceType string `json:"instance_type"`
+	OfferingID   string `json:"offering_id"`
+
+	// CurrencyCode is the ISO-4217 currency the EffectiveMonthlyCost is
+	// denominated in (typically "USD"). The pre-filter requires source
+	// and target currencies to match; empty on either side falls back to
+	// "skip the currency guard" so today's USD-only fixtures stay green.
+	CurrencyCode string `json:"currency_code,omitempty"`
+
 	EffectiveMonthlyCost float64 `json:"effective_monthly_cost"`
+
 	// NormalizationFactor is the AWS normalization factor for the
 	// offering's instance size — needed by the local
 	// passesDollarUnitsCheck pre-filter that gates which cross-family
@@ -69,11 +90,7 @@ type OfferingOption struct {
 	// alternative cannot be safely compared and the pre-filter
 	// excludes it.
 	NormalizationFactor float64 `json:"normalization_factor,omitempty"`
-	// CurrencyCode is the ISO-4217 currency the EffectiveMonthlyCost is
-	// denominated in (typically "USD"). The pre-filter requires source
-	// and target currencies to match; empty on either side falls back to
-	// "skip the currency guard" so today's USD-only fixtures stay green.
-	CurrencyCode string `json:"currency_code,omitempty"`
+
 	// TermSeconds is the offering's commitment term in seconds
 	// (31_536_000 for 1y, 94_608_000 for 3y) — same unit as
 	// RIInfo.TermSeconds and the AWS SDK's ReservedInstance.Duration.
@@ -83,13 +100,7 @@ type OfferingOption struct {
 	// on either side falls back to "skip the term guard" for callers
 	// or fixtures that don't populate it.
 	TermSeconds int64 `json:"term_seconds,omitempty"`
-	// SavingsAbs is the absolute monthly savings (in CurrencyCode) that
-	// AWS Cost Explorer reported for this recommendation. Used by
-	// compositeScore to estimate savings % and derive a confidence
-	// signal. Zero means "not supplied" — the score component is omitted
-	// rather than coerced to 0 (which would falsely rank this offering
-	// last on the savings axis).
-	SavingsAbs *float64 `json:"savings_abs,omitempty"`
+
 	// RecommendationCount is the number of instances AWS Cost Explorer
 	// included in the recommendation. Used together with SavingsAbs to
 	// derive a confidence signal (large fleet + large savings = high
@@ -126,14 +137,14 @@ type PurchaseRecLookup func(ctx context.Context, region, currencyCode string) ([
 type ReshapeRecommendation struct {
 	SourceRIID          string           `json:"source_ri_id"`
 	SourceInstanceType  string           `json:"source_instance_type"`
-	SourceCount         int32            `json:"source_count"`
 	TargetInstanceType  string           `json:"target_instance_type"`
-	TargetCount         int32            `json:"target_count"`
+	Reason              string           `json:"reason"`
 	AlternativeTargets  []OfferingOption `json:"alternative_targets,omitempty"`
 	UtilizationPercent  float64          `json:"utilization_percent"`
 	NormalizedUsed      float64          `json:"normalized_used"`
 	NormalizedPurchased float64          `json:"normalized_purchased"`
-	Reason              string           `json:"reason"`
+	SourceCount         int32            `json:"source_count"`
+	TargetCount         int32            `json:"target_count"`
 }
 
 // passesDollarUnitsCheck approximates AWS's exchange-validity rule
@@ -383,6 +394,78 @@ var sizeOrder = []string{
 	"24xlarge",
 }
 
+// legacySizeLadder is sizeOrder from largest to smallest: the target ladder used
+// when the caller supplies no offered-instance-type catalog.
+var legacySizeLadder = func() []string {
+	l := make([]string, len(sizeOrder))
+	for i, s := range sizeOrder {
+		l[len(sizeOrder)-1-i] = s
+	}
+	return l
+}()
+
+// ReshapeOption customizes AnalyzeReshaping and AnalyzeReshapingWithRecs.
+type ReshapeOption func(*reshapeConfig)
+
+type reshapeConfig struct {
+	// offered maps an instance family to the offered sizes with a known
+	// normalization factor, largest first. Nil means no catalog (legacy ladder).
+	offered map[string][]string
+}
+
+// WithOfferedInstanceTypes restricts reshape targets to the instance types the
+// region offers (for example ec2 DescribeInstanceTypeOfferings). An empty or nil
+// list keeps the legacy ladder. With a non-empty list, a family absent from it
+// gets a recommendation without a target, and a family's targets are limited to
+// its offered sizes. Metal and other sizes without a known factor are ignored.
+func WithOfferedInstanceTypes(instanceTypes []string) ReshapeOption {
+	return func(c *reshapeConfig) {
+		if len(instanceTypes) == 0 {
+			c.offered = nil
+			return
+		}
+		c.offered = indexOfferedSizes(instanceTypes)
+	}
+}
+
+func indexOfferedSizes(instanceTypes []string) map[string][]string {
+	seen := make(map[string]map[string]bool)
+	for _, it := range instanceTypes {
+		family, size := parseInstanceType(it)
+		if family == "" || common.EC2NormalizationFactor(size) <= 0 {
+			continue
+		}
+		if seen[family] == nil {
+			seen[family] = make(map[string]bool)
+		}
+		seen[family][size] = true
+	}
+	offered := make(map[string][]string, len(instanceTypes))
+	for family, sizes := range seen {
+		ladder := make([]string, 0, len(sizes))
+		for size := range sizes {
+			ladder = append(ladder, size)
+		}
+		sort.Slice(ladder, func(a, b int) bool {
+			return common.EC2NormalizationFactor(ladder[a]) > common.EC2NormalizationFactor(ladder[b])
+		})
+		offered[family] = ladder
+	}
+	// A non-empty catalog stays non-nil even if every entry was dropped, so the
+	// families it lacks are reported instead of silently using the legacy ladder.
+	return offered
+}
+
+// ladderFor returns the target ladder for a family, largest size first. ok is
+// false when a catalog is set and does not offer the family.
+func (c *reshapeConfig) ladderFor(family string) (ladder []string, ok bool) {
+	if c.offered == nil {
+		return legacySizeLadder, true
+	}
+	ladder, ok = c.offered[family]
+	return ladder, ok
+}
+
 // parseInstanceType splits "m5.xlarge" into ("m5", "xlarge").
 // Returns empty strings if the format is unrecognized.
 func parseInstanceType(instanceType string) (family, size string) {
@@ -408,7 +491,11 @@ func NormalizationFactorForSize(size string) float64 {
 // Recommendations are emitted with empty AlternativeTargets — alternatives
 // are populated only by AnalyzeReshapingWithRecs, which pairs each rec
 // against the cached AWS Cost Explorer recommendations.
-func AnalyzeReshaping(ris []RIInfo, utilization []UtilizationInfo, threshold float64) []ReshapeRecommendation {
+func AnalyzeReshaping(ris []RIInfo, utilization []UtilizationInfo, threshold float64, opts ...ReshapeOption) []ReshapeRecommendation {
+	var cfg reshapeConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	utilMap := make(map[string]float64, len(utilization))
 	for _, u := range utilization {
 		utilMap[u.RIID] = u.UtilizationPercent
@@ -416,7 +503,7 @@ func AnalyzeReshaping(ris []RIInfo, utilization []UtilizationInfo, threshold flo
 
 	var recommendations []ReshapeRecommendation
 	for _, ri := range ris {
-		if rec := analyzeRI(ri, utilMap, threshold); rec != nil {
+		if rec := analyzeRI(ri, utilMap, threshold, &cfg); rec != nil {
 			recommendations = append(recommendations, *rec)
 		}
 	}
@@ -434,7 +521,7 @@ func resolveNormFactor(ri RIInfo, size string) float64 {
 
 // analyzeRI evaluates a single RI and returns a reshape recommendation if it is
 // underutilized and convertible, or nil if no action is needed.
-func analyzeRI(ri RIInfo, utilMap map[string]float64, threshold float64) *ReshapeRecommendation {
+func analyzeRI(ri RIInfo, utilMap map[string]float64, threshold float64, cfg *reshapeConfig) *ReshapeRecommendation {
 	if !strings.EqualFold(ri.OfferingClass, "convertible") {
 		return nil
 	}
@@ -485,13 +572,31 @@ func analyzeRI(ri RIInfo, utilMap map[string]float64, threshold float64) *Reshap
 		}
 	}
 
-	targetSize, targetCount := findBestFit(normalizedUsed, normalizedPurchased)
+	ladder, offered := cfg.ladderFor(family)
+	if !offered {
+		return &ReshapeRecommendation{
+			SourceRIID:          ri.ID,
+			SourceInstanceType:  ri.InstanceType,
+			SourceCount:         ri.InstanceCount,
+			UtilizationPercent:  util,
+			NormalizedUsed:      normalizedUsed,
+			NormalizedPurchased: normalizedPurchased,
+			Reason: fmt.Sprintf(
+				"instance family not offered in region (%s); no exchange target recommended.",
+				family,
+			),
+		}
+	}
+
+	targetSize, targetCount := findBestFit(normalizedUsed, normalizedPurchased, ladder)
 	if targetSize == "" {
 		return nil
 	}
 
 	targetInstanceType := family + "." + targetSize
-	if targetInstanceType == ri.InstanceType && targetCount == ri.InstanceCount {
+	// A same-capacity reshape (1x m5.24xlarge to 2x m5.12xlarge) frees no
+	// units, so it is not worth a quote and AWS needs an equal-or-greater value.
+	if float64(targetCount)*common.EC2NormalizationFactor(targetSize) >= normalizedPurchased {
 		return nil
 	}
 
@@ -548,8 +653,9 @@ func AnalyzeReshapingWithRecs(
 	threshold float64,
 	region, currencyCode string,
 	lookup PurchaseRecLookup,
+	opts ...ReshapeOption,
 ) []ReshapeRecommendation {
-	recs := AnalyzeReshaping(ris, utilization, threshold)
+	recs := AnalyzeReshaping(ris, utilization, threshold, opts...)
 	if lookup == nil || len(recs) == 0 {
 		return recs
 	}
@@ -696,16 +802,16 @@ func pricingGatePasses(src RIInfo, off OfferingOption, hasSrc bool) bool {
 
 // findBestFit finds the instance size and count that covers normalizedUsed units
 // without exceeding normalizedPurchased, the units the source RI owns.
+// ladder lists the candidate sizes from largest to smallest factor.
 // Strategy: take the largest size whose factor fits in normalizedUsed and round the
 // count up to cover the usage; if that over-allocates past normalizedPurchased, try
 // the next smaller size. Returns ("", 0) when nothing fits, so the caller skips the RI.
-func findBestFit(normalizedUsed, normalizedPurchased float64) (size string, count int32) {
-	if !(normalizedUsed > 0) { // also rejects NaN
+func findBestFit(normalizedUsed, normalizedPurchased float64, ladder []string) (size string, count int32) {
+	if !(normalizedUsed > 0) || len(ladder) == 0 { // also rejects NaN
 		return "", 0
 	}
 
-	for i := len(sizeOrder) - 1; i >= 0; i-- {
-		s := sizeOrder[i]
+	for _, s := range ladder {
 		nf := common.EC2NormalizationFactor(s)
 		if nf <= 0 || nf > normalizedUsed {
 			continue
@@ -718,7 +824,7 @@ func findBestFit(normalizedUsed, normalizedPurchased float64) (size string, coun
 
 	// Only usage below the smallest size's factor falls back to that size;
 	// anything else that reached here simply does not fit.
-	s := sizeOrder[0]
+	s := ladder[len(ladder)-1]
 	nf := common.EC2NormalizationFactor(s)
 	if normalizedUsed < nf && nf <= normalizedPurchased {
 		return s, 1
