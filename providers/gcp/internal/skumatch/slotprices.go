@@ -12,11 +12,11 @@ import (
 // at different prices make the lookup ambiguous and Add returns an error.
 // SKUs that repeat the same price agree and are accepted.
 type SlotPrices struct {
-	OnDemand   float64
-	Commitment float64
-
 	onDemandSKU   string
 	commitmentSKU string
+
+	OnDemand   float64
+	Commitment float64
 }
 
 // Add records price for sku in slot. SlotNone is ignored.

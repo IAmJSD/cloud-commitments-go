@@ -53,15 +53,17 @@ type RecommenderClient interface {
 }
 
 // Client handles GCP Memorystore (Redis) commitments.
-type Client struct { //nolint:govet // fieldalignment: file owned by open PR #471
-	skuMu          sync.Mutex
+type Client struct {
 	skuCache       *cloudbilling.ListSkusResponse
 	ctx            context.Context
 	projectID      string
 	region         string
-	clientOpts     []option.ClientOption
 	redisService   RedisService
 	billingService BillingService
+	clientOpts     []option.ClientOption
+	// skuMu guards skuCache. It sits last because it holds no pointers
+	// (govet fieldalignment).
+	skuMu sync.Mutex
 }
 
 // NewClient creates a new GCP Memorystore client.
@@ -221,11 +223,11 @@ func (c *Client) GetValidResourceTypes(ctx context.Context) ([]string, error) {
 }
 
 // RedisPricing contains pricing information for Memorystore Redis.
-type RedisPricing struct { //nolint:govet // fieldalignment: file owned by open PR #471
+type RedisPricing struct {
+	Currency          string
 	HourlyRate        float64
 	CommitmentPrice   float64
 	OnDemandPrice     float64
-	Currency          string
 	SavingsPercentage float64
 }
 
