@@ -17,24 +17,29 @@ type SlotPrices struct {
 
 	OnDemand   float64
 	Commitment float64
+
+	// onDemandSet and commitmentSet record that a slot holds a price. They
+	// do not rely on the SKU ID, which the catalog type allows to be empty.
+	onDemandSet   bool
+	commitmentSet bool
 }
 
 // Add records price for sku in slot. SlotNone is ignored.
 func (p *SlotPrices) Add(slot PriceSlot, sku *cloudbilling.Sku, price float64) error {
 	switch slot {
 	case SlotOnDemand:
-		return setOnce(&p.OnDemand, &p.onDemandSKU, sku, price, "on-demand")
+		return setOnce(&p.OnDemand, &p.onDemandSKU, &p.onDemandSet, sku, price, "on-demand")
 	case SlotCommitment:
-		return setOnce(&p.Commitment, &p.commitmentSKU, sku, price, "commitment")
+		return setOnce(&p.Commitment, &p.commitmentSKU, &p.commitmentSet, sku, price, "commitment")
 	}
 	return nil
 }
 
-func setOnce(value *float64, skuID *string, sku *cloudbilling.Sku, price float64, slotName string) error {
-	if *skuID != "" && *value != price {
+func setOnce(value *float64, skuID *string, set *bool, sku *cloudbilling.Sku, price float64, slotName string) error {
+	if *set && *value != price {
 		return fmt.Errorf("ambiguous catalog: %s SKU %s (%q) prices %v but matching SKU %s prices %v",
 			slotName, sku.SkuId, sku.Description, price, *skuID, *value)
 	}
-	*value, *skuID = price, sku.SkuId
+	*value, *skuID, *set = price, sku.SkuId, true
 	return nil
 }
