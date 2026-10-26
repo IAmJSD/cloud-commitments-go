@@ -222,6 +222,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **`azure`:** recommendations from the Consumption path (compute, database, cache, cosmosdb, managedredis, synapse) and the Savings Plan benefit path now set `CommitmentCurrency` to `USD`, because their commitment amounts come from sources already required to be USD. The Advisor and legacy paths carry no checked commitment amounts and stay empty (#623).
 - **AWS/OpenSearch:** the STS account-ID lookup used for post-purchase tagging caches only a successful result, so one throttled or timed-out `GetCallerIdentity` no longer disables tagging for the client's lifetime (#53).
 - **AWS/recommendations:** `normalizeRegionName` maps the current `Europe (Ireland|Frankfurt|London|Paris|Stockholm)` Cost Explorer display names to region codes, so coverage lookups keyed by region code match those recommendations (#53).
 - **AWS/recommendations:** `normalizeRegionName` also maps `Asia Pacific (Malaysia|Thailand)`, `Canada West (Calgary)` and `Mexico (Central)` to `ap-southeast-5`, `ap-southeast-7`, `ca-west-1` and `mx-central-1` (#53).
@@ -340,6 +341,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   `ExecuteExchange` commits carries it. Unset keeps the previous Upfront
   request byte for byte; anything other than `Upfront` or `Monthly` (exact
   spelling) is a validation error before any request (#89).
+
+- **`ladder.Allocate` no longer subtracts existing commitment from a residual
+  baseline a second time (#282).** New `UsageBaseline.Basis`
+  (`BaselineBasisTotal`, the default including the empty value, or
+  `BaselineBasisResidual`). A residual baseline counts only usage existing
+  commitments left uncovered, so Allocate sizes `low_water * target% -
+  in_flight` (never above the residual) instead of `low_water - existing`,
+  which held a $4/hr residual with a $6/hr Savings Plan as "target already
+  met". A residual baseline with a target below 100% and existing commitment
+  is held (the gap needs the covered usage the residual excludes). Expiring
+  commitment is not added back on that basis. Unknown basis values are an
+  error. Additive: total-basis results are unchanged. The AWS ladder adopts the
+  residual basis in a follow-up once this pkg version is published.
 
 - **`azure/savingsplans`:** the commitment currency is no longer hardcoded to
   USD. `SavingsPlanDetails.Currency` (new, additive) is sent in the purchase and
