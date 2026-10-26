@@ -62,16 +62,17 @@ type HTTPClient interface {
 }
 
 // Client handles Azure Savings Plans.
-type Client struct { //nolint:govet // fieldalignment: file owned by open PR #491
-	cred           azcore.TokenCredential
-	subscriptionID string
-	region         string
-	httpClient     HTTPClient
+type Client struct {
+	cred       azcore.TokenCredential
+	httpClient HTTPClient
 
 	// Injected in tests to avoid real Azure API calls.
 	orderAliasClient SavingsPlanOrderAliasAPI
 	listAllPager     SavingsPlanListAllPager
 	rpValidateClient RPValidateAPI
+
+	subscriptionID string
+	region         string
 }
 
 // NewClient creates a new Azure Savings Plans client.

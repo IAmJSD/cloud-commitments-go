@@ -87,7 +87,7 @@ type LadderCapability interface {
 // pkg/exchange float64 anyway). Convert via ratFromFloat where exact math
 // is needed; NaN/Inf/non-positive values are rejected wherever these caps
 // are validated.
-type BufferReshapeConfig struct { //nolint:govet // fieldalignment: file owned by open PR #441
+type BufferReshapeConfig struct {
 	// MaxPaymentPerExchangeUSD caps the payment for a single exchange. It is
 	// required: nil is an error, never "no cap" (reshape executes exchanges
 	// immediately, so an omitted cap must not mean unlimited spend).
@@ -95,14 +95,6 @@ type BufferReshapeConfig struct { //nolint:govet // fieldalignment: file owned b
 	// MaxPaymentDailyUSD caps the total exchange payments for the current day.
 	// It is required on the same terms as MaxPaymentPerExchangeUSD.
 	MaxPaymentDailyUSD *float64
-	// UtilizationThresholdPct triggers a reshape when commitment utilization
-	// drops below this percentage.
-	UtilizationThresholdPct float64
-	// LookbackDays is the window used to measure utilization when deciding
-	// whether to trigger a reshape.
-	LookbackDays int
-	// DryRun, when true, simulates the reshape without executing any exchanges.
-	DryRun bool
 	// LadderRunID links the exchange records this reshape creates to the ladder
 	// run that triggered it, so the exchange layer scopes its pending
 	// cancellation to this origin (ladder) instead of the standalone task's
@@ -113,6 +105,14 @@ type BufferReshapeConfig struct { //nolint:govet // fieldalignment: file owned b
 	// requires it so a future runner cannot silently drop it and reintroduce the
 	// cross-origin cancellation bug.
 	LadderRunID *string
+	// UtilizationThresholdPct triggers a reshape when commitment utilization
+	// drops below this percentage.
+	UtilizationThresholdPct float64
+	// LookbackDays is the window used to measure utilization when deciding
+	// whether to trigger a reshape.
+	LookbackDays int
+	// DryRun, when true, simulates the reshape without executing any exchanges.
+	DryRun bool
 }
 
 // ReshapeSummary reports the outcome of a buffer reshape operation.
