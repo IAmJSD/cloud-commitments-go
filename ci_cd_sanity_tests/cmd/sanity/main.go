@@ -11,10 +11,18 @@ import (
 	"github.com/LeanerCloud/cloud-commitments-go/ci_cd_sanity_tests/pkg/sanity/aws"
 )
 
+// validateInt32Range reports an error when n is outside [1, math.MaxInt32].
+func validateInt32Range(flagName string, n int) error {
+	if n < 1 || n > math.MaxInt32 {
+		return fmt.Errorf("%s must be between 1 and %d, got %d", flagName, math.MaxInt32, n)
+	}
+	return nil
+}
+
 // requireInt32Range exits with an error when n is outside [1, math.MaxInt32].
 func requireInt32Range(flagName string, n int) {
-	if n < 1 || n > (1<<31-1) {
-		fmt.Fprintf(os.Stderr, "ERROR: %s must be between 1 and math.MaxInt32\n", flagName)
+	if err := validateInt32Range(flagName, n); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 		os.Exit(2)
 	}
 }
@@ -28,11 +36,6 @@ func main() {
 	)
 	flag.Parse()
 	requireInt32Range("--max-list", *maxList)
-
-	if *maxList < 1 || *maxList > math.MaxInt32 {
-		fmt.Fprintf(os.Stderr, "ERROR: --max-list must be between 1 and %d, got %d\n", math.MaxInt32, *maxList)
-		os.Exit(2)
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 
