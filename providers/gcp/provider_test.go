@@ -93,11 +93,11 @@ func (m *MockResourceManagerService) ListProjects(ctx context.Context) ([]*cloud
 // the sentinel to short-circuit further pages, and (c) leaves *out
 // untouched on pages with no ACTIVE projects so the walk continues.
 //
-// This pins the pagination contract documented in the function godoc
-// (related issue: 11_gcp_provider.md LOW "Missing Test Coverage for
-// getDefaultProject Pagination").
+// This pins the pagination contract documented in the function godoc.
 func TestFindActiveProjectInPage(t *testing.T) {
+	t.Parallel()
 	t.Run("page with one ACTIVE project — sets out and short-circuits", func(t *testing.T) {
+		t.Parallel()
 		var out string
 		err := findActiveProjectInPage(&out, &cloudresourcemanager.ListProjectsResponse{
 			Projects: []*cloudresourcemanager.Project{
@@ -109,6 +109,7 @@ func TestFindActiveProjectInPage(t *testing.T) {
 	})
 
 	t.Run("page with no ACTIVE projects — returns nil, leaves out untouched", func(t *testing.T) {
+		t.Parallel()
 		var out string
 		err := findActiveProjectInPage(&out, &cloudresourcemanager.ListProjectsResponse{
 			Projects: []*cloudresourcemanager.Project{
@@ -121,6 +122,7 @@ func TestFindActiveProjectInPage(t *testing.T) {
 	})
 
 	t.Run("empty page — returns nil, leaves out untouched", func(t *testing.T) {
+		t.Parallel()
 		var out string
 		err := findActiveProjectInPage(&out, &cloudresourcemanager.ListProjectsResponse{})
 		require.NoError(t, err)
@@ -128,6 +130,7 @@ func TestFindActiveProjectInPage(t *testing.T) {
 	})
 
 	t.Run("first ACTIVE wins, later projects on same page are not inspected", func(t *testing.T) {
+		t.Parallel()
 		var out string
 		err := findActiveProjectInPage(&out, &cloudresourcemanager.ListProjectsResponse{
 			Projects: []*cloudresourcemanager.Project{
@@ -140,6 +143,7 @@ func TestFindActiveProjectInPage(t *testing.T) {
 	})
 
 	t.Run("multi-page simulation — page 1 has none, page 2 has ACTIVE", func(t *testing.T) {
+		t.Parallel()
 		// Simulates Pages() invoking the callback per page. The callback
 		// holds onto the same *out across calls; finding ACTIVE on page 2
 		// must populate it correctly.
@@ -210,14 +214,15 @@ func TestGetDefaultProject_ListerError(t *testing.T) {
 // "fall through to ADC" branch is exercised separately because it requires
 // ambient credentials.
 func TestNewProvider_ProjectIDResolution(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
-		config   *provider.ProviderConfig
+		config   *provider.Config
 		expected string
 	}{
 		{
 			name: "Typed GCPProjectID takes precedence over deprecated Profile",
-			config: &provider.ProviderConfig{
+			config: &provider.Config{
 				GCPProjectID: "typed-project",
 				Profile:      "deprecated-project",
 			},
@@ -225,14 +230,14 @@ func TestNewProvider_ProjectIDResolution(t *testing.T) {
 		},
 		{
 			name: "Typed GCPProjectID alone (no Profile fallback needed)",
-			config: &provider.ProviderConfig{
+			config: &provider.Config{
 				GCPProjectID: "only-typed",
 			},
 			expected: "only-typed",
 		},
 		{
 			name: "Deprecated Profile is honored when typed field is empty",
-			config: &provider.ProviderConfig{
+			config: &provider.Config{
 				Profile: "legacy-project",
 			},
 			expected: "legacy-project",
@@ -244,58 +249,68 @@ func TestNewProvider_ProjectIDResolution(t *testing.T) {
 		},
 		{
 			name:     "Empty config resolves to empty (caller falls through to ADC)",
-			config:   &provider.ProviderConfig{},
+			config:   &provider.Config{},
 			expected: "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			assert.Equal(t, tt.expected, resolveGCPProjectID(tt.config))
 		})
 	}
 }
 
 func TestNewProviderWithProject(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	provider := NewProviderWithProject(ctx, "test-project")
 
 	require.NotNil(t, provider)
 	assert.Equal(t, "test-project", provider.projectID)
-	assert.Equal(t, ctx, provider.ctx)
 	// clientOpts is nil when no options are passed (not an error - it's expected)
 }
 
 func TestGCPProvider_Name(t *testing.T) {
+	t.Parallel()
 	provider := &Provider{}
 	assert.Equal(t, "gcp", provider.Name())
 }
 
 func TestGCPProvider_DisplayName(t *testing.T) {
+	t.Parallel()
 	provider := &Provider{}
 	assert.Equal(t, "Google Cloud Platform", provider.DisplayName())
 }
 
 func TestGCPProvider_GetDefaultRegion(t *testing.T) {
+	t.Parallel()
 	provider := &Provider{}
 	// GCP defaults to us-central1
 	assert.Equal(t, "us-central1", provider.GetDefaultRegion())
 }
 
 func TestGCPProvider_GetSupportedServices(t *testing.T) {
+	t.Parallel()
 	provider := &Provider{}
 	services := provider.GetSupportedServices()
 
 	require.NotEmpty(t, services)
 	assert.Contains(t, services, common.ServiceCompute)
-	assert.Contains(t, services, common.ServiceRelationalDB)
-	assert.Contains(t, services, common.ServiceCache)
+	// Cloud SQL and Memorystore CUDs are spend-based and recommended only at
+	// billing-account scope; their project PerformanceRecommenders give
+	// per-instance tuning advice, not commitments (#294).
+	assert.NotContains(t, services, common.ServiceRelationalDB)
+	assert.NotContains(t, services, common.ServiceCache)
+	assert.Equal(t, []common.ServiceType{common.ServiceCompute}, services)
 	// Cloud Storage has no commitment product; listing it lets callers that
 	// validate against this list accept a search that always fails (#199).
 	assert.NotContains(t, services, common.ServiceStorage)
 }
 
 func TestGCPProvider_GetServiceClient_UnsupportedService(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	provider := NewProviderWithProject(ctx, "test-project")
 
@@ -308,6 +323,7 @@ func TestGCPProvider_GetServiceClient_UnsupportedService(t *testing.T) {
 }
 
 func TestGCPProvider_GetServiceClient_ServiceCache(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	provider := NewProviderWithProject(ctx, "test-project")
 
@@ -319,6 +335,7 @@ func TestGCPProvider_GetServiceClient_ServiceCache(t *testing.T) {
 }
 
 func TestGCPProvider_GetRecommendationsClient(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	provider := NewProviderWithProject(ctx, "test-project")
 
@@ -333,15 +350,16 @@ func TestGCPProvider_GetRecommendationsClient(t *testing.T) {
 }
 
 func TestGCPProvider_Fields(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	provider := NewProviderWithProject(ctx, "my-gcp-project")
 
 	assert.Equal(t, "my-gcp-project", provider.projectID)
-	assert.Equal(t, ctx, provider.ctx)
 	assert.Empty(t, provider.clientOpts)
 }
 
 func TestNewProviderWithProject_WithEmptyProject(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	provider := NewProviderWithProject(ctx, "")
 
@@ -350,6 +368,7 @@ func TestNewProviderWithProject_WithEmptyProject(t *testing.T) {
 }
 
 func TestGCPProvider_GetServiceClient_Compute(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := NewProviderWithProject(ctx, "test-project")
 
@@ -365,6 +384,7 @@ func TestGCPProvider_GetServiceClient_Compute(t *testing.T) {
 }
 
 func TestGCPProvider_GetServiceClient_RelationalDB(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := NewProviderWithProject(ctx, "test-project")
 
@@ -380,8 +400,9 @@ func TestGCPProvider_GetServiceClient_RelationalDB(t *testing.T) {
 }
 
 func TestNewProvider_WithConfig(t *testing.T) {
+	t.Parallel()
 	// Test NewProvider with a config containing a project ID
-	config := &provider.ProviderConfig{
+	config := &provider.Config{
 		Profile: "test-project-id",
 	}
 
@@ -398,6 +419,7 @@ func TestNewProvider_WithConfig(t *testing.T) {
 }
 
 func TestNewProvider_NilConfig(t *testing.T) {
+	t.Parallel()
 	// Test NewProvider with nil config
 	_, err := NewProvider(nil)
 	// Error is expected since we need to detect the default project
@@ -439,6 +461,7 @@ func TestGCPProvider_GetCredentials_ADCFileSource(t *testing.T) {
 }
 
 func TestGCPProvider_SetterMethods(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := NewProviderWithProject(ctx, "test-project")
 
@@ -459,6 +482,7 @@ func TestGCPProvider_SetterMethods(t *testing.T) {
 }
 
 func TestGCPProvider_IsConfigured_WithMock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := NewProviderWithProject(ctx, "test-project")
 
@@ -478,6 +502,7 @@ func TestGCPProvider_IsConfigured_WithMock(t *testing.T) {
 }
 
 func TestGCPProvider_IsConfigured_Error(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := NewProviderWithProject(ctx, "test-project")
 
@@ -491,6 +516,7 @@ func TestGCPProvider_IsConfigured_Error(t *testing.T) {
 }
 
 func TestGCPProvider_ValidateCredentials_WithMock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := NewProviderWithProject(ctx, "test-project")
 
@@ -510,6 +536,7 @@ func TestGCPProvider_ValidateCredentials_WithMock(t *testing.T) {
 }
 
 func TestGCPProvider_ValidateCredentials_Error(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := NewProviderWithProject(ctx, "test-project")
 
@@ -524,6 +551,7 @@ func TestGCPProvider_ValidateCredentials_Error(t *testing.T) {
 }
 
 func TestGCPProvider_ValidateCredentials_InactiveProject(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := NewProviderWithProject(ctx, "test-project")
 
@@ -541,6 +569,7 @@ func TestGCPProvider_ValidateCredentials_InactiveProject(t *testing.T) {
 }
 
 func TestGCPProvider_GetAccounts_WithMock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := NewProviderWithProject(ctx, "test-project")
 
@@ -578,6 +607,7 @@ func TestGCPProvider_GetAccounts_WithMock(t *testing.T) {
 // visible to the credentials (10-M7). A synthesized account would hide
 // permission / auth errors from callers.
 func TestGCPProvider_GetAccounts_Empty(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := NewProviderWithProject(ctx, "default-project")
 
@@ -592,6 +622,7 @@ func TestGCPProvider_GetAccounts_Empty(t *testing.T) {
 }
 
 func TestGCPProvider_GetAccounts_Error(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := NewProviderWithProject(ctx, "test-project")
 
@@ -606,6 +637,7 @@ func TestGCPProvider_GetAccounts_Error(t *testing.T) {
 }
 
 func TestGCPProvider_GetRegions_WithMock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := NewProviderWithProject(ctx, "test-project")
 
@@ -639,6 +671,7 @@ func TestGCPProvider_GetRegions_WithMock(t *testing.T) {
 }
 
 func TestGCPProvider_GetRegions_WithoutDescription(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := NewProviderWithProject(ctx, "test-project")
 
@@ -664,6 +697,7 @@ func TestGCPProvider_GetRegions_WithoutDescription(t *testing.T) {
 }
 
 func TestGCPProvider_GetRegions_FilterDownRegions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := NewProviderWithProject(ctx, "test-project")
 
@@ -693,6 +727,7 @@ func TestGCPProvider_GetRegions_FilterDownRegions(t *testing.T) {
 }
 
 func TestGCPProvider_GetRegions_Empty(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := NewProviderWithProject(ctx, "test-project")
 
@@ -707,6 +742,7 @@ func TestGCPProvider_GetRegions_Empty(t *testing.T) {
 }
 
 func TestGCPProvider_GetRegions_Error(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := NewProviderWithProject(ctx, "test-project")
 

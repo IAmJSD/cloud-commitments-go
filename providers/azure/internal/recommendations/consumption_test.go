@@ -38,6 +38,7 @@ func consumptionRecs(days int, term string) map[string]armconsumption.Reservatio
 }
 
 func TestExtractConsumption_ScalesWindowAmountsToMonthly(t *testing.T) {
+	t.Parallel()
 	for _, days := range []int{7, 30, 60} {
 		for shape, rec := range consumptionRecs(days, "P1Y") {
 			t.Run(fmt.Sprintf("%s/L%d", shape, days), func(t *testing.T) {
@@ -57,6 +58,7 @@ func TestExtractConsumption_ScalesWindowAmountsToMonthly(t *testing.T) {
 }
 
 func TestExtractConsumption_SkipsWithError(t *testing.T) {
+	t.Parallel()
 	usd := mocks.WithModernCosts(rawOnDemand, rawTotal, 75)
 	cases := map[string]armconsumption.ReservationRecommendationClassification{
 		"legacy missing lookback": mocks.BuildLegacyReservationRecommendation(mocks.WithCosts(191, 116, 75), mocks.WithLookBack("")),
@@ -80,6 +82,7 @@ func TestExtractConsumption_SkipsWithError(t *testing.T) {
 }
 
 func TestExtractConsumption_RefusedPayloadsAreNilWithoutError(t *testing.T) {
+	t.Parallel()
 	f, err := ExtractConsumption(nil)
 	assert.NoError(t, err)
 	assert.Nil(t, f)
@@ -129,6 +132,7 @@ func byPayment(recs []common.Recommendation) map[string]common.Recommendation {
 // The screenshot case: 12 x Standard_D2as_v4, 7-day window, $191 on demand,
 // reservation $494 (1y) / $949 (3y) per unit.
 func TestExpandConsumptionVariants_ScreenshotWorkedExample(t *testing.T) {
+	t.Parallel()
 	for shape, rec := range consumptionRecs(7, "P1Y") {
 		t.Run(shape+"/1y", func(t *testing.T) {
 			stub := newStub()
@@ -153,6 +157,7 @@ func TestExpandConsumptionVariants_ScreenshotWorkedExample(t *testing.T) {
 }
 
 func TestExpandConsumptionVariants_ThreeYearUpfrontExceedsOneYear(t *testing.T) {
+	t.Parallel()
 	for _, days := range []int{7, 30, 60} {
 		for shape, rec3 := range consumptionRecs(days, "P3Y") {
 			t.Run(fmt.Sprintf("%s/L%d", shape, days), func(t *testing.T) {
@@ -176,6 +181,7 @@ func TestExpandConsumptionVariants_ThreeYearUpfrontExceedsOneYear(t *testing.T) 
 }
 
 func TestPricer_DeduplicatesLookupsPerKey(t *testing.T) {
+	t.Parallel()
 	stub := newStub()
 	p := NewPricer("compute", stub.lookup)
 	base := extractedBase(t, consumptionRecs(7, "P1Y")["legacy"])
@@ -196,6 +202,7 @@ func TestPricer_DeduplicatesLookupsPerKey(t *testing.T) {
 }
 
 func TestExpandConsumptionVariants_Errors(t *testing.T) {
+	t.Parallel()
 	base := extractedBase(t, consumptionRecs(7, "P1Y")["legacy"])
 	t.Run("lookup failure", func(t *testing.T) {
 		stub := newStub()
@@ -224,6 +231,7 @@ func TestExpandConsumptionVariants_Errors(t *testing.T) {
 }
 
 func TestAppendConsumptionVariants_SkipsOnlyTheUnpriceable(t *testing.T) {
+	t.Parallel()
 	stub := newStub()
 	stub.fail["Standard_Bad"] = true
 	good := extractedBase(t, consumptionRecs(7, "P1Y")["legacy"])
@@ -244,12 +252,14 @@ func TestAppendConsumptionVariants_SkipsOnlyTheUnpriceable(t *testing.T) {
 }
 
 func TestConsumptionFilter_SetsLookBackExplicitly(t *testing.T) {
+	t.Parallel()
 	assert.Equal(t,
 		"properties/scope eq 'Shared' and properties/resourceType eq 'VirtualMachines' and properties/lookBackPeriod eq 'Last7Days'",
 		ConsumptionFilter("VirtualMachines"))
 }
 
 func TestPricer_ZeroPriceIsUnresolvable(t *testing.T) {
+	t.Parallel()
 	base := extractedBase(t, consumptionRecs(7, "P1Y")["legacy"])
 	p := NewPricer("compute", func(context.Context, string, string, int) (ReservationPrice, error) {
 		return ReservationPrice{Total: 0, Currency: "USD"}, nil
@@ -266,6 +276,7 @@ func TestPricer_ZeroPriceIsUnresolvable(t *testing.T) {
 // A lookup that fails to complete must fail the collection and must not be
 // cached as if the SKU had no price.
 func TestAppendConsumptionVariants_LookupFailureFailsCollection(t *testing.T) {
+	t.Parallel()
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	cases := map[string]error{
@@ -289,6 +300,48 @@ func TestAppendConsumptionVariants_LookupFailureFailsCollection(t *testing.T) {
 				assert.Empty(t, recs)
 			}
 			assert.Equal(t, 2, calls, "a failed fetch is not cached")
+		})
+	}
+}
+
+func TestExtractConsumption_ModernAmountPresence(t *testing.T) {
+	t.Parallel()
+	usd := "USD"
+	amt := func(v float64) *armconsumption.Amount { return &armconsumption.Amount{Currency: &usd, Value: &v} }
+	noValue := &armconsumption.Amount{Currency: &usd}
+	build := func(onDemand, total, net *armconsumption.Amount) armconsumption.ReservationRecommendationClassification {
+		return mocks.BuildModernReservationRecommendation(func(_ *armconsumption.ModernReservationRecommendation, p *armconsumption.ModernReservationRecommendationProperties) {
+			p.CostWithNoReservedInstances, p.TotalCostWithReservedInstances, p.NetSavings = onDemand, total, net
+		})
+	}
+	scale := DaysPerMonth / 7.0
+	cases := []struct {
+		name        string
+		rec         armconsumption.ReservationRecommendationClassification
+		wantErr     string
+		wantOnDmd   float64
+		wantSavings float64
+	}{
+		{name: "values", rec: build(amt(191), amt(116), amt(75)), wantOnDmd: 191 * scale, wantSavings: 75 * scale},
+		{name: "explicit zero on-demand and total stay zero, not skipped", rec: build(amt(0), amt(0), amt(0))},
+		{name: "absent on-demand amount", rec: build(nil, amt(116), amt(75)), wantErr: "missing CostWithNoReservedInstances"},
+		{name: "on-demand amount without value", rec: build(noValue, amt(116), amt(75)), wantErr: "missing CostWithNoReservedInstances"},
+		{name: "absent total amount", rec: build(amt(191), nil, amt(75)), wantErr: "missing TotalCostWithReservedInstances"},
+		{name: "total amount without value", rec: build(amt(191), noValue, amt(75)), wantErr: "missing TotalCostWithReservedInstances"},
+		{name: "absent net savings is not used and does not skip", rec: build(amt(191), amt(116), nil), wantOnDmd: 191 * scale, wantSavings: 75 * scale},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := ExtractConsumption(tc.rec)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.Nil(t, f)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, f)
+			assert.InDelta(t, tc.wantOnDmd, f.OnDemandCost, 1e-9)
+			assert.InDelta(t, tc.wantSavings, f.EstimatedSavings, 1e-9)
 		})
 	}
 }

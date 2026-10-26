@@ -5,11 +5,13 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/costexplorer/types"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
 )
 
 func TestGetServiceStringForCostExplorer(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		service  common.ServiceType
@@ -86,12 +88,9 @@ func TestGetServiceStringForCostExplorer(t *testing.T) {
 }
 
 func TestConvertPaymentOption(t *testing.T) {
-	// convertPaymentOption is the legacy wrapper used by client.go (RI path,
-	// owned by #865/#1075); it silently returns the empty ("") PaymentOption
-	// for unrecognized values, which Cost Explorer then rejects with a
-	// validation error. This test covers the valid cases only; the fail-loud
-	// path is tested by TestConvertPaymentOptionE_FailLoud. New callers must
-	// use convertPaymentOptionE and propagate the error.
+	t.Parallel()
+	// Valid cases only; the fail-loud path is tested by
+	// TestConvertPaymentOptionE_FailLoud.
 	tests := []struct {
 		name     string
 		option   string
@@ -116,7 +115,8 @@ func TestConvertPaymentOption(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := convertPaymentOption(tt.option)
+			result, err := convertPaymentOptionE(tt.option)
+			require.NoError(t, err)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -124,12 +124,11 @@ func TestConvertPaymentOption(t *testing.T) {
 
 // TestConvertPaymentOptionE_FailLoud is the regression test for H3:
 // convertPaymentOptionE must return an error on any unrecognized payment option
-// instead of silently substituting the empty ("") PaymentOption (the old
-// behavior of the convertPaymentOption default branch, which surfaced to CE
-// as a confusing validation error). Callers on the SP recommendation path use
+// instead of silently substituting the empty ("") PaymentOption. Callers on the SP recommendation path use
 // this erroring variant so a typo or new/renamed option is caught before the
 // wrong recs are queried.
 func TestConvertPaymentOptionE_FailLoud(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		option      string
@@ -163,6 +162,7 @@ func TestConvertPaymentOptionE_FailLoud(t *testing.T) {
 // convertTermInYearsE must error on unrecognized terms rather than silently
 // returning the empty ("") TermInYears (which CE then rejects).
 func TestConvertTermInYearsE_FailLoud(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		term        string
@@ -197,6 +197,7 @@ func TestConvertTermInYearsE_FailLoud(t *testing.T) {
 // convertLookbackPeriodE must error on unrecognized periods rather than
 // silently returning the empty ("") LookbackPeriodInDays (which CE then rejects).
 func TestConvertLookbackPeriodE_FailLoud(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		period      string
@@ -230,10 +231,8 @@ func TestConvertLookbackPeriodE_FailLoud(t *testing.T) {
 }
 
 func TestConvertTermInYears(t *testing.T) {
-	// convertTermInYears is the legacy wrapper used by client.go (RI path);
-	// it silently returns the empty ("") TermInYears for unrecognized values,
-	// which Cost Explorer then rejects with a validation error. This test
-	// covers the valid cases only; the fail-loud path is tested by
+	t.Parallel()
+	// Valid cases only; the fail-loud path is tested by
 	// TestConvertTermInYearsE_FailLoud.
 	tests := []struct {
 		name     string
@@ -264,17 +263,16 @@ func TestConvertTermInYears(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := convertTermInYears(tt.term)
+			result, err := convertTermInYearsE(tt.term)
+			require.NoError(t, err)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
 }
 
 func TestConvertLookbackPeriod(t *testing.T) {
-	// convertLookbackPeriod is the legacy wrapper used by client.go (RI path);
-	// it silently returns the empty ("") LookbackPeriodInDays for unrecognized
-	// values, which Cost Explorer then rejects with a validation error. This
-	// test covers valid cases only; the fail-loud path is tested by
+	t.Parallel()
+	// Valid cases only; the fail-loud path is tested by
 	// TestConvertLookbackPeriodE_FailLoud.
 	tests := []struct {
 		name     string
@@ -315,13 +313,15 @@ func TestConvertLookbackPeriod(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := convertLookbackPeriod(tt.period)
+			result, err := convertLookbackPeriodE(tt.period)
+			require.NoError(t, err)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
 }
 
 func TestConvertSavingsPlansPaymentOption(t *testing.T) {
+	t.Parallel()
 	// SP wrappers now return (value, error); valid options must succeed.
 	result, err := convertSavingsPlansPaymentOption("all-upfront")
 	assert.NoError(t, err)
@@ -337,6 +337,7 @@ func TestConvertSavingsPlansPaymentOption(t *testing.T) {
 }
 
 func TestConvertSavingsPlansTermInYears(t *testing.T) {
+	t.Parallel()
 	result, err := convertSavingsPlansTermInYears("3yr")
 	assert.NoError(t, err)
 	assert.Equal(t, types.TermInYearsThreeYears, result)
@@ -351,6 +352,7 @@ func TestConvertSavingsPlansTermInYears(t *testing.T) {
 }
 
 func TestConvertSavingsPlansLookbackPeriod(t *testing.T) {
+	t.Parallel()
 	result, err := convertSavingsPlansLookbackPeriod("7d")
 	assert.NoError(t, err)
 	assert.Equal(t, types.LookbackPeriodInDaysSevenDays, result)
@@ -365,6 +367,7 @@ func TestConvertSavingsPlansLookbackPeriod(t *testing.T) {
 }
 
 func TestNormalizeRegionName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		region   string
@@ -550,6 +553,15 @@ func TestNormalizeRegionName(t *testing.T) {
 			region:   "il-central-1",
 			expected: "il-central-1",
 		},
+		{name: "Europe (Ireland)", region: "Europe (Ireland)", expected: "eu-west-1"},
+		{name: "Europe (Frankfurt)", region: "Europe (Frankfurt)", expected: "eu-central-1"},
+		{name: "Europe (London)", region: "Europe (London)", expected: "eu-west-2"},
+		{name: "Europe (Paris)", region: "Europe (Paris)", expected: "eu-west-3"},
+		{name: "Europe (Stockholm)", region: "Europe (Stockholm)", expected: "eu-north-1"},
+		{name: "Asia Pacific (Malaysia)", region: "Asia Pacific (Malaysia)", expected: "ap-southeast-5"},
+		{name: "Asia Pacific (Thailand)", region: "Asia Pacific (Thailand)", expected: "ap-southeast-7"},
+		{name: "Canada West (Calgary)", region: "Canada West (Calgary)", expected: "ca-west-1"},
+		{name: "Mexico (Central)", region: "Mexico (Central)", expected: "mx-central-1"},
 		{
 			name:     "Unknown region returns as-is",
 			region:   "Unknown Region",
@@ -562,5 +574,54 @@ func TestNormalizeRegionName(t *testing.T) {
 			result := normalizeRegionName(tt.region)
 			assert.Equal(t, tt.expected, result)
 		})
+	}
+}
+
+// TestNormalizeRegionName_NoCollisions walks the full alias map: every display
+// name resolves to its code, no two names share a code except the documented
+// EU/Europe prefix pairs, and the regions added from partitions.json are pinned.
+func TestNormalizeRegionName_NoCollisions(t *testing.T) {
+	t.Parallel()
+	euPairs := map[string]string{
+		"EU (Ireland)": "Europe (Ireland)", "EU (Frankfurt)": "Europe (Frankfurt)",
+		"EU (London)": "Europe (London)", "EU (Paris)": "Europe (Paris)",
+		"EU (Stockholm)": "Europe (Stockholm)",
+	}
+	byCode := map[string]string{}
+	for name, code := range regionAliases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, code, normalizeRegionName(name))
+			assert.NotEqual(t, name, code)
+		})
+		prev, dup := byCode[code]
+		if dup {
+			assert.True(t, euPairs[name] == prev || euPairs[prev] == name,
+				"%q and %q both map to %q", prev, name, code)
+		}
+		byCode[code] = name
+	}
+}
+
+// TestNormalizeRegionName_PartitionsJSONAliases pins the aliases taken from
+// aws-sdk-go-v2 internal/endpoints/awsrulesfn/partitions.json (v1.41.5).
+func TestNormalizeRegionName_PartitionsJSONAliases(t *testing.T) {
+	t.Parallel()
+	for name, code := range map[string]string{
+		"Asia Pacific (Taipei)":                  "ap-east-2",
+		"Asia Pacific (New Zealand)":             "ap-southeast-6",
+		"China (Beijing)":                        "cn-north-1",
+		"China (Ningxia)":                        "cn-northwest-1",
+		"AWS European Sovereign Cloud (Germany)": "eusc-de-east-1",
+		"US ISO East":                            "us-iso-east-1",
+		"US ISO WEST":                            "us-iso-west-1",
+		"US ISOB East (Ohio)":                    "us-isob-east-1",
+		"US ISOB West":                           "us-isob-west-1",
+		"EU ISOE West":                           "eu-isoe-west-1",
+		"US ISOF EAST":                           "us-isof-east-1",
+		"US ISOF SOUTH":                          "us-isof-south-1",
+		"AWS GovCloud (US-East)":                 "us-gov-east-1",
+		"AWS GovCloud (US-West)":                 "us-gov-west-1",
+	} {
+		assert.Equal(t, code, normalizeRegionName(name), name)
 	}
 }

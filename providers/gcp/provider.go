@@ -93,12 +93,11 @@ func (r *realResourceManagerService) ListProjects(ctx context.Context) ([]*cloud
 
 // Provider implements the provider.Provider interface for Google Cloud Platform.
 type Provider struct {
-	ctx                    context.Context
-	projectID              string
-	clientOpts             []option.ClientOption
 	projectsClient         ProjectsClient
 	regionsClient          RegionsClient
 	resourceManagerService ResourceManagerService
+	projectID              string
+	clientOpts             []option.ClientOption
 }
 
 // NewProvider creates a new GCP provider.
@@ -112,7 +111,7 @@ type Provider struct {
 // oauth2.TokenSource, it is installed via option.WithTokenSource so all
 // downstream clients use those credentials. Otherwise, clients fall back
 // to Application Default Credentials.
-func NewProvider(config *provider.ProviderConfig) (*Provider, error) {
+func NewProvider(config *provider.Config) (*Provider, error) {
 	ctx := context.Background()
 
 	projectID := resolveGCPProjectID(config)
@@ -139,7 +138,6 @@ func NewProvider(config *provider.ProviderConfig) (*Provider, error) {
 	}
 
 	return &Provider{
-		ctx:        ctx,
 		projectID:  projectID,
 		clientOpts: clientOpts,
 	}, nil
@@ -148,7 +146,7 @@ func NewProvider(config *provider.ProviderConfig) (*Provider, error) {
 // resolveGCPProjectID picks the project ID from the typed field, falling
 // back to the deprecated Profile field. Returns "" if neither is set, which
 // signals the caller to consult ADC.
-func resolveGCPProjectID(config *provider.ProviderConfig) string {
+func resolveGCPProjectID(config *provider.Config) string {
 	if config == nil {
 		return ""
 	}
@@ -161,7 +159,6 @@ func resolveGCPProjectID(config *provider.ProviderConfig) string {
 // NewProviderWithProject creates a new GCP provider with a specific project.
 func NewProviderWithProject(ctx context.Context, projectID string, opts ...option.ClientOption) *Provider {
 	return &Provider{
-		ctx:        ctx,
 		projectID:  projectID,
 		clientOpts: opts,
 	}
@@ -460,11 +457,13 @@ func convertGCPRegion(region *computepb.Region) *common.Region {
 
 // GetSupportedServices returns the GCP services that have commitment
 // recommendations. Cloud Storage is excluded: it has no commitment product.
+// Cloud SQL and Memorystore are excluded too: their CUDs are spend-based and
+// recommended only at Cloud Billing account scope, which this project-scoped
+// provider does not collect yet (issue #294). GetServiceClient still builds
+// their clients for pricing and validation.
 func (p *Provider) GetSupportedServices() []common.ServiceType {
 	return []common.ServiceType{
 		common.ServiceCompute,
-		common.ServiceRelationalDB,
-		common.ServiceCache,
 	}
 }
 
@@ -472,7 +471,7 @@ func (p *Provider) GetSupportedServices() []common.ServiceType {
 func (p *Provider) GetServiceClient(ctx context.Context, service common.ServiceType, region string) (provider.ServiceClient, error) {
 	switch service {
 	case common.ServiceCompute:
-		return computeengine.NewClient(ctx, p.projectID, region, p.clientOpts...)
+		return computeengine.NewClient(p.projectID, region, p.clientOpts...)
 	case common.ServiceRelationalDB:
 		return cloudsql.NewClient(ctx, p.projectID, region, p.clientOpts...)
 	case common.ServiceCache:
@@ -487,7 +486,6 @@ func (p *Provider) GetServiceClient(ctx context.Context, service common.ServiceT
 // GetRecommendationsClient creates a recommendations client.
 func (p *Provider) GetRecommendationsClient(ctx context.Context) (provider.RecommendationsClient, error) {
 	return &RecommendationsClientAdapter{
-		ctx:        ctx,
 		projectID:  p.projectID,
 		clientOpts: p.clientOpts,
 	}, nil
@@ -551,7 +549,7 @@ func findActiveProjectInPage(out *string, page *cloudresourcemanager.ListProject
 
 func init() {
 	// Register GCP provider in the global registry
-	if err := provider.RegisterProvider("gcp", func(config *provider.ProviderConfig) (provider.Provider, error) {
+	if err := provider.RegisterProvider("gcp", func(config *provider.Config) (provider.Provider, error) {
 		return NewProvider(config)
 	}); err != nil {
 		panic("failed to register GCP provider: " + err.Error())

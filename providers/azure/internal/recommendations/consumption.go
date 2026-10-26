@@ -27,6 +27,18 @@ const consumptionLookBack = "Last7Days"
 // it is the only one a recommendation may be denominated in.
 const currencyUSD = "USD"
 
+// ErrNotUSD marks a recommendation skipped because its source amounts are not
+// denominated in USD; common.Recommendation costs are USD by contract.
+var ErrNotUSD = errors.New("recommendation amounts are not denominated in USD")
+
+// RequireUSDCode returns an error wrapping ErrNotUSD unless code is USD.
+func RequireUSDCode(code string) error {
+	if !strings.EqualFold(code, currencyUSD) {
+		return fmt.Errorf("%w: currencyCode %q", ErrNotUSD, code)
+	}
+	return nil
+}
+
 // ConsumptionFilter builds the OData filter for the Consumption
 // ReservationRecommendations API: Shared scope, one resource type and an
 // explicit lookback window.
@@ -173,8 +185,8 @@ func TermYears(term string) (int, error) {
 // ReservationPrice is the retail price of one reservation unit for a whole
 // term (the Retail Prices API's priceType 'Reservation' row), in Currency.
 type ReservationPrice struct {
-	Total    float64
 	Currency string
+	Total    float64
 }
 
 // PriceFunc resolves the term-total retail price of one reservation unit.
@@ -186,8 +198,8 @@ type priceKey struct {
 }
 
 type priceResult struct {
-	price float64
 	err   error
+	price float64
 }
 
 // Pricer resolves reservation unit prices through lookup, once per distinct
@@ -196,9 +208,9 @@ type priceResult struct {
 // catalog (see IsCollectionFailure) is never cached. It is meant
 // to live for one GetRecommendations call and is not safe for concurrent use.
 type Pricer struct {
-	service string
 	lookup  PriceFunc
 	cache   map[priceKey]priceResult
+	service string
 }
 
 // NewPricer returns a Pricer for service backed by lookup.
@@ -288,8 +300,8 @@ func ExpandConsumptionVariants(ctx context.Context, base common.Recommendation, 
 // SkipLog collects the recommendations a collection dropped. It is attached
 // to the collection context by WithSkipLog and is safe for concurrent use.
 type SkipLog struct {
-	mu      sync.Mutex
 	entries []string
+	mu      sync.Mutex
 }
 
 type skipLogKey struct{}

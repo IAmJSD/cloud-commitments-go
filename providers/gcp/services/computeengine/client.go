@@ -244,7 +244,7 @@ type MachineTypesIterator interface {
 
 // BillingService interface for billing operations (enables mocking).
 type BillingService interface {
-	ListSKUs(serviceID string) (*cloudbilling.ListSkusResponse, error)
+	ListSKUs(ctx context.Context, serviceID string) (*cloudbilling.ListSkusResponse, error)
 }
 
 // RecommenderIterator interface for recommender iteration (enables mocking).
@@ -260,23 +260,20 @@ type RecommenderClient interface {
 
 // Client handles GCP Compute Engine Committed Use Discounts.
 type Client struct {
-	ctx                 context.Context
-	projectID           string
-	region              string
-	clientOpts          []option.ClientOption
 	commitmentsService  CommitmentsService
 	machineTypesService MachineTypesService
 	billingService      BillingService
 	recommenderClient   RecommenderClient
-
-	skuMu    sync.Mutex
-	skuCache []*cloudbilling.Sku
+	projectID           string
+	region              string
+	clientOpts          []option.ClientOption
+	skuCache            []*cloudbilling.Sku
+	skuMu               sync.Mutex
 }
 
 // NewClient creates a new GCP Compute Engine client.
-func NewClient(ctx context.Context, projectID, region string, opts ...option.ClientOption) (*Client, error) {
+func NewClient(projectID, region string, opts ...option.ClientOption) (*Client, error) {
 	return &Client{
-		ctx:        ctx,
 		projectID:  projectID,
 		region:     region,
 		clientOpts: opts,
@@ -342,14 +339,13 @@ func (r *realMachineTypesService) Close() error {
 
 // realBillingService wraps the real cloudbilling.APIService.
 type realBillingService struct {
-	ctx     context.Context
 	service *cloudbilling.APIService
 }
 
 // ListSKUs returns every SKU of the service: the Compute Engine catalog is
 // 33,453 SKUs over 7 pages of 5000, so a single call misses most of it.
-func (r *realBillingService) ListSKUs(serviceID string) (*cloudbilling.ListSkusResponse, error) {
-	skus, err := skulist.All(r.ctx, r.service.Services.Skus.List(serviceID).PageSize(skuPageSize), skulist.DefaultMaxPages)
+func (r *realBillingService) ListSKUs(ctx context.Context, serviceID string) (*cloudbilling.ListSkusResponse, error) {
+	skus, err := skulist.All(ctx, r.service.Services.Skus.List(serviceID).PageSize(skuPageSize), skulist.DefaultMaxPages)
 	if err != nil {
 		return nil, fmt.Errorf("computeengine: list SKUs for %s: %w", serviceID, err)
 	}
@@ -844,14 +840,14 @@ func (c *Client) buildInsertRequest(rec common.Recommendation, opts common.Purch
 
 	// This client supports VCPU+MEMORY commitments; memory Amount is in MB.
 	commitment := &computepb.Commitment{
-		Name:        stringPtr(commitmentName),
-		Plan:        stringPtr(plan),
-		Type:        stringPtr(commitType.String()),
-		Description: stringPtr(description),
+		Name:        new(commitmentName),
+		Plan:        new(plan),
+		Type:        new(commitType.String()),
+		Description: new(description),
 		Resources: []*computepb.ResourceCommitment{
 			{
-				Type:   stringPtr(computepb.ResourceCommitment_VCPU.String()),
-				Amount: int64Ptr(int64(rec.Count)),
+				Type:   new(computepb.ResourceCommitment_VCPU.String()),
+				Amount: new(int64(rec.Count)),
 			},
 			{
 				// GCP's ResourceCommitment.Type enum is VCPU/MEMORY/LOCAL_SSD/
@@ -859,8 +855,8 @@ func (c *Client) buildInsertRequest(rec common.Recommendation, opts common.Purch
 				// MB). Sending "MEMORY_MB" is an invalid enum value and GCP rejects
 				// the commitments.insert, failing the purchase (issue #1022). Taking
 				// the wire value from the SDK enum keeps that compiler-checked.
-				Type:   stringPtr(computepb.ResourceCommitment_MEMORY.String()),
-				Amount: int64Ptr(memMB),
+				Type:   new(computepb.ResourceCommitment_MEMORY.String()),
+				Amount: new(memMB),
 			},
 		},
 	}
@@ -875,7 +871,7 @@ func (c *Client) buildInsertRequest(rec common.Recommendation, opts common.Purch
 		return nil, "", fmt.Errorf("derive GCP request ID: %w", err)
 	}
 	if requestID != "" {
-		insertReq.RequestId = stringPtr(requestID)
+		insertReq.RequestId = new(requestID)
 		log.Printf("GCP CUD purchase using idempotent request ID for token %s (commitment %s); a re-drive will not double-purchase (issue #654)",
 			common.MaskToken(opts.IdempotencyToken), commitmentName)
 	}
@@ -1003,7 +999,7 @@ func (c *Client) getOrCreateBillingService(ctx context.Context) (BillingService,
 		return nil, fmt.Errorf("failed to create billing service: %w", err)
 	}
 
-	return &realBillingService{ctx: ctx, service: service}, nil
+	return &realBillingService{service: service}, nil
 }
 
 // convertGCPRecommendation converts a GCP Recommender recommendation to common format.
@@ -1166,13 +1162,18 @@ func machineTypeFromResourcePath(resource string) (string, bool) {
 
 // savingsWindow is the period EstimatedSavings is reported over: a 730-hour
 // month (8760 / 12), the month length used across the providers.
-const savingsWindow = 730 * time.Hour
+const savingsWindow = common.HoursPerMonth * time.Hour
+
+// savingsCurrency is the only currency EstimatedSavings can be reported in:
+// downstream consumers treat it as USD.
+const savingsCurrency = "USD"
 
 // extractCostImpactFromRecommendation extracts the cost impact from a GCP
 // recommendation and normalizes it to savingsWindow using the projection's
 // Duration. A non-zero cost with a missing or non-positive Duration is an error
 // wrapping errBadAmount: the window is unknown, so the amount cannot be trusted
-// as monthly.
+// as monthly. A non-zero cost whose currency is not USD (or is missing) is also
+// an errBadAmount, since the value would otherwise be consumed as USD.
 func extractCostImpactFromRecommendation(gcpRec *recommenderpb.Recommendation, rec *common.Recommendation) error {
 	if gcpRec.PrimaryImpact == nil {
 		return nil
@@ -1186,6 +1187,9 @@ func extractCostImpactFromRecommendation(gcpRec *recommenderpb.Recommendation, r
 	cost := costProj.Cost
 	if cost.Units == 0 && cost.Nanos == 0 {
 		return nil
+	}
+	if cost.CurrencyCode != savingsCurrency {
+		return fmt.Errorf("%w: cost projection currency is %q, only %s is supported", errBadAmount, cost.CurrencyCode, savingsCurrency)
 	}
 	if costProj.GetDuration() == nil || costProj.GetDuration().AsDuration() <= 0 {
 		return fmt.Errorf("%w: cost projection has a non-zero cost but no positive duration", errBadAmount)
@@ -1451,12 +1455,3 @@ func idempotentCommitmentName(token string) (string, error) {
 }
 
 var idempotencyTokenPattern = regexp.MustCompile(`^[0-9a-f]+$`)
-
-// Helper functions.
-func stringPtr(s string) *string {
-	return &s
-}
-
-func int64Ptr(i int64) *int64 {
-	return &i
-}

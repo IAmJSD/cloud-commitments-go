@@ -18,6 +18,7 @@ import (
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/httpclient"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/pricing"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/slot"
 )
 
 // SavingsPlanOrderAliasAPI defines operations on SavingsPlanOrderAlias (enables mocking).
@@ -61,7 +62,7 @@ type HTTPClient interface {
 }
 
 // Client handles Azure Savings Plans.
-type Client struct {
+type Client struct { //nolint:govet // fieldalignment: file owned by open PR #491
 	cred           azcore.TokenCredential
 	subscriptionID string
 	region         string
@@ -171,7 +172,7 @@ func (c *Client) listCommitments(ctx context.Context, covering bool) ([]common.C
 		if pageIndex > maxSavingsPlanPages {
 			return nil, fmt.Errorf("failed to list savings plans: pagination cap (%d pages) reached", maxSavingsPlanPages)
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			return nil, fmt.Errorf("failed to list savings plans: %w", err)
 		}
@@ -341,6 +342,21 @@ func commitmentCurrency(d *common.SavingsPlanDetails) (string, error) {
 	return strings.ToUpper(d.Currency), nil
 }
 
+// savingsPlanSKUName maps a CUDly PlanType to the ARM SKU name that the
+// SavingsPlanOrderAlias and validatePurchase bodies carry in sku.name. Azure
+// names the compute savings plan SKU "Compute_Savings_Plan" (the armSkuName the
+// Benefit Recommendations API returns), while CUDly's PlanType is "Compute"
+// (issue #387). The ARM name itself is accepted as-is. Anything else fails
+// closed before any Azure call rather than sending a sku.name Azure rejects.
+func savingsPlanSKUName(planType string) (string, error) {
+	switch planType {
+	case "Compute", armSkuComputeSavingsPlan:
+		return armSkuComputeSavingsPlan, nil
+	default:
+		return "", fmt.Errorf("azure savings plan type %q has no known Azure savings plan SKU", planType)
+	}
+}
+
 // PurchaseCommitment creates an Azure Savings Plan via the OrderAlias API.
 //
 // Idempotency: the SavingsPlanOrderAlias is created with an HTTP PUT on the
@@ -367,22 +383,11 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		return result, result.Error
 	}
 
-	term, err := toAzureTerm(rec.Term)
+	body, err := c.purchaseOrderBody(rec, spDetails)
 	if err != nil {
 		result.Error = err
 		return result, result.Error
 	}
-
-	grain := armbillingbenefits.CommitmentGrainHourly
-	billingScopeID := c.billingScopeID()
-	appliedScope := armbillingbenefits.AppliedScopeTypeShared
-	hourlyAmount := spDetails.HourlyCommitment
-	currency, err := commitmentCurrency(spDetails)
-	if err != nil {
-		result.Error = err
-		return result, result.Error
-	}
-	displayName := fmt.Sprintf("cudly-%s-%s", spDetails.PlanType, rec.Term)
 	// Derive a deterministic alias name from the idempotency token when present
 	// so a re-drive PUTs the same alias (idempotent), falling back to the prior
 	// timestamp-based name on the CLI path (empty token). A malformed non-empty
@@ -394,31 +399,10 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		return result, result.Error
 	}
 
-	body := armbillingbenefits.SavingsPlanOrderAliasModel{
-		SKU: &armbillingbenefits.SKU{Name: toPtr(spDetails.PlanType)},
-		Properties: &armbillingbenefits.SavingsPlanOrderAliasProperties{
-			DisplayName:      &displayName,
-			BillingScopeID:   &billingScopeID,
-			Term:             &term,
-			AppliedScopeType: &appliedScope,
-			Commitment: &armbillingbenefits.Commitment{
-				Amount:       &hourlyAmount,
-				CurrencyCode: &currency,
-				Grain:        &grain,
-			},
-		},
-	}
-
-	var aliasClient SavingsPlanOrderAliasAPI
-	if c.orderAliasClient != nil {
-		aliasClient = c.orderAliasClient
-	} else {
-		client, clientErr := armbillingbenefits.NewSavingsPlanOrderAliasClient(c.cred, nil)
-		if clientErr != nil {
-			result.Error = fmt.Errorf("failed to create order alias client: %w", clientErr)
-			return result, result.Error
-		}
-		aliasClient = &realOrderAliasClient{client: client}
+	aliasClient, err := c.orderAlias()
+	if err != nil {
+		result.Error = err
+		return result, result.Error
 	}
 
 	poller, err := aliasClient.BeginCreate(ctx, aliasName, body, nil)
@@ -442,6 +426,56 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 	}
 
 	return result, nil
+}
+
+// purchaseOrderBody builds the order-alias request for a savings plan
+// purchase. The term, currency and SKU name are validated here, so an invalid
+// recommendation fails before any Azure client exists.
+func (c *Client) purchaseOrderBody(rec common.Recommendation, spDetails *common.SavingsPlanDetails) (armbillingbenefits.SavingsPlanOrderAliasModel, error) {
+	term, err := toAzureTerm(rec.Term)
+	if err != nil {
+		return armbillingbenefits.SavingsPlanOrderAliasModel{}, err
+	}
+	currency, err := commitmentCurrency(spDetails)
+	if err != nil {
+		return armbillingbenefits.SavingsPlanOrderAliasModel{}, err
+	}
+	skuName, err := savingsPlanSKUName(spDetails.PlanType)
+	if err != nil {
+		return armbillingbenefits.SavingsPlanOrderAliasModel{}, err
+	}
+	grain := armbillingbenefits.CommitmentGrainHourly
+	billingScopeID := c.billingScopeID()
+	appliedScope := armbillingbenefits.AppliedScopeTypeShared
+	hourlyAmount := spDetails.HourlyCommitment
+	displayName := fmt.Sprintf("cudly-%s-%s", spDetails.PlanType, rec.Term)
+	return armbillingbenefits.SavingsPlanOrderAliasModel{
+		SKU: &armbillingbenefits.SKU{Name: toPtr(skuName)},
+		Properties: &armbillingbenefits.SavingsPlanOrderAliasProperties{
+			DisplayName:      &displayName,
+			BillingScopeID:   &billingScopeID,
+			Term:             &term,
+			AppliedScopeType: &appliedScope,
+			Commitment: &armbillingbenefits.Commitment{
+				Amount:       &hourlyAmount,
+				CurrencyCode: &currency,
+				Grain:        &grain,
+			},
+		},
+	}, nil
+}
+
+// orderAlias returns the injected order-alias client, or a real one built
+// from the client's credential.
+func (c *Client) orderAlias() (SavingsPlanOrderAliasAPI, error) {
+	if c.orderAliasClient != nil {
+		return c.orderAliasClient, nil
+	}
+	client, err := armbillingbenefits.NewSavingsPlanOrderAliasClient(c.cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create order alias client: %w", err)
+	}
+	return &realOrderAliasClient{client: client}, nil
 }
 
 // ValidateOffering checks whether the Savings Plan configuration is valid.
@@ -484,12 +518,16 @@ func (c *Client) buildValidateBody(rec common.Recommendation) (armbillingbenefit
 	if err != nil {
 		return armbillingbenefits.SavingsPlanPurchaseValidateRequest{}, err
 	}
+	skuName, err := savingsPlanSKUName(spDetails.PlanType)
+	if err != nil {
+		return armbillingbenefits.SavingsPlanPurchaseValidateRequest{}, err
+	}
 	displayName := "cudly-validate"
 
 	return armbillingbenefits.SavingsPlanPurchaseValidateRequest{
 		Benefits: []*armbillingbenefits.SavingsPlanOrderAliasModel{
 			{
-				SKU: &armbillingbenefits.SKU{Name: toPtr(spDetails.PlanType)},
+				SKU: &armbillingbenefits.SKU{Name: toPtr(skuName)},
 				Properties: &armbillingbenefits.SavingsPlanOrderAliasProperties{
 					DisplayName:      &displayName,
 					BillingScopeID:   &billingScopeID,
@@ -603,9 +641,13 @@ func (c *Client) GetOfferingDetails(ctx context.Context, rec common.Recommendati
 // Returns an error when no price record is found rather than (0, nil), which would
 // conflate "zero rate" with "not found" (feedback_nullable_not_zero).
 func (c *Client) fetchOnDemandRate(ctx context.Context, planType string) (float64, error) {
+	qPlan, err := pricing.ODataString(planType)
+	if err != nil {
+		return 0, err
+	}
 	filter := fmt.Sprintf(
-		"serviceFamily eq 'Compute' and priceType eq 'Consumption' and armSkuName eq '%s'",
-		planType,
+		"serviceFamily eq 'Compute' and priceType eq 'Consumption' and armSkuName eq %s",
+		qPlan,
 	)
 	params := url.Values{}
 	params.Add("$filter", filter)

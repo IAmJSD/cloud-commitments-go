@@ -3,6 +3,7 @@ package savingsplans
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -15,9 +16,15 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/savingsplans/types"
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/offeringprice"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/purchasecfg"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/spcommitment"
 )
+
+// ErrUnsupportedPartition is returned for Savings Plans offering lookups and
+// purchases in a partition the USD-only purchase path cannot price (aws-cn
+// bills in CNY).
+var ErrUnsupportedPartition = errors.New("savings plans are not supported in the aws-cn partition: the purchase path is USD-only")
 
 // API defines the interface for Savings Plans operations (enables mocking).
 type API interface {
@@ -136,9 +143,7 @@ func (c *Client) GetExistingCommitments(ctx context.Context) ([]common.Commitmen
 
 		page++
 		if page > maxCommitmentPages {
-			log.Printf("WARNING: savingsplans.GetExistingCommitments reached page cap (%d) — returning partial results (issue #1019)",
-				maxCommitmentPages)
-			break
+			return nil, fmt.Errorf("pagination cap reached after %d pages for Savings Plans commitments (issue #561)", maxCommitmentPages)
 		}
 
 		input := &savingsplans.DescribeSavingsPlansInput{
@@ -158,7 +163,11 @@ func (c *Client) GetExistingCommitments(ctx context.Context) ([]common.Commitmen
 		}
 
 		for i := range result.SavingsPlans {
-			if commitment, ok := c.toCommitment(result.SavingsPlans[i], service); ok {
+			commitment, ok, err := c.toCommitment(result.SavingsPlans[i], service)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
 				commitments = append(commitments, commitment)
 			}
 		}
@@ -176,13 +185,15 @@ func (c *Client) GetExistingCommitments(ctx context.Context) ([]common.Commitmen
 // common.Commitment, returning ok=false for entries that should be skipped
 // (missing ID, or a plan type that does not match this client's scope). It is
 // split out of GetExistingCommitments to keep that function under the
-// cyclomatic limit.
-func (c *Client) toCommitment(sp types.SavingsPlan, service common.ServiceType) (common.Commitment, bool) {
+// cyclomatic limit. A start or end date that is missing or not RFC3339 is an
+// error naming the plan ID (and the bad value); a zero StartDate would never
+// count as recent in the purchase dedupe.
+func (c *Client) toCommitment(sp types.SavingsPlan, service common.ServiceType) (common.Commitment, bool, error) {
 	if sp.SavingsPlanId == nil {
-		return common.Commitment{}, false
+		return common.Commitment{}, false, nil
 	}
 	if c.planType != "" && sp.SavingsPlanType != c.planType {
-		return common.Commitment{}, false
+		return common.Commitment{}, false, nil
 	}
 
 	commitment := common.Commitment{
@@ -196,18 +207,24 @@ func (c *Client) toCommitment(sp types.SavingsPlan, service common.ServiceType) 
 		State:          common.CommitmentState(sp.State),
 	}
 
-	if sp.Start != nil {
-		if startTime, err := time.Parse(time.RFC3339, *sp.Start); err == nil {
-			commitment.StartDate = startTime
-		}
+	if sp.Start == nil {
+		return common.Commitment{}, false, fmt.Errorf("savings plan %s: missing start date", *sp.SavingsPlanId)
 	}
-	if sp.End != nil {
-		if endTime, err := time.Parse(time.RFC3339, *sp.End); err == nil {
-			commitment.EndDate = endTime
-		}
+	startTime, err := time.Parse(time.RFC3339, *sp.Start)
+	if err != nil {
+		return common.Commitment{}, false, fmt.Errorf("savings plan %s: invalid start date %q: %w", *sp.SavingsPlanId, *sp.Start, err)
 	}
+	commitment.StartDate = startTime
+	if sp.End == nil {
+		return common.Commitment{}, false, fmt.Errorf("savings plan %s: missing end date", *sp.SavingsPlanId)
+	}
+	endTime, err := time.Parse(time.RFC3339, *sp.End)
+	if err != nil {
+		return common.Commitment{}, false, fmt.Errorf("savings plan %s: invalid end date %q: %w", *sp.SavingsPlanId, *sp.End, err)
+	}
+	commitment.EndDate = endTime
 
-	return commitment, true
+	return commitment, true, nil
 }
 
 // PurchaseCommitment purchases a Savings Plan.
@@ -449,6 +466,20 @@ func (c *Client) collectSPOfferings(ctx context.Context, input *savingsplans.Des
 	return offerings, nil
 }
 
+// checkedPlanType fails closed on unsupported partitions before any AWS call
+// (the pinned USD currency filter and USD OfferingDetails are wrong for
+// CNY-billed partitions), then resolves the plan type.
+func (c *Client) checkedPlanType(rec common.Recommendation, spDetails *common.SavingsPlanDetails) (types.SavingsPlanType, error) {
+	// Every region the request can carry: the client's, the recommendation's
+	// and the plan details' (which feeds the EC2Instance region filter).
+	for _, r := range []string{c.region, rec.Region, spDetails.Region} {
+		if offeringprice.IsChinaRegion(r) {
+			return "", fmt.Errorf("%w (region %q)", ErrUnsupportedPartition, r)
+		}
+	}
+	return c.resolveSPPlanType(spDetails.PlanType)
+}
+
 // findOfferingID finds the appropriate Savings Plans offering ID.
 // execID is the purchase execution UUID for log correlation; pass "" when
 // calling outside of a purchase flow (ValidateOffering, GetOfferingDetails).
@@ -465,7 +496,7 @@ func (c *Client) findOfferingID(ctx context.Context, rec common.Recommendation, 
 
 	// Validate before trusting a CE-supplied offering ID so an invalid plan
 	// type, term or payment option fails loud instead of reaching the purchase.
-	planType, err := c.resolveSPPlanType(spDetails.PlanType)
+	planType, err := c.checkedPlanType(rec, spDetails)
 	if err != nil {
 		return "", err
 	}
@@ -615,9 +646,9 @@ const maxOfferingPages = 5
 // maxCommitmentPages is the maximum number of DescribeSavingsPlans pages to
 // walk when listing existing commitments. 100 pages * 100 items/page = 10,000
 // SPs, which is a realistic upper bound for even large enterprise accounts.
-// Exceeding the cap logs a warning but still returns the commitments collected
-// so far, consistent with the #691 guidance (data loss is worse than a
-// truncation warning for the commitment path).
+// Exceeding the cap returns an error rather than a partial list: these results
+// feed the duplicate-purchase guards, so a truncated list must fail loud
+// (issue #561).
 const maxCommitmentPages = 100
 
 // lookupOfferingID resolves the offering ID for non-EC2Instance Savings Plans
@@ -714,7 +745,7 @@ func calculateHoursInTerm(term string) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return float64(months/12) * 365 * 24, nil
+	return float64(months/12) * common.HoursPerYear, nil
 }
 
 // calculatePaymentBreakdown calculates upfront and recurring costs based on payment option.

@@ -7,7 +7,6 @@ package synapse
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -15,7 +14,6 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/consumption/armconsumption"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/reservations/armreservations"
 
@@ -23,6 +21,7 @@ import (
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/httpclient"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/pricing"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/recommendations"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/slot"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/services/internal/reservations"
 )
 
@@ -59,11 +58,11 @@ type ReservationsDetailsPager interface {
 // Client handles Azure Synapse Analytics Reserved Capacity.
 type Client struct {
 	cred                 azcore.TokenCredential
-	subscriptionID       string
-	region               string
 	httpClient           HTTPClient
 	recommendationsPager RecommendationsPager
 	reservationsPager    ReservationsDetailsPager
+	subscriptionID       string
+	region               string
 }
 
 // NewClient creates a new Azure Synapse Analytics client.
@@ -117,8 +116,6 @@ func (c *Client) GetRegion() string {
 // Synapse Analytics. Private pricing selection uses the shared item shape.
 type RetailPriceItem struct {
 	CurrencyCode    string  `json:"currencyCode"`
-	RetailPrice     float64 `json:"retailPrice"`
-	UnitPrice       float64 `json:"unitPrice"`
 	ArmRegionName   string  `json:"armRegionName"`
 	ProductName     string  `json:"productName"`
 	ServiceName     string  `json:"serviceName"`
@@ -127,6 +124,8 @@ type RetailPriceItem struct {
 	SKUName         string  `json:"skuName"`
 	ReservationTerm string  `json:"reservationTerm"`
 	Type            string  `json:"type"`
+	RetailPrice     float64 `json:"retailPrice"`
+	UnitPrice       float64 `json:"unitPrice"`
 }
 
 // GetRecommendations retrieves Synapse reservation recommendations from the
@@ -161,7 +160,7 @@ func (c *Client) GetRecommendations(ctx context.Context, _ *common.Recommendatio
 		if pageIdx >= maxRecsPages {
 			return nil, fmt.Errorf("synapse: GetRecommendations pagination cap (%d pages) reached", maxRecsPages)
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get Synapse recommendations: %w", err)
 		}
@@ -228,7 +227,7 @@ func (c *Client) collectSynapseReservations(ctx context.Context, pager Reservati
 		if pageIdx >= maxReservationsPages {
 			return nil, fmt.Errorf("synapse: GetExistingCommitments pagination cap (%d pages) reached", maxReservationsPages)
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			return nil, fmt.Errorf("synapse: list reservations: %w", err)
 		}
@@ -305,7 +304,7 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		return result, result.Error
 	}
 	if rec.Count <= 0 {
-		result.Error = fmt.Errorf("quantity must be greater than zero")
+		result.Error = fmt.Errorf("quantity must be greater than zero, got %d", rec.Count)
 		return result, result.Error
 	}
 
@@ -314,8 +313,7 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		result.Error = err
 		return result, result.Error
 	}
-	term, termEnumErr := reservations.ReservationTermForYears(termYears)
-	if termEnumErr != nil {
+	if _, termEnumErr := reservations.ReservationTermForYears(termYears); termEnumErr != nil {
 		result.Error = termEnumErr
 		return result, result.Error
 	}
@@ -325,39 +323,26 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		return result, result.Error
 	}
 
-	requestBody := map[string]interface{}{
-		"sku": map[string]string{
-			"name": rec.ResourceType,
+	bodyBytes, err := reservations.BuildPurchaseBody(reservations.PurchaseParams{
+		ReservedResourceType: string(armreservations.ReservedResourceTypeSQLDataWarehouse),
+		DisplayName: func(r common.Recommendation) string {
+			return reservations.BuildDisplayName(reservations.DisplayNameFields{
+				Service:      "synapse",
+				Region:       c.region,
+				ResourceType: r.ResourceType,
+				Count:        r.Count,
+				Term:         r.Term,
+				Payment:      r.PaymentOption,
+				Now:          time.Now(),
+			})
 		},
-		"location": c.region,
-		"properties": map[string]interface{}{
-			"reservedResourceType": string(armreservations.ReservedResourceTypeSQLDataWarehouse),
-			"billingScopeId":       fmt.Sprintf("/subscriptions/%s", c.subscriptionID),
-			"billingPlan":          string(billingPlan),
-			"term":                 string(term),
-			"quantity":             rec.Count,
-			"displayName":          fmt.Sprintf("Synapse SQL Pool Reservation - %s", rec.ResourceType),
-			"appliedScopeType":     string(armreservations.AppliedScopeTypeShared),
-			"renew":                false,
-		},
-	}
-	reservations.ApplyPurchaseTags(requestBody, opts.Source, opts.IdempotencyToken)
-
-	bodyBytes, err := json.Marshal(requestBody)
+	}, rec, opts, c.region, c.subscriptionID, billingPlan)
 	if err != nil {
 		result.Error = fmt.Errorf("failed to marshal request: %w", err)
 		return result, result.Error
 	}
 
-	token, err := c.cred.GetToken(ctx, policy.TokenRequestOptions{
-		Scopes: []string{"https://management.azure.com/.default"},
-	})
-	if err != nil {
-		result.Error = fmt.Errorf("failed to get access token: %w", err)
-		return result, result.Error
-	}
-
-	reservationOrderID, existing, err := reservations.DoIdempotentPurchaseTwoStep(ctx, c.httpClient, reservations.CalculatePriceURL(), bodyBytes, token.Token, opts.IdempotencyToken)
+	reservationOrderID, existing, err := reservations.Submit(ctx, c.cred, c.httpClient, bodyBytes, opts)
 	if err != nil {
 		result.Error = err
 		return result, result.Error
@@ -455,17 +440,23 @@ func (c *Client) GetValidResourceTypes(_ context.Context) ([]string, error) {
 
 // Pricing holds pricing information for Synapse Analytics.
 type Pricing struct {
-	HourlyRate        float64
-	ReservationPrice  float64
-	OnDemandPrice     float64
-	Currency          string
-	SavingsPercentage float64
+	Currency         string
+	HourlyRate       float64
+	ReservationPrice float64
 }
 
 // getSynapsePricing fetches pricing from the Azure Retail Prices API.
 func (c *Client) getSynapsePricing(ctx context.Context, sku, region string, termYears int) (*Pricing, error) {
-	filter := fmt.Sprintf("serviceName eq 'Azure Synapse Analytics' and productName eq 'Azure Synapse Analytics Dedicated SQL Pool' and armRegionName eq '%s' and skuName eq '%s' and priceType eq 'Reservation'",
-		strings.ReplaceAll(region, "'", "''"), strings.ReplaceAll(sku, "'", "''"))
+	qRegion, err := pricing.ODataString(region)
+	if err != nil {
+		return nil, err
+	}
+	qSKU, err := pricing.ODataString(sku)
+	if err != nil {
+		return nil, err
+	}
+	filter := fmt.Sprintf("serviceName eq 'Azure Synapse Analytics' and productName eq 'Azure Synapse Analytics Dedicated SQL Pool' and armRegionName eq %s and skuName eq %s and priceType eq 'Reservation'",
+		qRegion, qSKU)
 
 	params := url.Values{}
 	params.Add("$filter", filter)
@@ -487,7 +478,7 @@ func (c *Client) getSynapsePricing(ctx context.Context, sku, region string, term
 	}
 
 	return &Pricing{
-		HourlyRate:       selected.RetailPrice / (8760.0 * float64(termYears)),
+		HourlyRate:       selected.RetailPrice / (common.HoursPerYear * float64(termYears)),
 		ReservationPrice: selected.RetailPrice,
 		Currency:         selected.CurrencyCode,
 	}, nil

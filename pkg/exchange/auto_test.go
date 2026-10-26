@@ -22,6 +22,7 @@ type mockExchangeStore struct {
 	dailyReadGate  chan struct{}
 	savedRecords   []*ExchangeRecord
 	cancelledCount int64
+	cancelErr      error
 	staleRecords   []ExchangeRecord
 	dailySpend     string
 	dailySpendErr  error
@@ -54,6 +55,9 @@ func (m *mockExchangeStore) CancelPendingExchangesByOrigin(_ context.Context, or
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cancelByOriginLast = &origin
+	if m.cancelErr != nil {
+		return 0, m.cancelErr
+	}
 	return m.cancelledCount, nil
 }
 
@@ -708,7 +712,25 @@ func TestRunAutoExchange_IdleRI_Skipped(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Len(t, result.Skipped, 1)
-	assert.Contains(t, result.Skipped[0].Reason, "idle")
+	assert.Contains(t, result.Skipped[0].Reason, "completely unused")
+}
+
+func TestRunAutoExchange_MetalWithoutFactor_SkippedWithReason(t *testing.T) {
+	t.Parallel()
+	store := &mockExchangeStore{dailySpend: "0"}
+	client := &mockExchangeClient{quoteResult: defaultQuote()}
+	params := defaultParams(store, client)
+	params.RIs = []RIInfo{{ID: "ri-001", InstanceType: "i3.metal", InstanceCount: 1, OfferingClass: "convertible"}}
+
+	result, err := RunAutoExchange(context.Background(), params)
+	require.NoError(t, err)
+
+	require.Len(t, result.Skipped, 1)
+	assert.Contains(t, result.Skipped[0].Reason, "No normalization factor known")
+	assert.NotContains(t, result.Skipped[0].Reason, "completely unused")
+	assert.Empty(t, result.Pending)
+	assert.Empty(t, result.Completed)
+	assert.Equal(t, 0, client.executeCalls)
 }
 
 // ─── Scoped cancellation tests ────────────────────────────────────────────────
@@ -1109,4 +1131,138 @@ func TestResolveOffering_ForwardsAvailabilityZone(t *testing.T) {
 		InstanceType: "m5.2xlarge", ProductDescription: "Linux/UNIX", Tenancy: "default",
 		Scope: "Availability Zone", AvailabilityZone: "us-east-1b", Duration: 31536000,
 	}, got)
+}
+
+func TestRunAutoExchange_InvalidMode_FailsClosed(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"", "Auto", "autoo", "manual ", "dry-run"} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			t.Parallel()
+			store := &mockExchangeStore{dailySpend: "0"}
+			client := &mockExchangeClient{quoteResult: defaultQuote(), executeResult: "exch-1"}
+			params := defaultParams(store, client)
+			params.Config.Mode = mode
+
+			result, err := RunAutoExchange(context.Background(), params)
+			require.Error(t, err)
+			assert.Nil(t, result)
+			assert.Contains(t, err.Error(), "invalid exchange mode")
+			assert.Zero(t, client.executeCalls)
+			assert.Empty(t, store.savedRecords)
+			assert.Nil(t, store.cancelByOriginLast)
+		})
+	}
+}
+
+func TestRunAutoExchange_CancelPendingFails_StopsRun(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"auto", "manual"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			store := &mockExchangeStore{dailySpend: "0", cancelErr: fmt.Errorf("db down")}
+			client := &mockExchangeClient{quoteResult: defaultQuote(), executeResult: "exch-1"}
+			params := defaultParams(store, client)
+			params.Config.Mode = mode
+
+			result, err := RunAutoExchange(context.Background(), params)
+			require.Error(t, err)
+			assert.Nil(t, result)
+			assert.ErrorContains(t, err, "db down")
+			assert.Zero(t, client.executeCalls)
+			assert.Empty(t, store.savedRecords)
+		})
+	}
+}
+
+func TestRunAutoExchange_CancelPendingFails_DryRunStillRuns(t *testing.T) {
+	t.Parallel()
+	store := &mockExchangeStore{dailySpend: "0", cancelErr: fmt.Errorf("db down")}
+	client := &mockExchangeClient{quoteResult: defaultQuote()}
+	params := defaultParams(store, client)
+	params.DryRun = true
+
+	_, err := RunAutoExchange(context.Background(), params)
+	require.NoError(t, err)
+	assert.Nil(t, store.cancelByOriginLast)
+}
+
+func TestRunAutoExchange_48xlargeRI_IsAnalyzedAndQuoted(t *testing.T) {
+	t.Parallel()
+	store := &mockExchangeStore{dailySpend: "0"}
+	client := &mockExchangeClient{quoteResult: defaultQuote()}
+	params := defaultParams(store, client)
+	params.RIs = []RIInfo{{ID: "ri-001", InstanceType: "m6i.48xlarge", InstanceCount: 1, OfferingClass: "convertible"}}
+	var looked []string
+	params.LookupOffering = func(_ context.Context, p LookupOfferingParams) (string, error) {
+		looked = append(looked, p.InstanceType)
+		return "offering-123", nil
+	}
+
+	result, err := RunAutoExchange(context.Background(), params)
+	require.NoError(t, err)
+
+	assert.Empty(t, result.Skipped)
+	assert.Len(t, result.Pending, 1)
+	assert.Equal(t, []string{"m6i.24xlarge"}, looked)
+}
+
+func TestRunAutoExchange_EqualCapacityReshape_NeverQuoted(t *testing.T) {
+	t.Parallel()
+	store := &mockExchangeStore{dailySpend: "0"}
+	client := &quoteCountingClient{mockExchangeClient: mockExchangeClient{quoteResult: defaultQuote()}}
+	params := defaultParams(store, client)
+	params.RIs = []RIInfo{{ID: "ri-001", InstanceType: "m5.24xlarge", InstanceCount: 1, OfferingClass: "convertible"}}
+	params.Utilization = []UtilizationInfo{{RIID: "ri-001", UtilizationPercent: 51}}
+
+	result, err := RunAutoExchange(context.Background(), params)
+	require.NoError(t, err)
+
+	assert.Empty(t, result.Pending)
+	assert.Empty(t, result.Completed)
+	assert.Equal(t, 0, client.quotes)
+}
+
+type quoteCountingClient struct {
+	mockExchangeClient
+	quotes int
+}
+
+func (c *quoteCountingClient) GetQuote(ctx context.Context, r ExchangeQuoteRequest) (*ExchangeQuoteSummary, error) {
+	c.quotes++
+	return c.mockExchangeClient.GetQuote(ctx, r)
+}
+
+func TestRunAutoExchange_OfferedInstanceTypes_LimitsLookupTargets(t *testing.T) {
+	t.Parallel()
+	store := &mockExchangeStore{dailySpend: "0"}
+	client := &mockExchangeClient{quoteResult: defaultQuote()}
+	params := defaultParams(store, client)
+	params.RIs = []RIInfo{{ID: "ri-001", InstanceType: "m5.12xlarge", InstanceCount: 1, OfferingClass: "convertible"}}
+	params.OfferedInstanceTypes = []string{"m5.large", "m5.xlarge", "m5.2xlarge", "m5.4xlarge", "m5.8xlarge", "m5.12xlarge"}
+	var looked []string
+	params.LookupOffering = func(_ context.Context, p LookupOfferingParams) (string, error) {
+		looked = append(looked, p.InstanceType)
+		return "offering-123", nil
+	}
+
+	result, err := RunAutoExchange(context.Background(), params)
+	require.NoError(t, err)
+
+	assert.Len(t, result.Pending, 1)
+	assert.Equal(t, []string{"m5.4xlarge"}, looked)
+}
+
+func TestRunAutoExchange_FamilyNotOffered_SkippedWithReason(t *testing.T) {
+	t.Parallel()
+	store := &mockExchangeStore{dailySpend: "0"}
+	client := &quoteCountingClient{mockExchangeClient: mockExchangeClient{quoteResult: defaultQuote()}}
+	params := defaultParams(store, client)
+	params.OfferedInstanceTypes = []string{"c5.large", "c5.xlarge"}
+
+	result, err := RunAutoExchange(context.Background(), params)
+	require.NoError(t, err)
+
+	require.Len(t, result.Skipped, 1)
+	assert.Contains(t, result.Skipped[0].Reason, "instance family not offered in region")
+	assert.Equal(t, 0, client.quotes)
 }

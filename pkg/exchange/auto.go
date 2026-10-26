@@ -18,30 +18,32 @@ import (
 //
 //nolint:revive // stutters, but cloud-commitments-platform references this type through pkg's pinned go.mod pseudo-version (not workspace-resolved under GOWORK=off); renaming here without a coordinated go.mod bump would break that build mode
 type ExchangeRecord struct {
-	ID                 string
-	AccountID          string
-	ExchangeID         string
-	Region             string
-	SourceRIIDs        []string
-	SourceInstanceType string
-	SourceCount        int
-	TargetOfferingID   string
-	TargetInstanceType string
-	TargetCount        int
-	PaymentDue         string
-	Status             string
-	ApprovalToken      string
-	Error              string
-	Mode               string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+
 	// LadderRunID links this exchange record to the ladder run that created it.
 	// Nil for standalone ri_exchange_reshape task records.
 	// The database column ri_exchange_history.ladder_run_id was added in
 	// migration 000080 and is the authoritative source for origin scoping.
 	LadderRunID *string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-	CompletedAt *time.Time
-	ExpiresAt   *time.Time
+
+	CompletedAt        *time.Time
+	ExpiresAt          *time.Time
+	ID                 string
+	AccountID          string
+	ExchangeID         string
+	Region             string
+	SourceInstanceType string
+	TargetOfferingID   string
+	TargetInstanceType string
+	PaymentDue         string
+	Status             string
+	ApprovalToken      string
+	Error              string
+	Mode               string
+	SourceRIIDs        []string
+	SourceCount        int
+	TargetCount        int
 }
 
 // RIExchangeStore is the subset of store operations needed by RunAutoExchange.
@@ -106,12 +108,6 @@ type RunAutoExchangeParams struct {
 	Store          RIExchangeStore
 	ExchangeClient ExchangeClientInterface
 	LookupOffering LookupOfferingFunc
-	RIs            []RIInfo
-	Utilization    []UtilizationInfo
-	Config         RIExchangeConfig
-	AccountID      string
-	Region         string
-	DashboardURL   string
 
 	// RIMetadata maps RI ID to its metadata (product description, tenancy, scope, duration).
 	RIMetadata map[string]RIMetadataInfo
@@ -122,6 +118,18 @@ type RunAutoExchangeParams struct {
 	// ladderScoped=true (cancels only ladder-linked pendings). When nil, it
 	// cancels only standalone (ladder_run_id IS NULL) pendings.
 	LadderRunID *string
+
+	AccountID    string
+	Region       string
+	DashboardURL string
+	RIs          []RIInfo
+	Utilization  []UtilizationInfo
+
+	// OfferedInstanceTypes is the region's offered EC2 instance types. Empty keeps
+	// the legacy size ladder; otherwise reshape targets are limited to it.
+	OfferedInstanceTypes []string
+
+	Config RIExchangeConfig
 
 	// DryRun skips all state mutations (cancellations, record saves, exchange
 	// executions). Outcomes are returned with Simulated=true. No store write
@@ -158,16 +166,18 @@ type ExchangeOutcome struct {
 	SourceInstanceType string
 	TargetInstanceType string
 	TargetOfferingID   string
-	TargetCount        int32
 	PaymentDue         string
 	ExchangeID         string
-	UtilizationPct     float64
 	Error              string
+	UtilizationPct     float64
+	TargetCount        int32
+
 	// OutcomeUnknown is true when the accept response was lost, so the exchange
 	// may have executed. It must be reconciled before any retry. The outcome
 	// stays in AutoExchangeResult.Failed (readers of Failed still see it) and
 	// halts the run (no further exchanges are attempted).
 	OutcomeUnknown bool
+
 	// Simulated is true when RunAutoExchangeParams.DryRun was set. The outcome
 	// was analyzed and quoted but no record was saved and no exchange was executed.
 	Simulated bool
@@ -182,32 +192,60 @@ type SkippedRecommendation struct {
 
 const staleProcessingThreshold = 15 * time.Minute
 
+// validateMode fails closed: an unknown or empty mode must never fall through
+// to auto execution.
+func validateMode(mode string) error {
+	switch Mode(mode) {
+	case ExchangeModeAuto, ExchangeModeManual:
+		return nil
+	default:
+		return fmt.Errorf("invalid exchange mode %q: must be %q or %q",
+			mode, ExchangeModeAuto, ExchangeModeManual)
+	}
+}
+
+// cancelStalePending cancels stale pending records with origin-scoped
+// cancellation. DryRun skips ALL mutations including cancellation. Non-DryRun
+// cancels only pending records that share this run's origin so the standalone
+// task does not wipe out ladder-linked pendings and vice versa.
+// Race condition note: if a user clicks approve at 5h59m while this new run
+// fires and cancels pending records, the TransitionRIExchangeStatus atomic
+// WHERE clause prevents the exchange from executing (record already canceled
+// -> returns nil -> handler returns 409).
+//
+// A cancellation failure is returned: a stale pending record may still be
+// approvable, so no new exchange may start until it is resolved.
+func cancelStalePending(ctx context.Context, params RunAutoExchangeParams) error {
+	if params.DryRun {
+		return nil
+	}
+	origin := common.ExchangeOriginStandalone
+	if params.LadderRunID != nil {
+		origin = common.ExchangeOriginLadder
+	}
+	canceled, err := params.Store.CancelPendingExchangesByOrigin(ctx, origin)
+	if err != nil {
+		return fmt.Errorf("cancel stale pending exchanges (origin=%s): %w", origin, err)
+	}
+	if canceled > 0 {
+		logging.Infof("canceled %d stale pending exchange records (origin=%s)", canceled, origin)
+	}
+	return nil
+}
+
 // RunAutoExchange orchestrates automated RI exchanges.
 func RunAutoExchange(ctx context.Context, params RunAutoExchangeParams) (*AutoExchangeResult, error) {
-	result := &AutoExchangeResult{Mode: params.Config.Mode}
-
-	// 1. Cancel stale pending records with origin-scoped cancellation.
-	// DryRun skips ALL mutations including cancellation (no state is changed).
-	// Non-DryRun: cancel only pending records that share this run's origin so
-	// the standalone task does not wipe out ladder-linked pendings and vice versa.
-	// Race condition note: if a user clicks approve at 5h59m while this new run
-	// fires and cancels pending records, the TransitionRIExchangeStatus atomic
-	// WHERE clause prevents the exchange from executing (record already canceled
-	// → returns nil → handler returns 409).
-	if !params.DryRun {
-		origin := common.ExchangeOriginStandalone
-		if params.LadderRunID != nil {
-			origin = common.ExchangeOriginLadder
-		}
-		canceled, err := params.Store.CancelPendingExchangesByOrigin(ctx, origin)
-		if err != nil {
-			logging.Warnf("failed to cancel pending exchanges: %v", err)
-		} else if canceled > 0 {
-			logging.Infof("canceled %d stale pending exchange records (origin=%s)", canceled, origin)
-		}
+	if err := validateMode(params.Config.Mode); err != nil {
+		return nil, err
 	}
 
-	// 2. Log warning for stale processing records
+	result := &AutoExchangeResult{Mode: params.Config.Mode}
+
+	if err := cancelStalePending(ctx, params); err != nil {
+		return nil, err
+	}
+
+	// Log warning for stale processing records
 	stale, err := params.Store.GetStaleProcessingExchanges(ctx, staleProcessingThreshold)
 	if err != nil {
 		logging.Warnf("failed to check stale processing exchanges: %v", err)
@@ -219,7 +257,8 @@ func RunAutoExchange(ctx context.Context, params RunAutoExchangeParams) (*AutoEx
 	}
 
 	// 3. Analyze reshaping
-	recs := AnalyzeReshaping(params.RIs, params.Utilization, params.Config.UtilizationThreshold)
+	recs := AnalyzeReshaping(params.RIs, params.Utilization, params.Config.UtilizationThreshold,
+		WithOfferedInstanceTypes(params.OfferedInstanceTypes))
 	if len(recs) == 0 {
 		logging.Info("all RIs well-utilized, nothing to do")
 		return result, nil
@@ -249,10 +288,12 @@ func RunAutoExchange(ctx context.Context, params RunAutoExchangeParams) (*AutoEx
 func processRecommendation(ctx context.Context, params RunAutoExchangeParams, rec ReshapeRecommendation, perExchangeCap *big.Rat, result *AutoExchangeResult) bool {
 	// Skip idle RIs with no target
 	if rec.TargetInstanceType == "" {
+		// analyzeRI explains every no-target outcome in its Reason.
+		reason := rec.Reason
 		result.Skipped = append(result.Skipped, SkippedRecommendation{
 			SourceRIID:         rec.SourceRIID,
 			SourceInstanceType: rec.SourceInstanceType,
-			Reason:             "RI is idle (0% utilization) - no target instance type recommended",
+			Reason:             reason,
 		})
 		return false
 	}
@@ -271,7 +312,7 @@ func processRecommendation(ctx context.Context, params RunAutoExchangeParams, re
 
 	paymentDueStr := quote.PaymentDueUSD.FloatString(6)
 
-	if params.Config.Mode == "manual" {
+	if Mode(params.Config.Mode) == ExchangeModeManual {
 		outcome := processManualExchange(ctx, params, rec, offeringID, paymentDueStr)
 		if outcome.Error != "" {
 			result.Failed = append(result.Failed, outcome)

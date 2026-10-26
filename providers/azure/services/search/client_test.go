@@ -153,6 +153,7 @@ func createSampleSearchPricingResponse() string {
 }
 
 func TestNewClient(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 
 	require.NotNil(t, client)
@@ -162,6 +163,7 @@ func TestNewClient(t *testing.T) {
 }
 
 func TestNewClientWithHTTP(t *testing.T) {
+	t.Parallel()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
 
@@ -172,11 +174,13 @@ func TestNewClientWithHTTP(t *testing.T) {
 }
 
 func TestSearchClient_GetServiceType(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "sub", "region")
 	assert.Equal(t, common.ServiceSearch, client.GetServiceType())
 }
 
 func TestSearchClient_GetRegion(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		region   string
@@ -208,6 +212,7 @@ func TestSearchClient_GetRegion(t *testing.T) {
 }
 
 func TestSearchClient_Fields(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-sub", "northeurope")
 
 	assert.Equal(t, "test-sub", client.subscriptionID)
@@ -216,6 +221,7 @@ func TestSearchClient_Fields(t *testing.T) {
 }
 
 func TestSearchClient_GetOfferingDetails_WithMock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
@@ -245,6 +251,7 @@ func TestSearchClient_GetOfferingDetails_WithMock(t *testing.T) {
 }
 
 func TestSearchClient_GetOfferingDetails_3YearTerm(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
@@ -274,6 +281,7 @@ func TestSearchClient_GetOfferingDetails_3YearTerm(t *testing.T) {
 }
 
 func TestSearchClient_GetOfferingDetails_NoUpfront(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
@@ -300,6 +308,7 @@ func TestSearchClient_GetOfferingDetails_NoUpfront(t *testing.T) {
 }
 
 func TestSearchClient_GetOfferingDetails_APIError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
@@ -324,6 +333,7 @@ func TestSearchClient_GetOfferingDetails_APIError(t *testing.T) {
 }
 
 func TestSearchClient_GetOfferingDetails_NoPricing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	client := NewClientWithHTTP(nil, "test-subscription", "eastus", mockHTTP)
@@ -349,6 +359,7 @@ func TestSearchClient_GetOfferingDetails_NoPricing(t *testing.T) {
 
 // The captured eastus Search catalog has this Standard S1 Consumption row and no Reservation row.
 func TestSearchClient_GetOfferingDetails_NoReservationPricing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	onDemandOnly := `{
@@ -386,6 +397,7 @@ func TestSearchClient_GetOfferingDetails_NoReservationPricing(t *testing.T) {
 }
 
 func TestSearchClient_GetOfferingDetails_SearchDisplaySKUs(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ sdk, display string }{
 		{"basic", "Basic"}, {"standard", "Standard S1"}, {"standard2", "Standard S2"},
 		{"standard3", "Standard S3"}, {"storage_optimized_l1", "Storage Optimized L1"},
@@ -416,6 +428,7 @@ func TestSearchClient_GetOfferingDetails_SearchDisplaySKUs(t *testing.T) {
 }
 
 func TestSearchClient_GetOfferingDetails_MixedTermsBothOrders(t *testing.T) {
+	t.Parallel()
 	oneYear := pricing.RetailPriceItem{
 		ServiceName: "Azure Cognitive Search", ArmRegionName: "eastus", SKUName: "Standard S1",
 		Type: "Reservation", ReservationTerm: "1 Year", UnitOfMeasure: "1 Hour", RetailPrice: 800, CurrencyCode: "USD",
@@ -459,6 +472,7 @@ func TestSearchClient_GetOfferingDetails_MixedTermsBothOrders(t *testing.T) {
 }
 
 func TestSearchClient_GetOfferingDetails_ReservationSelection(t *testing.T) {
+	t.Parallel()
 	row := func(overrides map[string]any) map[string]any {
 		item := map[string]any{
 			"serviceName": "Azure Cognitive Search", "armRegionName": "eastus", "skuName": "Standard S1",
@@ -532,6 +546,7 @@ func TestSearchClient_GetOfferingDetails_ReservationSelection(t *testing.T) {
 }
 
 func TestSearchClient_GetOfferingDetails_Pagination(t *testing.T) {
+	t.Parallel()
 	selected := pricing.RetailPriceItem{
 		ServiceName: "Azure Cognitive Search", ArmRegionName: "eastus", SKUName: "Standard S1",
 		Type: "Reservation", ReservationTerm: "1 Year", UnitOfMeasure: "1 Hour", RetailPrice: 800, CurrencyCode: "USD",
@@ -580,9 +595,18 @@ func TestSearchClient_GetOfferingDetails_Pagination(t *testing.T) {
 	}
 }
 
-func TestSearchClient_GetOfferingDetails_EscapesRegionAndRejectsUnknownTier(t *testing.T) {
-	const region = "east'us"
-	response := createMockHTTPResponse(http.StatusOK, `{"Items":[{"serviceName":"Azure Cognitive Search","armRegionName":"east'us","skuName":"Standard S1","type":"Reservation","reservationTerm":"1 Year","unitOfMeasure":"1 Hour","retailPrice":800,"currencyCode":"USD"}]}`)
+func TestGetSearchPricing_RejectsInjectedRegion(t *testing.T) {
+	t.Parallel()
+	client := NewClientWithHTTP(nil, "sub", "eastus", &MockHTTPClient{})
+	_, err := client.getSearchPricing(context.Background(), "standard", "eastus' or '1' eq '1", 1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Retail Prices filter")
+}
+
+func TestSearchClient_GetOfferingDetails_BuildsExactFilterAndRejectsUnknownTier(t *testing.T) {
+	t.Parallel()
+	const region = "eastus"
+	response := createMockHTTPResponse(http.StatusOK, `{"Items":[{"serviceName":"Azure Cognitive Search","armRegionName":"eastus","skuName":"Standard S1","type":"Reservation","reservationTerm":"1 Year","unitOfMeasure":"1 Hour","retailPrice":800,"currencyCode":"USD"}]}`)
 	t.Cleanup(func() { require.NoError(t, response.Body.Close()) })
 	mockHTTP := &MockHTTPClient{}
 	mockHTTP.On("Do", mock.Anything).Return(response, nil).Once()
@@ -592,7 +616,7 @@ func TestSearchClient_GetOfferingDetails_EscapesRegionAndRejectsUnknownTier(t *t
 	require.NoError(t, err)
 	assert.Equal(t, 800.0, details.TotalCost)
 	req := mockHTTP.Calls[0].Arguments.Get(0).(*http.Request)
-	assert.Equal(t, "serviceName eq 'Azure Cognitive Search' and armRegionName eq 'east''us' and skuName eq 'Standard S1' and priceType eq 'Reservation'", req.URL.Query().Get("$filter"))
+	assert.Equal(t, "serviceName eq 'Azure Cognitive Search' and armRegionName eq 'eastus' and skuName eq 'Standard S1' and priceType eq 'Reservation'", req.URL.Query().Get("$filter"))
 	assert.Contains(t, req.URL.RawQuery, "%24filter=")
 	mockHTTP.AssertExpectations(t)
 
@@ -606,6 +630,7 @@ func TestSearchClient_GetOfferingDetails_EscapesRegionAndRejectsUnknownTier(t *t
 }
 
 func TestSearchClient_GetExistingCommitments_Empty(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -618,6 +643,7 @@ func TestSearchClient_GetExistingCommitments_Empty(t *testing.T) {
 }
 
 func TestAzureRetailPriceStructure(t *testing.T) {
+	t.Parallel()
 	price := AzureRetailPrice{
 		Count: 2,
 		Items: []pricing.RetailPriceItem{
@@ -644,22 +670,20 @@ func TestAzureRetailPriceStructure(t *testing.T) {
 }
 
 func TestSearchPricingStructure(t *testing.T) {
+	t.Parallel()
 	pricing := Pricing{
-		HourlyRate:        0.15,
-		ReservationPrice:  1314.0,
-		OnDemandPrice:     2628.0,
-		Currency:          "USD",
-		SavingsPercentage: 50.0,
+		HourlyRate:       0.15,
+		ReservationPrice: 1314.0,
+		Currency:         "USD",
 	}
 
 	assert.Equal(t, 0.15, pricing.HourlyRate)
 	assert.Equal(t, 1314.0, pricing.ReservationPrice)
-	assert.Equal(t, 2628.0, pricing.OnDemandPrice)
 	assert.Equal(t, "USD", pricing.Currency)
-	assert.Equal(t, 50.0, pricing.SavingsPercentage)
 }
 
 func TestSearchClient_GetRecommendations_WithMockPager(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -692,6 +716,7 @@ func TestSearchClient_GetRecommendations_WithMockPager(t *testing.T) {
 // of what the pager contains. This test injects a non-empty pager (mimicking
 // the VM recs Azure would return) and asserts the result is empty.
 func TestSearchClient_GetRecommendations_AlwaysEmpty(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -724,6 +749,7 @@ func TestSearchClient_GetRecommendations_AlwaysEmpty(t *testing.T) {
 }
 
 func TestSearchClient_GetExistingCommitments_WithMockPager(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -761,6 +787,7 @@ func TestSearchClient_GetExistingCommitments_WithMockPager(t *testing.T) {
 // usage API, one row per reservation per usage day. A pager returning three
 // rows for the same ReservationID must surface as a single commitment.
 func TestSearchClient_GetExistingCommitments_DedupesDailyUsageRows(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -793,6 +820,7 @@ func TestSearchClient_GetExistingCommitments_DedupesDailyUsageRows(t *testing.T)
 }
 
 func TestSearchClient_GetExistingCommitments_FilterNonSearch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -833,6 +861,7 @@ func TestSearchClient_GetExistingCommitments_FilterNonSearch(t *testing.T) {
 }
 
 func TestSearchClient_GetExistingCommitments_PagerError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -852,6 +881,7 @@ func TestSearchClient_GetExistingCommitments_PagerError(t *testing.T) {
 }
 
 func TestSearchClient_GetValidResourceTypes_WithMockPager(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -882,6 +912,7 @@ func TestSearchClient_GetValidResourceTypes_WithMockPager(t *testing.T) {
 }
 
 func TestSearchClient_GetValidResourceTypes_PagerError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -900,6 +931,7 @@ func TestSearchClient_GetValidResourceTypes_PagerError(t *testing.T) {
 }
 
 func TestSearchClient_GetValidResourceTypes_EmptyResults(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -922,6 +954,7 @@ func TestSearchClient_GetValidResourceTypes_EmptyResults(t *testing.T) {
 }
 
 func TestSearchClient_SetterMethods(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 
 	mockRecPager := &MockRecommendationsPager{}
@@ -938,6 +971,7 @@ func TestSearchClient_SetterMethods(t *testing.T) {
 }
 
 func TestSearchClient_GetCommonSKUs(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	skus := client.getCommonSKUs()
 
@@ -952,6 +986,7 @@ func TestSearchClient_GetCommonSKUs(t *testing.T) {
 // TestSearchClient_ConvertAzureSearchRecommendation_NilGuards pins the contract:
 // unusable SDK payloads (nil or nil Properties) produce a nil *Recommendation.
 func TestSearchClient_ConvertAzureSearchRecommendation_NilGuards(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 	assert.Nil(t, client.convertAzureSearchRecommendation(context.Background(), nil))
 }
@@ -960,6 +995,7 @@ func TestSearchClient_ConvertAzureSearchRecommendation_NilGuards(t *testing.T) {
 // the converter forwards every helper-extracted field plus the Search-service
 // constants (Provider, Service, CommitmentType, PaymentOption).
 func TestSearchClient_ConvertAzureSearchRecommendation_PopulatesAllFields(t *testing.T) {
+	t.Parallel()
 	client := NewClient(nil, "test-subscription", "eastus")
 
 	azRec := mocks.BuildLegacyReservationRecommendation(
@@ -1007,6 +1043,7 @@ func calcPriceRespJSON(orderID string) string {
 }
 
 func TestSearchClient_PurchaseCommitment_Success(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1045,6 +1082,7 @@ func TestSearchClient_PurchaseCommitment_Success(t *testing.T) {
 }
 
 func TestSearchClient_PurchaseCommitment_3YearTerm(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1081,6 +1119,7 @@ func TestSearchClient_PurchaseCommitment_3YearTerm(t *testing.T) {
 }
 
 func TestSearchClient_PurchaseCommitment_Accepted(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1116,6 +1155,7 @@ func TestSearchClient_PurchaseCommitment_Accepted(t *testing.T) {
 }
 
 func TestSearchClient_PurchaseCommitment_TokenError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{err: errors.New("token error")}
@@ -1135,6 +1175,7 @@ func TestSearchClient_PurchaseCommitment_TokenError(t *testing.T) {
 }
 
 func TestSearchClient_PurchaseCommitment_HTTPError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1158,6 +1199,7 @@ func TestSearchClient_PurchaseCommitment_HTTPError(t *testing.T) {
 }
 
 func TestSearchClient_PurchaseCommitment_BadStatus(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1193,6 +1235,7 @@ func TestSearchClient_PurchaseCommitment_BadStatus(t *testing.T) {
 }
 
 func TestSearchClient_ValidateOffering_Valid(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -1222,6 +1265,7 @@ func TestSearchClient_ValidateOffering_Valid(t *testing.T) {
 }
 
 func TestSearchClient_ValidateOffering_Invalid(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	client := NewClient(nil, "test-subscription", "eastus")
 
@@ -1254,6 +1298,7 @@ func TestSearchClient_ValidateOffering_Invalid(t *testing.T) {
 // TestSearchClient_PurchaseCommitment_TwoStepFlow verifies the two-step
 // calculatePrice->purchase flow for the search client (issue #677 regression test).
 func TestSearchClient_PurchaseCommitment_TwoStepFlow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1300,6 +1345,7 @@ func TestSearchClient_PurchaseCommitment_TwoStepFlow(t *testing.T) {
 // TestSearchClient_PurchaseCommitment_RequiresSource because the dedupe-guard
 // now fails fast at function entry.
 func TestSearchClient_PurchaseCommitment_TagInjection(t *testing.T) {
+	t.Parallel()
 	const orderID = "azure-search-tag-test"
 	const source = "cudly-web"
 
@@ -1355,6 +1401,7 @@ func TestSearchClient_PurchaseCommitment_TagInjection(t *testing.T) {
 // pre-existing "SearchService" reservedResourceType literal being unverified
 // against the live catalog (issue #1189) -- that is a different property.
 func TestSearchClient_PurchaseCommitment_BillingPlan(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name          string
 		paymentOption string
@@ -1433,6 +1480,7 @@ func TestSearchClient_PurchaseCommitment_BillingPlan(t *testing.T) {
 // signal CUDly controls -- proceeding without it would allow a re-driven
 // purchase to create a duplicate reservation.
 func TestSearchClient_PurchaseCommitment_RequiresSource(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1447,6 +1495,7 @@ func TestSearchClient_PurchaseCommitment_RequiresSource(t *testing.T) {
 }
 
 func TestSearchClient_ValidateOffering_CaseInsensitive(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	skuName := armsearch.SKUNameStandard
@@ -1485,6 +1534,7 @@ func TestSearchClient_ValidateOffering_CaseInsensitive(t *testing.T) {
 // against regression: displayName in the calculatePrice body must match
 // [A-Za-z0-9_-]{1,64} (Azure rejects DisplayNameInvalid otherwise).
 func TestSearchClient_PurchaseCommitment_DisplayNameConformsToAzureAllowlist(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mockHTTP := &MockHTTPClient{}
 	mockCred := &MockTokenCredential{token: "test-token"}
@@ -1539,4 +1589,23 @@ func TestSearchClient_PurchaseCommitment_DisplayNameConformsToAzureAllowlist(t *
 	// (see providers/azure/services/internal/reservations/displayname.go).
 	assert.Regexp(t, `^search-`, capturedDisplayName)
 	assert.Contains(t, capturedDisplayName, "standard2")
+}
+
+// TestNewClientWithHTTP_NilFallbackIsHardened verifies that passing nil as the
+// httpClient falls back to the SSRF-hardened httpclient.New(), which rejects
+// IMDS connections, instead of leaving a nil client that panics on first use.
+func TestNewClientWithHTTP_NilFallbackIsHardened(t *testing.T) {
+	t.Parallel()
+	c := NewClientWithHTTP(nil, "sub-123", "eastus", nil)
+	require.NotNil(t, c.httpClient)
+	require.NotEqual(t, http.DefaultClient, c.httpClient,
+		"nil fallback must never be http.DefaultClient")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://169.254.169.254/metadata/instance", nil)
+	require.NoError(t, err)
+	resp, err := c.httpClient.Do(req)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	require.Error(t, err, "nil-fallback client must reject IMDS connections")
+	assert.Contains(t, err.Error(), "blocked")
 }
