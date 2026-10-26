@@ -18,6 +18,7 @@ import (
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/offeringprice"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/purchasecfg"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/purchaseguard"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/reservationexpiry"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/reservationstate"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/aws/internal/tagging"
@@ -163,6 +164,13 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		return result, nil
 	}
 
+	// After the dedupe: a re-drive that already bought must not be refused for a
+	// later price rise (ec2/client.go does the same).
+	if err = c.checkApprovedUpfront(ctx, rec, offeringID); err != nil {
+		result.Error = err
+		return result, result.Error
+	}
+
 	// Create the purchase request
 	input := &rds.PurchaseReservedDBInstancesOfferingInput{
 		ReservedDBInstancesOfferingId: aws.String(offeringID),
@@ -203,6 +211,44 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 	return result, nil
 }
 
+// checkApprovedUpfront refuses an offering whose total upfront (FixedPrice x
+// count) exceeds the approved recommendation's upfront by more than
+// offeringprice.UpfrontTolerance, or whose price cannot be compared with it.
+// Mirrors ec2.checkApprovedUpfront (same semantics; keep them in step). The
+// shared comparison is offeringprice.CheckUpfront. RDS has no server-side price
+// cap, so this is the only guard. The offering is read back by ID, and only
+// when an upfront was approved: CommitmentCost 0 means no upfront or no figure
+// (the MCP never sets it), so there is nothing to compare.
+func (c *Client) checkApprovedUpfront(ctx context.Context, rec common.Recommendation, offeringID string) error {
+	approved := rec.CommitmentCost
+	if offeringprice.NoUpfrontApproved(approved) {
+		return nil
+	}
+	if cur := rec.CommitmentCurrency; cur != "" && !strings.EqualFold(cur, "USD") {
+		return fmt.Errorf("RDS recommendation upfront is in %s; the approved upfront check supports USD only", cur)
+	}
+	out, err := c.client.DescribeReservedDBInstancesOfferings(ctx, &rds.DescribeReservedDBInstancesOfferingsInput{
+		ReservedDBInstancesOfferingId: aws.String(offeringID),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to read RDS offering %s for the approved upfront check: %w", offeringID, err)
+	}
+	if len(out.ReservedDBInstancesOfferings) != 1 {
+		return fmt.Errorf("RDS offering %s: expected 1 offering for the approved upfront check, got %d", offeringID, len(out.ReservedDBInstancesOfferings))
+	}
+	offering := out.ReservedDBInstancesOfferings[0]
+	if offering.FixedPrice == nil {
+		return fmt.Errorf("RDS offering %s has no FixedPrice; cannot compare it with the approved upfront %.2f", offeringID, approved)
+	}
+	if cc := aws.ToString(offering.CurrencyCode); cc != "" && !strings.EqualFold(cc, "USD") {
+		return fmt.Errorf("RDS offering %s is priced in %s; the approved upfront check supports USD only", offeringID, cc)
+	}
+	if err := offeringprice.CheckUpfront("RDS", *offering.FixedPrice*float64(rec.Count), approved); err != nil {
+		return fmt.Errorf("RDS offering %s: %w", offeringID, err)
+	}
+	return nil
+}
+
 // deriveReservationID returns the ReservedDBInstanceId to use. When an
 // idempotency token is supplied (issue #641) the ID is derived deterministically
 // from it, so a re-drive sends the identical ID and RDS rejects the duplicate
@@ -229,44 +275,19 @@ func (c *Client) deriveReservationID(rec common.Recommendation, opts common.Purc
 	}, "rds-reserved-")
 }
 
-// idempotencyGuard short-circuits a re-drive (issue #641): when token is set, it
-// reports (existingID, true, nil) if a reservation already exists under
-// reservationID, ("", false, nil) for a first-time purchase, or a fail-loud
-// error on lookup failure. With an empty token it is a no-op.
+// idempotencyGuard short-circuits a re-drive (issue #641); see purchaseguard.Guard.
 func (c *Client) idempotencyGuard(ctx context.Context, token, reservationID string) (existingID string, found bool, err error) {
-	if token == "" {
-		return "", false, nil
-	}
-	existingID, found, lookupErr := c.findReservationByID(ctx, reservationID)
-	if lookupErr != nil {
-		return "", false, fmt.Errorf("idempotency lookup failed before RDS RI purchase (refusing to purchase to avoid a possible double-buy): %w", lookupErr)
-	}
-	if found {
-		log.Printf("RDS RI for idempotency token %s already exists (%s); skipping purchase (issue #641 re-drive)", common.MaskToken(token), existingID)
-		return existingID, true, nil
-	}
-	return "", false, nil
+	return purchaseguard.Guard(ctx, token, "RDS RI", func(ctx context.Context) (string, bool, error) {
+		return c.findReservationByID(ctx, reservationID)
+	})
 }
 
-// recoverAlreadyExists handles the native server-side dedupe backstop (issue
-// #641): if the by-ID guard missed the existing reservation but AWS still
-// rejected the duplicate ID with ReservedDBInstanceAlreadyExistsFault, it
-// re-Describes by ID and returns (existingID, true) so the re-drive recovers the
-// original reservation instead of erroring.
+// recoverAlreadyExists adopts the existing reservation when AWS rejects a
+// duplicate ID (issue #641); see purchaseguard.Recover.
 func (c *Client) recoverAlreadyExists(ctx context.Context, token, reservationID string, purchaseErr error) (string, bool) {
-	if token == "" {
-		return "", false
-	}
-	var already *types.ReservedDBInstanceAlreadyExistsFault
-	if !errors.As(purchaseErr, &already) {
-		return "", false
-	}
-	existingID, found, lookupErr := c.findReservationByID(ctx, reservationID)
-	if lookupErr == nil && found {
-		log.Printf("RDS RI %s already existed at purchase time; treating as idempotent re-drive (issue #641)", existingID)
-		return existingID, true
-	}
-	return "", false
+	return purchaseguard.Recover[*types.ReservedDBInstanceAlreadyExistsFault](ctx, token, "RDS RI", purchaseErr, func(ctx context.Context) (string, bool, error) {
+		return c.findReservationByID(ctx, reservationID)
+	})
 }
 
 // findReservationByID looks for a nonterminal RDS reserved DB
@@ -354,8 +375,8 @@ func (c *Client) findOfferingID(ctx context.Context, rec common.Recommendation, 
 
 // rdsOfferingPageResult holds the outcome of a single DescribeReservedDBInstancesOfferings page.
 type rdsOfferingPageResult struct {
-	id     string  // non-empty when an exact match was found on this page
 	marker *string // pagination cursor for the next page; nil when exhausted
+	id     string  // non-empty when an exact match was found on this page
 }
 
 // fetchRDSOfferingPage calls DescribeReservedDBInstancesOfferings for one page and
@@ -543,9 +564,9 @@ func (c *Client) offeringDuration(term string) (duration string, seconds int64, 
 type rdsOfferingKey struct {
 	class        string
 	engine       string
-	multiAZ      bool
-	duration     int64
 	offeringType string
+	duration     int64
+	multiAZ      bool
 }
 
 func (k rdsOfferingKey) matches(o *types.ReservedDBInstancesOffering) bool {

@@ -167,6 +167,11 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		return result, result.Error
 	}
 
+	if err = checkApprovedUpfront(rec, offering); err != nil {
+		result.Error = err
+		return result, result.Error
+	}
+
 	// Create the purchase request
 	input := &ec2.PurchaseReservedInstancesOfferingInput{
 		ReservedInstancesOfferingId: offering.ReservedInstancesOfferingId,
@@ -215,6 +220,35 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 	}
 
 	return result, nil
+}
+
+// checkApprovedUpfront refuses an offering whose total upfront exceeds the
+// approved recommendation's upfront by more than offeringprice.UpfrontTolerance,
+// or whose price cannot be compared with it. The API's LimitPrice is not used:
+// AWS documents it for Marketplace offerings only, and findOffering excludes
+// them. rds.Client.checkApprovedUpfront mirrors this (keep them in step).
+func checkApprovedUpfront(rec common.Recommendation, offering *types.ReservedInstancesOffering) error {
+	approved := rec.CommitmentCost
+	// Zero means no upfront or no figure (the MCP EC2 tool never sets it), so
+	// there is nothing to compare; refusing would break those purchases.
+	if offeringprice.NoUpfrontApproved(approved) {
+		return nil
+	}
+	id := aws.ToString(offering.ReservedInstancesOfferingId)
+	if cur := rec.CommitmentCurrency; cur != "" && !strings.EqualFold(cur, "USD") {
+		return fmt.Errorf("EC2 recommendation upfront is in %s; the approved upfront check supports USD only", cur)
+	}
+	if offering.FixedPrice == nil {
+		return fmt.Errorf("EC2 offering %s has no FixedPrice; cannot compare it with the approved upfront %.2f", id, approved)
+	}
+	if cc := offering.CurrencyCode; cc != "" && cc != types.CurrencyCodeValuesUsd {
+		return fmt.Errorf("EC2 offering %s is priced in %s; the approved upfront check supports USD only", id, cc)
+	}
+	total := fixedPriceCents(*offering.FixedPrice) * float64(rec.Count) / 100
+	if err := offeringprice.CheckUpfront("EC2", total, approved); err != nil {
+		return fmt.Errorf("EC2 offering %s: %w", id, err)
+	}
+	return nil
 }
 
 // findRIByIdempotencyToken looks for an active or payment-pending Reserved
@@ -385,9 +419,9 @@ type ec2OfferingQuery struct {
 	tenancy          types.Tenancy
 	scope            types.Scope
 	availabilityZone string // set only for zonal scope
-	duration         int64
 	wantOfferingType types.OfferingTypeValues
 	offeringClass    types.OfferingClassType
+	duration         int64
 }
 
 // resolveOfferingClassType maps the GlobalConfig string value to the AWS SDK
@@ -761,32 +795,36 @@ func (c *Client) getDurationValue(term string) (int64, error) {
 
 // ConvertibleRI represents an active convertible Reserved Instance.
 type ConvertibleRI struct {
-	ReservedInstanceID  string    `json:"reserved_instance_id"`
-	InstanceType        string    `json:"instance_type"`
-	AvailabilityZone    string    `json:"availability_zone"`
-	InstanceCount       int32     `json:"instance_count"`
-	Start               time.Time `json:"start"`
-	End                 time.Time `json:"end"`
-	OfferingType        string    `json:"offering_type"`
-	FixedPrice          float64   `json:"fixed_price"`
-	UsagePrice          float64   `json:"usage_price"`
-	State               string    `json:"state"`
-	NormalizationFactor float64   `json:"normalization_factor"`
-	ProductDescription  string    `json:"product_description"`
-	InstanceTenancy     string    `json:"instance_tenancy"`
-	Scope               string    `json:"scope"`
-	Duration            int64     `json:"duration"`
+	Start              time.Time `json:"start"`
+	End                time.Time `json:"end"`
+	ReservedInstanceID string    `json:"reserved_instance_id"`
+	InstanceType       string    `json:"instance_type"`
+	AvailabilityZone   string    `json:"availability_zone"`
+	OfferingType       string    `json:"offering_type"`
+	State              string    `json:"state"`
+	ProductDescription string    `json:"product_description"`
+	InstanceTenancy    string    `json:"instance_tenancy"`
+	Scope              string    `json:"scope"`
+
 	// CurrencyCode is the ISO-4217 currency that FixedPrice / UsagePrice
 	// are denominated in (typically "USD"). Plumbed through to
 	// exchange.RIInfo so the dollar-units pre-filter on cross-family
 	// alternatives can refuse comparisons across currencies.
 	CurrencyCode string `json:"currency_code,omitempty"`
+
+	FixedPrice          float64 `json:"fixed_price"`
+	UsagePrice          float64 `json:"usage_price"`
+	NormalizationFactor float64 `json:"normalization_factor"`
+	Duration            int64   `json:"duration"`
+
 	// RecurringHourlyAmount is the per-hour recurring charge (sum across
 	// the SDK's RecurringCharges slice) — this is non-zero for
 	// no-upfront and partial-upfront RIs where some of the cost is
 	// billed hourly rather than as the upfront FixedPrice. Used by the
 	// exchange-package dollar-units calculation.
 	RecurringHourlyAmount float64 `json:"recurring_hourly_amount,omitempty"`
+
+	InstanceCount int32 `json:"instance_count"`
 }
 
 // ListConvertibleReservedInstances returns all active convertible RIs in the region.
@@ -971,11 +1009,11 @@ type TargetOffering struct {
 	InstanceType        string  `json:"instance_type"`
 	OfferingType        string  `json:"offering_type"`
 	ProductDescription  string  `json:"product_description"`
+	CurrencyCode        string  `json:"currency_code"`
+	Scope               string  `json:"scope"`
 	Duration            int64   `json:"duration"`
 	FixedPrice          float64 `json:"fixed_price"`
 	UsagePrice          float64 `json:"usage_price"`
-	CurrencyCode        string  `json:"currency_code"`
-	Scope               string  `json:"scope"`
 	NormalizationFactor float64 `json:"normalization_factor"`
 }
 
@@ -986,8 +1024,8 @@ type ListTargetOfferingsParams struct {
 	Tenancy            string
 	Scope              string
 	AvailabilityZone   string
-	Duration           int64
 	OfferingType       string
+	Duration           int64
 }
 
 // maxTargetOfferingPages caps the pagination walk for ListTargetOfferings.

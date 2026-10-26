@@ -93,9 +93,7 @@ func (m *MockResourceManagerService) ListProjects(ctx context.Context) ([]*cloud
 // the sentinel to short-circuit further pages, and (c) leaves *out
 // untouched on pages with no ACTIVE projects so the walk continues.
 //
-// This pins the pagination contract documented in the function godoc
-// (related issue: 11_gcp_provider.md LOW "Missing Test Coverage for
-// getDefaultProject Pagination").
+// This pins the pagination contract documented in the function godoc.
 func TestFindActiveProjectInPage(t *testing.T) {
 	t.Parallel()
 	t.Run("page with one ACTIVE project — sets out and short-circuits", func(t *testing.T) {
@@ -219,12 +217,12 @@ func TestNewProvider_ProjectIDResolution(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name     string
-		config   *provider.ProviderConfig
+		config   *provider.Config
 		expected string
 	}{
 		{
 			name: "Typed GCPProjectID takes precedence over deprecated Profile",
-			config: &provider.ProviderConfig{
+			config: &provider.Config{
 				GCPProjectID: "typed-project",
 				Profile:      "deprecated-project",
 			},
@@ -232,14 +230,14 @@ func TestNewProvider_ProjectIDResolution(t *testing.T) {
 		},
 		{
 			name: "Typed GCPProjectID alone (no Profile fallback needed)",
-			config: &provider.ProviderConfig{
+			config: &provider.Config{
 				GCPProjectID: "only-typed",
 			},
 			expected: "only-typed",
 		},
 		{
 			name: "Deprecated Profile is honored when typed field is empty",
-			config: &provider.ProviderConfig{
+			config: &provider.Config{
 				Profile: "legacy-project",
 			},
 			expected: "legacy-project",
@@ -251,7 +249,7 @@ func TestNewProvider_ProjectIDResolution(t *testing.T) {
 		},
 		{
 			name:     "Empty config resolves to empty (caller falls through to ADC)",
-			config:   &provider.ProviderConfig{},
+			config:   &provider.Config{},
 			expected: "",
 		},
 	}
@@ -404,7 +402,7 @@ func TestGCPProvider_GetServiceClient_RelationalDB(t *testing.T) {
 func TestNewProvider_WithConfig(t *testing.T) {
 	t.Parallel()
 	// Test NewProvider with a config containing a project ID
-	config := &provider.ProviderConfig{
+	config := &provider.Config{
 		Profile: "test-project-id",
 	}
 

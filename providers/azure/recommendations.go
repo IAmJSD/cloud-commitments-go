@@ -79,8 +79,8 @@ var (
 // overridden per-instance in tests to avoid real ARM network calls.
 type RecommendationsClientAdapter struct {
 	cred             azcore.TokenCredential
-	subscriptionID   string
 	getAdvisorRecsFn func(ctx context.Context, params common.RecommendationParams) ([]common.Recommendation, error)
+	subscriptionID   string
 }
 
 // NewRecommendationsClientAdapter builds a RecommendationsClientAdapter with
@@ -106,9 +106,7 @@ func NewRecommendationsClientAdapter(cred azcore.TokenCredential, subscriptionID
 // service per region (the previous behavior) produced ~60× duplicate results,
 // hammered the rate limit, and meant downstream consumers had to deduplicate.
 // We now call each service client exactly once. Region is intentionally left
-// blank on the client — converters must populate Region from the response data
-// (see known_issues/10_azure_provider.md CRITICAL "Recommendation converters
-// ignore the API response entirely" for the matching converter work).
+// blank on the client; converters must populate Region from the response data.
 //
 // All seven service calls run concurrently under errgroup. Each goroutine captures
 // its own error and returns nil to the group so that a single service failure
@@ -224,11 +222,11 @@ func (r *RecommendationsClientAdapter) GetRecommendations(ctx context.Context, p
 		return nil, err
 	}
 
-	merged, err := mergeServiceResults(serviceResult{"compute", computeRecs, computeErr, includeCompute},
-		serviceResult{"database", dbRecs, dbErr, includeDB},
-		serviceResult{"cache", cacheRecs, cacheErr, includeCache},
-		serviceResult{"cosmosdb", cosmosRecs, cosmosErr, includeCosmos},
-		serviceResult{"synapse", synapseRecs, synapseErr, includeSynapse},
+	merged, err := mergeServiceResults(serviceResult{err: computeErr, name: "compute", recs: computeRecs, attempted: includeCompute},
+		serviceResult{err: dbErr, name: "database", recs: dbRecs, attempted: includeDB},
+		serviceResult{err: cacheErr, name: "cache", recs: cacheRecs, attempted: includeCache},
+		serviceResult{err: cosmosErr, name: "cosmosdb", recs: cosmosRecs, attempted: includeCosmos},
+		serviceResult{err: synapseErr, name: "synapse", recs: synapseRecs, attempted: includeSynapse},
 		// The savingsplans client is a stub that unconditionally returns
 		// ([], nil) until the Benefits Recommendations API stabilizes (see
 		// services/savingsplans Client.GetRecommendations). Counting its
@@ -236,7 +234,7 @@ func (r *RecommendationsClientAdapter) GetRecommendations(ctx context.Context, p
 		// all-attempted-failed guard from ever firing on a total provider
 		// failure (expired credential, subscription-wide throttle), so it is
 		// excluded from the guard until it makes real API calls.
-		serviceResult{"savingsplans", spRecs, spErr, false},
+		serviceResult{err: spErr, name: "savingsplans", recs: spRecs, attempted: false},
 		// The Advisor client is excluded from the all-attempted-failed guard
 		// for the same reason: getAdvisorRecommendations swallows pagination
 		// errors (the auth failure from an expired credential surfaces as a
@@ -246,7 +244,7 @@ func (r *RecommendationsClientAdapter) GetRecommendations(ctx context.Context, p
 		// credential failure -- the same hazard the savingsplans exclusion
 		// prevents. When getAdvisorRecommendations is changed to propagate
 		// hard errors, flip this flag back to true.
-		serviceResult{"advisor", dropCoveredAdvisorSavingsPlans(advisorRecs, spRecs), advisorErr, false})
+		serviceResult{err: advisorErr, name: "advisor", recs: dropCoveredAdvisorSavingsPlans(advisorRecs, spRecs), attempted: false})
 	return withSkips(merged, err, skips)
 }
 
@@ -304,9 +302,10 @@ func (r *RecommendationsClientAdapter) advisorFn() func(context.Context, common.
 // stays under the cyclomatic-complexity gate after the post-Wait ctx.Err()
 // propagation was added.
 type serviceResult struct {
+	err  error
 	name string
 	recs []common.Recommendation
-	err  error
+
 	// attempted records whether the service call was actually launched
 	// (i.e. not skipped by the params service filter). Skipped services
 	// carry nil recs and nil err, which is indistinguishable from a

@@ -32,6 +32,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **`ladder.AllocateResult.NetExistingUSDPerHour`:** the net existing
+  commitment (existing minus expiring, summed over layers) that `Allocate`
+  sized the gap against, set on every successful result including the
+  hold-only exits. Callers can report it instead of recomputing a gross
+  figure from the layer states, so a plan's existing figure reconciles with
+  its gap. `Allocate` now checks the snapshot before the baseline-unavailable
+  hold, so expiring above existing is an error there too (#83).
+- **`exchange.WithOfferedInstanceTypes` / `RunAutoExchangeParams.OfferedInstanceTypes`:**
+  restrict RI reshape targets to the instance types the region offers.
+  `AnalyzeReshaping` and `AnalyzeReshapingWithRecs` take it as a variadic
+  `ReshapeOption`; an empty list keeps the previous size ladder, and a family
+  missing from a non-empty list gets a recommendation with the reason
+  "instance family not offered in region". Auto exchange now reports the
+  recommendation's own reason for every skipped RI without a target (#563).
 - **`RecommendationParams.RIAccountScope`:** selects the Cost Explorer account
   scope (`linked` default, or `payer`) for Reserved Instance recommendations,
   mirroring `SPAccountScope`. Empty keeps the previous linked behaviour; an
@@ -126,6 +140,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- **`aws/recommendations`:** the four Cost Explorer coverage and utilization page fetchers share one generic `fetchWithRetry` helper (rate limiter plus concurrency cap); behaviour and error messages are unchanged (#120).
+- **`aws/rds`:** the RDS purchase path uses the shared `purchaseguard` idempotency guard and AlreadyExists recovery, like ElastiCache. Behavior for valid purchases is unchanged (#10).
+- **`aws/memorydb`:** the MemoryDB purchase path uses the shared `purchaseguard` idempotency guard and AlreadyExists recovery, like ElastiCache. Behavior for valid purchases is unchanged; only the lookup-failure error wording changes to "before MemoryDB reservation purchase" (#10).
+- **`aws/opensearch`:** the OpenSearch purchase path uses the shared `purchaseguard` idempotency guard and AlreadyExists recovery, like ElastiCache. Behavior for valid purchases is unchanged (#10).
+- **`azure/cache`:** `GetValidResourceTypes` now returns an error when the Redis cache list reaches the page cap (#249) instead of logging a warning and returning a partial SKU set.
+- **`scripts/setup-git-secrets.sh`:** the database DSN detector now fires on `user:password@host` (the old pattern ended at `@`, which `git-secrets`' word-match scan rejected before a hostname), and also covers `postgresql`, `mariadb`, driver-suffixed schemes and empty usernames (#125).
+- **`provider`:** `ProviderConfig` is renamed to `Config` (#39). `ProviderConfig` stays as a type alias marked `Deprecated: use Config.`, so existing consumers keep compiling, but consumers that run staticcheck with fatal warnings (cloud-commitments-mcp, ~86 uses, and cloud-commitments-platform, ~36 uses) fail lint with SA1019 on their next `pkg` bump until they migrate to `provider.Config`. The `aws`, `azure` and `gcp` provider modules and `ci_cd_sanity_tests` already use `provider.Config`.
+- **`httpclient`:** dials to the RFC 8215 local-use NAT64 prefix `64:ff9b:1::/48` are refused when any RFC 6052 layout (/48, /56, /64, /96) embeds a metadata IPv4 address; Teredo `2001::/32` stays allowed (#238).
+- **CI:** the security-scan job runs a pinned gitleaks CLI (v8.30.1, sha256-verified) over the checkout with `.gitleaks.toml` and fails on any finding (#101).
 - **`common.HoursPerMonth`:** exported 730-hour average month (`HoursPerYear / 12`) next to `HoursPerYear`; the remaining bare 730 and 8760 literals in the aws and gcp providers use the shared constants (#109).
 - **`gcp`:** region-lookup permission errors are now classified by type only (googleapi 403 or gRPC `PermissionDenied`) through the shared `IsPermissionError`. gRPC `PermissionDenied` is now skipped with a warning like a 403, and an untyped error whose text merely contains "403" and "permission" now propagates instead of being skipped (#6).
 - **BREAKING `gcp`: stored contexts removed (#6).** `computeengine.NewClient`
@@ -199,6 +222,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **AWS/OpenSearch:** the STS account-ID lookup used for post-purchase tagging caches only a successful result, so one throttled or timed-out `GetCallerIdentity` no longer disables tagging for the client's lifetime (#53).
+- **AWS/recommendations:** `normalizeRegionName` maps the current `Europe (Ireland|Frankfurt|London|Paris|Stockholm)` Cost Explorer display names to region codes, so coverage lookups keyed by region code match those recommendations (#53).
+- **AWS/recommendations:** `normalizeRegionName` also maps `Asia Pacific (Malaysia|Thailand)`, `Canada West (Calgary)` and `Mexico (Central)` to `ap-southeast-5`, `ap-southeast-7`, `ca-west-1` and `mx-central-1` (#53).
+- **AWS/recommendations:** `normalizeRegionName` also maps `Asia Pacific (Taipei)` (`ap-east-2`), `Asia Pacific (New Zealand)` (`ap-southeast-6`) and the China, GovCloud, ISO and European Sovereign Cloud region descriptions from the SDK partitions file (#53). The alias table is now a package-level `regionAliases` map, the no-op region-code prefix branch is removed (output unchanged for every input), and the collision test covers the whole map.
+- **AWS/Savings Plans:** `GetExistingCommitments` returns an error naming the plan ID and value when a plan has an unparseable start or end date, instead of silently leaving the date zero (#53).
+- **AWS/Savings Plans:** `GetExistingCommitments` returns an error naming the plan ID when a plan has no start or end date; a zero start date was never treated as recent by the purchase dedupe, so a duplicate purchase could slip through (#53).
+- **AWS/RDS:** `PurchaseCommitment` refuses an offering whose upfront (`FixedPrice` x count) exceeds the approved recommendation upfront by more than 5%, or that is priced in a non-USD currency; a zero approved upfront is not checked (#53).
+- Bump Go to 1.26.10 to pick up the fix for GO-2026-6809 (crypto/x509), which `govulncheck` now reports against 1.26.9.
+- **AWS/MemoryDB, OpenSearch, Redshift:** `PurchaseCommitment` refuses an offering whose upfront (`FixedPrice` x count) exceeds the approved recommendation upfront by more than 5%, or that is priced in a non-USD currency (MemoryDB offerings carry no currency, so only the recommendation's currency is checked there), or, for MemoryDB, an upfront offering with a zero price or one bought in a China region (cn-north-1, cn-northwest-1), where the assumed USD price is wrong; a zero approved upfront is not checked. All AWS RI price guards (EC2, RDS, MemoryDB, OpenSearch, Redshift) also refuse a NaN or infinite approved upfront (#53).
+- AWS ElastiCache purchases refuse a recommendation with no engine instead of
+  sending an empty `ProductDescription` filter, send the engine lowercased as
+  ElastiCache reports it, and verify the chosen offering's node type, duration
+  and engine before buying it (#53).
+- AWS EC2 RI purchases refuse an offering whose total upfront exceeds the
+  recommendation's approved upfront by more than 5% (USD only; a
+  recommendation without an upfront figure is not checked), so a repriced or
+  differently-priced offering can no longer bypass the approved cap (#53).
+- **`ReshapeBuffer` rejects nil payment caps** instead of mapping them to
+  `math.MaxFloat64`: `MaxPaymentPerExchangeUSD` and `MaxPaymentDailyUSD`
+  are now required, so an omitted cap can no longer mean unlimited spend on
+  the auto-exchange path (#83).
+- **`aws/recommendations`:** `GetRecommendations` for RI services now rejects an unrecognized term, payment option or lookback period instead of letting Cost Explorer apply its own defaults under the requested label; the deprecated silent converters are removed (#53).
+- **`aws/recommendations`:** `GetRecommendations` for RI services now rejects a non-empty unrecognized term, payment option or lookback period instead of letting Cost Explorer apply its own defaults under the requested label; an unset (empty) value still means the Cost Explorer default. The deprecated silent converters are removed (#53).
+- **Azure savings plan recommendations use a 730 hour month** (was 730.5),
+  matching `common.HoursPerMonth` and the 8760 hour year; monthly recurring
+  cost, on-demand cost and savings shift by about 0.07% (#583).
+
+- **`exchange.AnalyzeReshaping`:** no longer proposes a same-capacity reshape
+  (1x m5.24xlarge to 2x m5.12xlarge); it frees no units and AWS needs an
+  equal-or-greater exchange value, so such RIs now get no recommendation and
+  no quote (#563).
+- **`common.EC2NormalizationFactor`:** knows the 32xlarge, 48xlarge, 56xlarge,
+  96xlarge and 112xlarge sizes (256 to 896), so RI exchange analysis no longer
+  skips RIs of those sizes with "No normalization factor known" (#563).
 - **exchange:** `RunAutoExchange` now stops and returns the error when cancelling stale pending exchanges fails, instead of logging it and creating new exchanges while a stale pending one may still be approvable.
 - **exchange:** `RunAutoExchange` now rejects any mode other than `auto` or `manual` (including empty) with an error before any store or exchange call; previously every non-`manual` value auto-executed exchanges.
 - **common:** `BuildReservationName` no longer drops its random uniqueness suffix when a long SKU overflows the 60-char cap (it dropped it first, so long-SKU purchases got deterministic, colliding names). The timestamp and payment segments drop first, then the SKU is truncated; the suffix is always kept (#123).
@@ -336,6 +393,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   allowlist whitelisted whole lines containing common Go/Terraform tokens.
   Allowlisting now lives in `.gitallowed` as literal entries and the PEM
   detector covers PKCS#8 keys (#1972)
+
+### Removed
+
+- **BREAKING:** `common.Matches` (`pkg/common`) is removed. It compared only
+  Provider, Region, Service, ResourceType and engine and had no callers in
+  this repo, the CLI, the MCP server or the platform; use `pkg/recfilter`
+  for dedupe. (#123)
+- **BREAKING:** the `pkg/errors` package is removed (no importers). Removed
+  exported symbols: `NotFoundError`, `ValidationError`, `AuthenticationError`,
+  `AuthorizationError`, `ConflictError`, `RateLimitError`, `ServiceError`,
+  their `New*`/`Is*` helpers (`NewNotFoundError`, `NewNotFoundErrorWithMessage`,
+  `IsNotFoundError`, `NewValidationError`, `IsValidationError`,
+  `NewAuthenticationError`, `IsAuthenticationError`, `NewAuthorizationError`,
+  `IsAuthorizationError`, `NewConflictError`, `IsConflictError`,
+  `NewRateLimitError`, `IsRateLimitError`, `NewServiceError`, `IsServiceError`)
+  and the sentinels `ErrNotFound`, `ErrUnauthorized`, `ErrForbidden`,
+  `ErrInvalidInput`, `ErrConflict`, `ErrInternalError`. (#123)
+- **BREAKING:** the `pkg/config` package is removed (no importers). Removed
+  exported symbols: `Load`, `DefaultScorerConfig`, `Config`, `AWSConfig`,
+  `AzureConfig`, `GCPConfig` and `ServerConfig`. The `pkg` module no longer
+  depends on `github.com/spf13/pflag`. (#123)
 
 ## [0.9.0] - 2026-03-06
 
