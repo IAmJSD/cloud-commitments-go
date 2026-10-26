@@ -32,6 +32,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **`ladder.AllocateResult.NetExistingUSDPerHour`:** the net existing
+  commitment (existing minus expiring, summed over layers) that `Allocate`
+  sized the gap against, set on every successful result including the
+  hold-only exits. Callers can report it instead of recomputing a gross
+  figure from the layer states, so a plan's existing figure reconciles with
+  its gap. `Allocate` now checks the snapshot before the baseline-unavailable
+  hold, so expiring above existing is an error there too (#83).
 - **`exchange.WithOfferedInstanceTypes` / `RunAutoExchangeParams.OfferedInstanceTypes`:**
   restrict RI reshape targets to the instance types the region offers.
   `AnalyzeReshaping` and `AnalyzeReshapingWithRecs` take it as a variadic
@@ -215,11 +222,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **AWS/OpenSearch:** the STS account-ID lookup used for post-purchase tagging caches only a successful result, so one throttled or timed-out `GetCallerIdentity` no longer disables tagging for the client's lifetime (#53).
+- **AWS/recommendations:** `normalizeRegionName` maps the current `Europe (Ireland|Frankfurt|London|Paris|Stockholm)` Cost Explorer display names to region codes, so coverage lookups keyed by region code match those recommendations (#53).
+- **AWS/recommendations:** `normalizeRegionName` also maps `Asia Pacific (Malaysia|Thailand)`, `Canada West (Calgary)` and `Mexico (Central)` to `ap-southeast-5`, `ap-southeast-7`, `ca-west-1` and `mx-central-1` (#53).
+- **AWS/recommendations:** `normalizeRegionName` also maps `Asia Pacific (Taipei)` (`ap-east-2`), `Asia Pacific (New Zealand)` (`ap-southeast-6`) and the China, GovCloud, ISO and European Sovereign Cloud region descriptions from the SDK partitions file (#53). The alias table is now a package-level `regionAliases` map, the no-op region-code prefix branch is removed (output unchanged for every input), and the collision test covers the whole map.
+- **AWS/Savings Plans:** `GetExistingCommitments` returns an error naming the plan ID and value when a plan has an unparseable start or end date, instead of silently leaving the date zero (#53).
+- **AWS/Savings Plans:** `GetExistingCommitments` returns an error naming the plan ID when a plan has no start or end date; a zero start date was never treated as recent by the purchase dedupe, so a duplicate purchase could slip through (#53).
+- **AWS/RDS:** `PurchaseCommitment` refuses an offering whose upfront (`FixedPrice` x count) exceeds the approved recommendation upfront by more than 5%, or that is priced in a non-USD currency; a zero approved upfront is not checked (#53).
 - Bump Go to 1.26.10 to pick up the fix for GO-2026-6809 (crypto/x509), which `govulncheck` now reports against 1.26.9.
+- **AWS/MemoryDB, OpenSearch, Redshift:** `PurchaseCommitment` refuses an offering whose upfront (`FixedPrice` x count) exceeds the approved recommendation upfront by more than 5%, or that is priced in a non-USD currency (MemoryDB offerings carry no currency, so only the recommendation's currency is checked there), or, for MemoryDB, an upfront offering with a zero price or one bought in a China region (cn-north-1, cn-northwest-1), where the assumed USD price is wrong; a zero approved upfront is not checked. All AWS RI price guards (EC2, RDS, MemoryDB, OpenSearch, Redshift) also refuse a NaN or infinite approved upfront (#53).
 - AWS ElastiCache purchases refuse a recommendation with no engine instead of
   sending an empty `ProductDescription` filter, send the engine lowercased as
   ElastiCache reports it, and verify the chosen offering's node type, duration
   and engine before buying it (#53).
+- AWS EC2 RI purchases refuse an offering whose total upfront exceeds the
+  recommendation's approved upfront by more than 5% (USD only; a
+  recommendation without an upfront figure is not checked), so a repriced or
+  differently-priced offering can no longer bypass the approved cap (#53).
 - **`ReshapeBuffer` rejects nil payment caps** instead of mapping them to
   `math.MaxFloat64`: `MaxPaymentPerExchangeUSD` and `MaxPaymentDailyUSD`
   are now required, so an omitted cap can no longer mean unlimited spend on

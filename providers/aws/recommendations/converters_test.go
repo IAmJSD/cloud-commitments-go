@@ -553,6 +553,15 @@ func TestNormalizeRegionName(t *testing.T) {
 			region:   "il-central-1",
 			expected: "il-central-1",
 		},
+		{name: "Europe (Ireland)", region: "Europe (Ireland)", expected: "eu-west-1"},
+		{name: "Europe (Frankfurt)", region: "Europe (Frankfurt)", expected: "eu-central-1"},
+		{name: "Europe (London)", region: "Europe (London)", expected: "eu-west-2"},
+		{name: "Europe (Paris)", region: "Europe (Paris)", expected: "eu-west-3"},
+		{name: "Europe (Stockholm)", region: "Europe (Stockholm)", expected: "eu-north-1"},
+		{name: "Asia Pacific (Malaysia)", region: "Asia Pacific (Malaysia)", expected: "ap-southeast-5"},
+		{name: "Asia Pacific (Thailand)", region: "Asia Pacific (Thailand)", expected: "ap-southeast-7"},
+		{name: "Canada West (Calgary)", region: "Canada West (Calgary)", expected: "ca-west-1"},
+		{name: "Mexico (Central)", region: "Mexico (Central)", expected: "mx-central-1"},
 		{
 			name:     "Unknown region returns as-is",
 			region:   "Unknown Region",
@@ -565,5 +574,54 @@ func TestNormalizeRegionName(t *testing.T) {
 			result := normalizeRegionName(tt.region)
 			assert.Equal(t, tt.expected, result)
 		})
+	}
+}
+
+// TestNormalizeRegionName_NoCollisions walks the full alias map: every display
+// name resolves to its code, no two names share a code except the documented
+// EU/Europe prefix pairs, and the regions added from partitions.json are pinned.
+func TestNormalizeRegionName_NoCollisions(t *testing.T) {
+	t.Parallel()
+	euPairs := map[string]string{
+		"EU (Ireland)": "Europe (Ireland)", "EU (Frankfurt)": "Europe (Frankfurt)",
+		"EU (London)": "Europe (London)", "EU (Paris)": "Europe (Paris)",
+		"EU (Stockholm)": "Europe (Stockholm)",
+	}
+	byCode := map[string]string{}
+	for name, code := range regionAliases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, code, normalizeRegionName(name))
+			assert.NotEqual(t, name, code)
+		})
+		prev, dup := byCode[code]
+		if dup {
+			assert.True(t, euPairs[name] == prev || euPairs[prev] == name,
+				"%q and %q both map to %q", prev, name, code)
+		}
+		byCode[code] = name
+	}
+}
+
+// TestNormalizeRegionName_PartitionsJSONAliases pins the aliases taken from
+// aws-sdk-go-v2 internal/endpoints/awsrulesfn/partitions.json (v1.41.5).
+func TestNormalizeRegionName_PartitionsJSONAliases(t *testing.T) {
+	t.Parallel()
+	for name, code := range map[string]string{
+		"Asia Pacific (Taipei)":                  "ap-east-2",
+		"Asia Pacific (New Zealand)":             "ap-southeast-6",
+		"China (Beijing)":                        "cn-north-1",
+		"China (Ningxia)":                        "cn-northwest-1",
+		"AWS European Sovereign Cloud (Germany)": "eusc-de-east-1",
+		"US ISO East":                            "us-iso-east-1",
+		"US ISO WEST":                            "us-iso-west-1",
+		"US ISOB East (Ohio)":                    "us-isob-east-1",
+		"US ISOB West":                           "us-isob-west-1",
+		"EU ISOE West":                           "eu-isoe-west-1",
+		"US ISOF EAST":                           "us-isof-east-1",
+		"US ISOF SOUTH":                          "us-isof-south-1",
+		"AWS GovCloud (US-East)":                 "us-gov-east-1",
+		"AWS GovCloud (US-West)":                 "us-gov-west-1",
+	} {
+		assert.Equal(t, code, normalizeRegionName(name), name)
 	}
 }
