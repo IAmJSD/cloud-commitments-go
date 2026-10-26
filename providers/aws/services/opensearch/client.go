@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,12 +40,11 @@ type STSAPI interface {
 
 // Client handles AWS OpenSearch Reserved Instances.
 type Client struct {
-	client      API
-	stsClient   STSAPI
-	accountErr  error
-	accountID   string
-	region      string
-	accountOnce sync.Once
+	client    API
+	stsClient STSAPI
+	region    string
+	accountID string
+	accountMu sync.Mutex
 }
 
 // NewClient creates a new OpenSearch client with purchase-path retry/timeout
@@ -183,18 +183,7 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 	// identifier matching the Azure DisplayName format so operators can
 	// identify the reservation in the AWS console without cross-referencing
 	// CUDly's purchase audit log.
-	reservationName := common.IdempotentReservationID("opensearch-id-", opts.IdempotencyToken)
-	if reservationName == "" {
-		reservationName = common.BuildReservationName(common.ReservationNameFields{
-			Service:      "opensearch",
-			Region:       rec.Region,
-			ResourceType: rec.ResourceType,
-			Count:        rec.Count,
-			Term:         rec.Term,
-			Payment:      rec.PaymentOption,
-			Now:          time.Now(),
-		}, "opensearch-reserved-")
-	}
+	reservationName := reservationNameFor(rec, opts.IdempotencyToken)
 
 	// Idempotency dedupe guard (issue #641): short-circuit if a reservation with
 	// the derived name already exists; fail loud on lookup error.
@@ -206,6 +195,13 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		result.ExistingCommitment = true
 		result.CommitmentID = existingID
 		return result, nil
+	}
+
+	// After the dedupe: a re-drive that already bought must not be refused for a
+	// later price rise (ec2/client.go does the same).
+	if err = c.checkApprovedUpfront(ctx, rec, offeringID, instanceCount); err != nil {
+		result.Error = err
+		return result, result.Error
 	}
 
 	input := &opensearch.PurchaseReservedInstanceOfferingInput{
@@ -245,6 +241,61 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 	}
 
 	return result, nil
+}
+
+// reservationNameFor returns the ReservationName: derived from the idempotency
+// token when there is one, else the self-describing name (issue #687).
+func reservationNameFor(rec common.Recommendation, token string) string {
+	if name := common.IdempotentReservationID("opensearch-id-", token); name != "" {
+		return name
+	}
+	return common.BuildReservationName(common.ReservationNameFields{
+		Service:      "opensearch",
+		Region:       rec.Region,
+		ResourceType: rec.ResourceType,
+		Count:        rec.Count,
+		Term:         rec.Term,
+		Payment:      rec.PaymentOption,
+		Now:          time.Now(),
+	}, "opensearch-reserved-")
+}
+
+// checkApprovedUpfront refuses an offering whose total upfront (FixedPrice, per
+// instance, x count) exceeds the approved recommendation's upfront by more than
+// offeringprice.UpfrontTolerance, or whose price cannot be compared with it.
+// Mirrors rds.checkApprovedUpfront (same semantics; keep them in step). The
+// shared comparison is offeringprice.CheckUpfront. OpenSearch has no
+// server-side price cap, so this is the only guard. The offering is read back
+// by ID, and only when an upfront was approved: CommitmentCost 0 means no
+// upfront or no figure, so there is nothing to compare.
+func (c *Client) checkApprovedUpfront(ctx context.Context, rec common.Recommendation, offeringID string, count int32) error {
+	approved := rec.CommitmentCost
+	if offeringprice.NoUpfrontApproved(approved) {
+		return nil
+	}
+	if cur := rec.CommitmentCurrency; cur != "" && !strings.EqualFold(cur, "USD") {
+		return fmt.Errorf("OpenSearch recommendation upfront is in %s; the approved upfront check supports USD only", cur)
+	}
+	out, err := c.client.DescribeReservedInstanceOfferings(ctx, &opensearch.DescribeReservedInstanceOfferingsInput{
+		ReservedInstanceOfferingId: aws.String(offeringID),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to read OpenSearch offering %s for the approved upfront check: %w", offeringID, err)
+	}
+	if len(out.ReservedInstanceOfferings) != 1 {
+		return fmt.Errorf("OpenSearch offering %s: expected 1 offering for the approved upfront check, got %d", offeringID, len(out.ReservedInstanceOfferings))
+	}
+	offering := out.ReservedInstanceOfferings[0]
+	if offering.FixedPrice == nil {
+		return fmt.Errorf("OpenSearch offering %s has no FixedPrice; cannot compare it with the approved upfront %.2f", offeringID, approved)
+	}
+	if cc := aws.ToString(offering.CurrencyCode); cc != "" && !strings.EqualFold(cc, "USD") {
+		return fmt.Errorf("OpenSearch offering %s is priced in %s; the approved upfront check supports USD only", offeringID, cc)
+	}
+	if err := offeringprice.CheckUpfront("OpenSearch", *offering.FixedPrice*float64(count), approved); err != nil {
+		return fmt.Errorf("OpenSearch offering %s: %w", offeringID, err)
+	}
+	return nil
 }
 
 // maxReservationPages bounds the idempotency reservation scan.
@@ -306,22 +357,23 @@ func (c *Client) recoverAlreadyExists(ctx context.Context, token, reservationNam
 	})
 }
 
-// resolveAccountID fetches the caller's AWS account ID via STS and caches it.
+// resolveAccountID fetches the caller's AWS account ID via STS. Only a
+// successful lookup is cached, so a transient failure (throttle, timeout) is
+// retried on the next call instead of sticking for the client's lifetime.
 func (c *Client) resolveAccountID(ctx context.Context) (string, error) {
-	c.accountOnce.Do(func() {
-		if c.stsClient == nil {
-			return
-		}
-		out, err := c.stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
-		if err != nil {
-			c.accountErr = err
-			return
-		}
-		if out != nil && out.Account != nil {
-			c.accountID = *out.Account
-		}
-	})
-	return c.accountID, c.accountErr
+	c.accountMu.Lock()
+	defer c.accountMu.Unlock()
+	if c.accountID != "" || c.stsClient == nil {
+		return c.accountID, nil
+	}
+	out, err := c.stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return "", err
+	}
+	if out != nil && out.Account != nil {
+		c.accountID = *out.Account
+	}
+	return c.accountID, nil
 }
 
 // tagReservedInstance constructs the reserved-instance ARN and calls

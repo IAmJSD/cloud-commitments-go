@@ -135,3 +135,39 @@ func AssumedUSD(service, region string) (string, error) {
 	}
 	return "USD", nil
 }
+
+// UpfrontTolerance is the fraction by which a resolved offering's upfront may
+// exceed the approved recommendation's upfront before a purchase is refused.
+// It absorbs Cost Explorer rounding; anything beyond it means the offering was
+// repriced or a differently-priced variant matched, so the approval no longer
+// covers it.
+const UpfrontTolerance = 0.05
+
+// UpfrontCeiling is the most a purchase may charge upfront for an approved
+// upfront amount.
+func UpfrontCeiling(approved float64) float64 {
+	return approved * (1 + UpfrontTolerance)
+}
+
+// NoUpfrontApproved reports whether approved gives no ceiling to check: zero
+// or negative means a no-upfront option or a missing figure. NaN and +-Inf are
+// not "no figure" (a corrupt one), so they return false and CheckUpfront
+// refuses them.
+func NoUpfrontApproved(approved float64) bool {
+	return approved <= 0 && !math.IsInf(approved, -1)
+}
+
+// CheckUpfront fails when offeredTotal exceeds UpfrontCeiling(approved), both
+// compared in whole cents, and when approved is NaN or infinite (every
+// comparison against those is false, so they would pass). Callers skip the
+// call when NoUpfrontApproved(approved).
+func CheckUpfront(service string, offeredTotal, approved float64) error {
+	if math.IsNaN(approved) || math.IsInf(approved, 0) {
+		return fmt.Errorf("%s approved upfront %v is not a finite amount; refusing to purchase", service, approved)
+	}
+	if math.Round(offeredTotal*100) > math.Round(UpfrontCeiling(approved)*100) {
+		return fmt.Errorf("%s offering upfront %.2f exceeds the approved upfront %.2f by more than %.0f%%; refusing to purchase (re-approve at the current price)",
+			service, offeredTotal, approved, UpfrontTolerance*100)
+	}
+	return nil
+}

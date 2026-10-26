@@ -1,6 +1,7 @@
 package offeringprice
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -57,4 +58,32 @@ func TestCurrency(t *testing.T) {
 	assert.Equal(t, "USD", c)
 	_, err = AssumedUSD("S", "cn-north-1")
 	require.Error(t, err)
+}
+
+func TestCheckUpfront_BoundaryIsTheCeilingInCents(t *testing.T) {
+	t.Parallel()
+	require.NoError(t, CheckUpfront("EC2", 1050, 1000))
+	require.ErrorContains(t, CheckUpfront("EC2", 1050.01, 1000), "exceeds the approved upfront")
+	require.NoError(t, CheckUpfront("EC2", 0, 1000))
+}
+
+func TestCheckUpfront_RefusesNonFiniteApproved(t *testing.T) {
+	t.Parallel()
+	for _, svc := range []string{"EC2", "RDS", "MemoryDB", "OpenSearch", "Redshift"} {
+		for _, approved := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+			err := CheckUpfront(svc, 100, approved)
+			require.ErrorContains(t, err, svc, "%v", approved)
+			assert.ErrorContains(t, err, "not a finite amount", "%v", approved)
+		}
+	}
+}
+
+func TestNoUpfrontApproved(t *testing.T) {
+	t.Parallel()
+	assert.True(t, NoUpfrontApproved(0))
+	assert.True(t, NoUpfrontApproved(-5))
+	assert.False(t, NoUpfrontApproved(1))
+	assert.False(t, NoUpfrontApproved(math.NaN()))
+	assert.False(t, NoUpfrontApproved(math.Inf(1)))
+	assert.False(t, NoUpfrontApproved(math.Inf(-1)))
 }
