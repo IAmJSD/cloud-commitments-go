@@ -259,18 +259,12 @@ type coveringLister interface {
 
 var _ coveringLister = (*Client)(nil)
 
-// coveringView hands DuplicateChecker the covering list as its inventory, so
-// this test exercises the recfilter matching against the pinned pkg as well as
-// the workspace one, which picks GetCoveringCommitments up on its own.
-type coveringView struct{ *Client }
-
-func (v coveringView) GetExistingCommitments(ctx context.Context) ([]common.Commitment, error) {
-	return v.GetCoveringCommitments(ctx)
-}
-
 // A plan billed to sub-b and bought an hour ago, decoded by the real SDK pager
 // (#466): only sub-b owns it, but it suppresses sub-a's matching recommendation
-// unless its Single scope names another subscription.
+// unless its Single scope names another subscription. DuplicateChecker gets the
+// real Client, so it must find GetCoveringCommitments on its own; that only
+// holds when go.mod pins a pkg with the covering selector (#491), which a
+// standalone (GOWORK=off) run checks.
 func TestDuplicateChecker_PlanBilledToAnotherSubscription(t *testing.T) {
 	row := func(applied, props string) string {
 		return fmt.Sprintf(`{"id":"p1","name":"Compute","sku":{"name":"Compute_Savings_Plan"},"properties":{"billingScopeId":"/subscriptions/sub-b","appliedScopeType":%q,"appliedScopeProperties":%s,"provisioningState":"Succeeded","effectiveDateTime":%q}}`,
@@ -310,7 +304,7 @@ func TestDuplicateChecker_PlanBilledToAnotherSubscription(t *testing.T) {
 			assert.Equal(t, "sub-b", ownedB[0].Account)
 
 			recs := []common.Recommendation{{Provider: common.ProviderAzure, Service: common.ServiceSavingsPlansAll, ResourceType: "Compute", Count: 1}}
-			passed, filtered, err := recfilter.NewDuplicateChecker(24).AdjustRecommendationsForExisting(context.Background(), recs, coveringView{client("sub-a")})
+			passed, filtered, err := recfilter.NewDuplicateChecker(24).AdjustRecommendationsForExisting(context.Background(), recs, client("sub-a"))
 			require.NoError(t, err)
 			if tt.wantSuppress {
 				assert.Empty(t, passed)
