@@ -65,15 +65,15 @@ func minAllocatableGap() *big.Rat {
 // logs identify the source of each decision.
 //
 // Now must be set by the caller; Allocate never calls time.Now internally.
-type AllocationInput struct { //nolint:govet // fieldalignment: file owned by open PR #441
+type AllocationInput struct {
 	Now             time.Time
 	LayerStates     map[LayerType]LayerState
+	CommitmentRates map[LayerType]float64
 	Layers          []LayerSpec
 	DataSources     []string
+	InFlight        []InFlightTranche
 	Baseline        UsageBaseline
 	Config          LadderConfig
-	InFlight        []InFlightTranche
-	CommitmentRates map[LayerType]float64
 }
 
 // Allocation is a per-layer sizing decision produced by Allocate.

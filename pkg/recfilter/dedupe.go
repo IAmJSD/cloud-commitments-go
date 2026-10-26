@@ -27,9 +27,7 @@ type coveringCommitmentLister interface {
 }
 
 // DuplicateChecker checks for existing commitments to avoid duplicates.
-type DuplicateChecker struct { //nolint:govet // fieldalignment: file owned by open PR #491
-	LookbackHours int // How many hours to look back for recent purchases
-
+type DuplicateChecker struct {
 	// Logf receives the per-commitment decision trail. Nil is silent.
 	// recfilter never logs through a package-level logger: cmd's AppLogger
 	// writes to stdout, which the MCP server owns as its protocol transport.
@@ -37,6 +35,8 @@ type DuplicateChecker struct { //nolint:govet // fieldalignment: file owned by o
 
 	// now is a test seam; nil means time.Now.
 	now func() time.Time
+
+	LookbackHours int // How many hours to look back for recent purchases
 }
 
 // NewDuplicateChecker creates a new duplicate checker. Pass 0 to use the default lookback period.
