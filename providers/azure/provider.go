@@ -96,12 +96,11 @@ func (r *realCredentialProvider) NewDefaultAzureCredential() (azcore.TokenCreden
 // Provider implements the provider.Provider interface for Azure.
 type Provider struct {
 	cred                azcore.TokenCredential
-	credOnce            sync.Once
 	credErr             error
-	subscriptionID      string
-	region              string // Default region for operations
 	subscriptionsClient SubscriptionsClient
 	credProvider        CredentialProvider
+	subscriptionID      string
+	region              string // Default region for operations
 
 	// accountsMu guards cachedAccounts. GetAccounts, GetServiceClient, and
 	// GetRecommendationsClient all resolve the subscription list on the hot
@@ -121,10 +120,12 @@ type Provider struct {
 	// singleflight call and gates the cache write, so an ARM fetch that
 	// started before an invalidation can neither publish its stale snapshot
 	// nor be joined by a caller that arrived after it.
-	accountsMu     sync.RWMutex
+	accountsSF     singleflight.Group
 	cachedAccounts []common.Account
 	accountsGen    uint64
-	accountsSF     singleflight.Group
+	accountsMu     sync.RWMutex
+
+	credOnce sync.Once
 
 	// cache subsystem implementation (getOrFetchAccounts, fetchAccounts,
 	// cloneAccounts, InvalidateAccountsCache) lives in accounts_cache.go.
@@ -140,7 +141,7 @@ type Provider struct {
 // azcore.TokenCredential, it is installed directly so all downstream clients
 // use those credentials. Otherwise, GetCredentials lazily falls back to
 // DefaultAzureCredential.
-func NewAzureProvider(config *provider.ProviderConfig) (*Provider, error) {
+func NewAzureProvider(config *provider.Config) (*Provider, error) {
 	p := &Provider{}
 
 	if config != nil {
@@ -164,7 +165,7 @@ func NewAzureProvider(config *provider.ProviderConfig) (*Provider, error) {
 
 // resolveAzureSubscriptionID picks the subscription ID from the typed field,
 // falling back to the deprecated Profile field.
-func resolveAzureSubscriptionID(config *provider.ProviderConfig) string {
+func resolveAzureSubscriptionID(config *provider.Config) string {
 	if config.AzureSubscriptionID != "" {
 		return config.AzureSubscriptionID
 	}
@@ -366,7 +367,7 @@ func (p *Provider) ValidateCredentials(ctx context.Context) error {
 // GetAccounts returns all accessible Azure subscriptions.
 //
 // IsDefault is set to true for the subscription that matches (in priority order):
-//  1. The AzureSubscriptionID set in ProviderConfig (or the Profile fallback).
+//  1. The AzureSubscriptionID set in Config (or the Profile fallback).
 //  2. The AZURE_SUBSCRIPTION_ID environment variable.
 //  3. The sole subscription, when exactly one is visible (mirrors AWS behavior
 //     where the STS-identified account is always the default).
@@ -380,7 +381,7 @@ func (p *Provider) GetAccounts(ctx context.Context) ([]common.Account, error) {
 // configuredSubscriptionTarget returns the subscription this provider was
 // explicitly told to operate on, together with a label naming the knob it came
 // from so an error can tell the operator what to fix. It mirrors
-// resolveDefaultSubscription's priority: the ProviderConfig field first (which
+// resolveDefaultSubscription's priority: the Config field first (which
 // resolveAzureSubscriptionID may itself have taken from the deprecated Profile
 // overload, hence the generic label), then AZURE_SUBSCRIPTION_ID. Both return
 // values are empty when nothing was configured.
@@ -718,7 +719,7 @@ func (p *Provider) GetRecommendationsClientForAccount(ctx context.Context, subsc
 
 // Register the Azure provider with the global registry.
 func init() {
-	if err := provider.RegisterProvider("azure", func(config *provider.ProviderConfig) (provider.Provider, error) {
+	if err := provider.RegisterProvider("azure", func(config *provider.Config) (provider.Provider, error) {
 		return NewAzureProvider(config)
 	}); err != nil {
 		panic("failed to register Azure provider: " + err.Error())

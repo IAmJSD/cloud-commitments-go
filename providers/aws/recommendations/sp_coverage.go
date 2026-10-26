@@ -375,19 +375,9 @@ func (c *Client) GetSPCoverageSummary(ctx context.Context, region string, lookba
 // fetchSPCoveragePage calls GetSavingsPlansCoverage with rate-limit retry.
 // Mirrors fetchCoveragePage in coverage.go so both paths back off consistently.
 func (c *Client) fetchSPCoveragePage(ctx context.Context, input *costexplorer.GetSavingsPlansCoverageInput) (*costexplorer.GetSavingsPlansCoverageOutput, error) {
-	rateLimiter := c.rateLimiter.newOperation()
-	for {
-		if waitErr := rateLimiter.Wait(ctx); waitErr != nil {
-			return nil, fmt.Errorf("rate limiter wait failed: %w", waitErr)
-		}
-		result, err := c.costExplorerClient.GetSavingsPlansCoverage(ctx, input)
-		if !rateLimiter.ShouldRetry(err) {
-			if err != nil {
-				return nil, fmt.Errorf("failed to get SP coverage: %w", err)
-			}
-			return result, nil
-		}
-	}
+	return fetchWithRetry(ctx, c.rateLimiter, "failed to get SP coverage", func() (*costexplorer.GetSavingsPlansCoverageOutput, error) {
+		return c.costExplorerClient.GetSavingsPlansCoverage(ctx, input)
+	})
 }
 
 // GetSPUtilization fetches Savings Plans utilization for one plan type over
@@ -464,19 +454,9 @@ func (c *Client) GetSPUtilization(ctx context.Context, planType types.SupportedS
 // fetchSPUtilizationPage calls GetSavingsPlansUtilization with rate-limit retry.
 // Mirrors fetchUtilizationPage in utilization.go so both paths back off consistently.
 func (c *Client) fetchSPUtilizationPage(ctx context.Context, input *costexplorer.GetSavingsPlansUtilizationInput) (*costexplorer.GetSavingsPlansUtilizationOutput, error) {
-	rateLimiter := c.rateLimiter.newOperation()
-	for {
-		if waitErr := rateLimiter.Wait(ctx); waitErr != nil {
-			return nil, fmt.Errorf("rate limiter wait failed: %w", waitErr)
-		}
-		result, err := c.costExplorerClient.GetSavingsPlansUtilization(ctx, input)
-		if !rateLimiter.ShouldRetry(err) {
-			if err != nil {
-				return nil, fmt.Errorf("failed to get SP utilization: %w", err)
-			}
-			return result, nil
-		}
-	}
+	return fetchWithRetry(ctx, c.rateLimiter, "failed to get SP utilization", func() (*costexplorer.GetSavingsPlansUtilizationOutput, error) {
+		return c.costExplorerClient.GetSavingsPlansUtilization(ctx, input)
+	})
 }
 
 // buildSPUtilizationSummary converts a CE GetSavingsPlansUtilization response

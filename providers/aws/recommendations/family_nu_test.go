@@ -14,6 +14,7 @@ import (
 // sizes plus the unknown-size fallback (returns 0 so callers know to skip
 // family-NU sizing for that rec).
 func TestRdsInstanceNUFromType(t *testing.T) {
+	t.Parallel()
 	cases := map[string]float64{
 		"db.r7g.large":    4,
 		"db.r6g.2xlarge":  16,
@@ -21,6 +22,7 @@ func TestRdsInstanceNUFromType(t *testing.T) {
 		"db.t4g.micro":    0.5,
 		"db.r6g.16xlarge": 128,
 		"db.r6g.24xlarge": 192,
+		"db.r6g.6xlarge":  48,
 		"db.r6g.unknown":  0, // fallback
 		"not-an-rds-type": 0, // too few dots
 		"":                0,
@@ -35,6 +37,7 @@ func TestRdsInstanceNUFromType(t *testing.T) {
 // TestRdsFamilyFromType locks the family-prefix extraction so all sizes
 // in the same family share a lookup key.
 func TestRdsFamilyFromType(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		"db.r7g.large":   "db.r7g",
 		"db.r7g.2xlarge": "db.r7g",
@@ -56,6 +59,7 @@ func TestRdsFamilyFromType(t *testing.T) {
 // sum-of-(avg × size_NU × pct/100) for CoveredNU. Mirrors the manual
 // family-level table that proved size flex was implicit in AWS rec API.
 func TestAggregateRDSFamilyCoverage(t *testing.T) {
+	t.Parallel()
 	// Family: us-east-1 / db.r7g / Aurora MySQL / Single-AZ
 	// Two sizes contributing:
 	//   db.r7g.large  avg=40.6 cov=58%  → 162.4 NU running, 94.2 NU covered
@@ -100,6 +104,7 @@ func TestAggregateRDSFamilyCoverage(t *testing.T) {
 //  3. AWS rec over-recommends → scale < 1, counts shrink
 //  4. Family already at target → all recs dropped
 func TestApplyFamilyNUSizingRDS(t *testing.T) {
+	t.Parallel()
 	t.Run("AWS rec NU matches target → counts unchanged", func(t *testing.T) {
 		// Family db.r7g Aurora MySQL us-east-1:
 		// TotalNU = 40.6*4 + 3.9*8 = 193.6; CoveredNU = 162.4*0.58 = 94.2
@@ -412,6 +417,7 @@ func TestApplyFamilyNUSizingRDS(t *testing.T) {
 // sizing — must reject SP/non-RDS commitments so they reach per-pool
 // sizing untouched.
 func TestIsRDSRIRec(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		rec  common.Recommendation

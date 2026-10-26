@@ -3,9 +3,7 @@ package cache
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/consumption/armconsumption"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/redis/armredis/v3"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/reservations/armreservations"
@@ -23,6 +20,7 @@ import (
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/httpclient"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/pricing"
 	azrecs "github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/recommendations"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/slot"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/services/internal/reservations"
 )
 
@@ -71,8 +69,6 @@ type RedisCachesPager interface {
 // Client handles Azure Cache for Redis Reserved Capacity.
 type Client struct {
 	cred                 azcore.TokenCredential
-	subscriptionID       string
-	region               string
 	httpClient           HTTPClient
 	recommendationsPager RecommendationsPager
 	reservationsPager    ReservationsDetailsPager
@@ -85,8 +81,19 @@ type Client struct {
 	// GetRecommendations run hit the in-memory map. A failed fetch leaves
 	// skuCacheMap nil and converters fall back to Shards=0 with a WARN
 	// log — the conversion itself does NOT fail.
+	skuCacheMap map[string]redisSKUEntry
+
+	subscriptionID string
+	region         string
+
+	// Lazy SKU catalog cache. armredis exposes no per-region "list all
+	// possible SKUs" surface, so we derive shard counts from the existing
+	// caches in the subscription (NewListBySubscriptionPager). Fetched
+	// ONCE per client lifetime; subsequent converter calls in the same
+	// GetRecommendations run hit the in-memory map. A failed fetch leaves
+	// skuCacheMap nil and converters fall back to Shards=0 with a WARN
+	// log — the conversion itself does NOT fail.
 	skuCacheOnce sync.Once
-	skuCacheMap  map[string]redisSKUEntry
 }
 
 // NewClient creates a new Azure Cache client.
@@ -100,10 +107,14 @@ func NewClient(cred azcore.TokenCredential, subscriptionID, region string) *Clie
 }
 
 // NewClientWithHTTP creates a new Azure Cache client with a custom HTTP client (for testing).
-// httpClient is used as-is and bypasses the SSRF dial guard of
-// httpclient.New(): metadata, NAT64/6to4 and unspecified addresses are
+// When httpClient is nil, the SSRF-hardened httpclient.New() is used so the nil
+// fallback also blocks IMDS connections. A non-nil httpClient is used as-is and
+// bypasses that guard: metadata, NAT64/6to4 and unspecified addresses are
 // dialable unless the caller's client blocks them itself.
 func NewClientWithHTTP(cred azcore.TokenCredential, subscriptionID, region string, httpClient HTTPClient) *Client {
+	if httpClient == nil {
+		httpClient = httpclient.New()
+	}
 	return &Client{
 		cred:           cred,
 		subscriptionID: subscriptionID,
@@ -175,7 +186,7 @@ func (c *Client) GetRecommendations(ctx context.Context, _ *common.Recommendatio
 		if pageIdx >= maxRecsPages {
 			return nil, fmt.Errorf("cache: GetRecommendations pagination cap (%d pages) reached", maxRecsPages)
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get Redis Cache recommendations: %w", err)
 		}
@@ -246,7 +257,7 @@ func (c *Client) collectRedisReservations(ctx context.Context, pager Reservation
 		if pageIdx >= maxReservationsPages {
 			return nil, fmt.Errorf("cache: GetExistingCommitments pagination cap (%d pages) reached", maxReservationsPages)
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			return nil, fmt.Errorf("cache: list reservations: %w", err)
 		}
@@ -314,6 +325,10 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		result.Error = fmt.Errorf("purchase source is required for Azure reservation purchases")
 		return result, result.Error
 	}
+	if strings.TrimSpace(rec.ResourceType) == "" {
+		result.Error = fmt.Errorf("resource type is required")
+		return result, result.Error
+	}
 	if rec.Count <= 0 {
 		result.Error = fmt.Errorf("quantity must be greater than zero, got %d", rec.Count)
 		return result, result.Error
@@ -324,8 +339,7 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		result.Error = termErr
 		return result, result.Error
 	}
-	term, termEnumErr := reservations.ReservationTermForYears(termYears)
-	if termEnumErr != nil {
+	if _, termEnumErr := reservations.ReservationTermForYears(termYears); termEnumErr != nil {
 		result.Error = termEnumErr
 		return result, result.Error
 	}
@@ -335,47 +349,26 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		return result, result.Error
 	}
 
-	requestBody := map[string]interface{}{
-		"sku": map[string]string{
-			"name": rec.ResourceType,
-		},
-		"location": c.region,
-		"properties": map[string]interface{}{
-			"reservedResourceType": string(armreservations.ReservedResourceTypeRedisCache),
-			"billingScopeId":       fmt.Sprintf("/subscriptions/%s", c.subscriptionID),
-			"billingPlan":          string(billingPlan),
-			"term":                 string(term),
-			"quantity":             rec.Count,
-			"displayName": reservations.BuildDisplayName(reservations.DisplayNameFields{
+	bodyBytes, err := reservations.BuildPurchaseBody(reservations.PurchaseParams{
+		ReservedResourceType: string(armreservations.ReservedResourceTypeRedisCache),
+		DisplayName: func(r common.Recommendation) string {
+			return reservations.BuildDisplayName(reservations.DisplayNameFields{
 				Service:      "redis",
 				Region:       c.region,
-				ResourceType: rec.ResourceType,
-				Count:        rec.Count,
-				Term:         rec.Term,
-				Payment:      rec.PaymentOption,
+				ResourceType: r.ResourceType,
+				Count:        r.Count,
+				Term:         r.Term,
+				Payment:      r.PaymentOption,
 				Now:          time.Now(),
-			}),
-			"appliedScopeType": string(armreservations.AppliedScopeTypeShared),
-			"renew":            false,
+			})
 		},
-	}
-	reservations.ApplyPurchaseTags(requestBody, opts.Source, opts.IdempotencyToken)
-
-	bodyBytes, err := json.Marshal(requestBody)
+	}, rec, opts, c.region, c.subscriptionID, billingPlan)
 	if err != nil {
 		result.Error = fmt.Errorf("failed to marshal request: %w", err)
 		return result, result.Error
 	}
 
-	token, err := c.cred.GetToken(ctx, policy.TokenRequestOptions{
-		Scopes: []string{"https://management.azure.com/.default"},
-	})
-	if err != nil {
-		result.Error = fmt.Errorf("failed to get access token: %w", err)
-		return result, result.Error
-	}
-
-	reservationOrderID, existing, err := reservations.DoIdempotentPurchaseTwoStep(ctx, c.httpClient, reservations.CalculatePriceURL(), bodyBytes, token.Token, opts.IdempotencyToken)
+	reservationOrderID, existing, err := reservations.Submit(ctx, c.cred, c.httpClient, bodyBytes, opts)
 	if err != nil {
 		result.Error = err
 		return result, result.Error
@@ -485,8 +478,9 @@ func (c *Client) createRedisCachesPager() (RedisCachesPager, error) {
 }
 
 // collectSKUsFromCaches collects SKUs from existing Redis caches.
-// Returns (nil, err) on context cancellation so callers can propagate the error
-// instead of silently using a partial result set.
+// Returns (nil, err) on context cancellation or when the page cap is reached
+// so callers can propagate the error instead of silently using a partial
+// result set.
 func (c *Client) collectSKUsFromCaches(ctx context.Context, pager RedisCachesPager) (map[string]bool, error) {
 	skuSet := make(map[string]bool)
 
@@ -495,10 +489,9 @@ func (c *Client) collectSKUsFromCaches(ctx context.Context, pager RedisCachesPag
 			return nil, fmt.Errorf("cache: GetValidResourceTypes context canceled after %d pages: %w", pageIdx, err)
 		}
 		if pageIdx >= maxCachesPages {
-			log.Printf("WARNING: cache: GetValidResourceTypes pagination cap (%d pages) reached", maxCachesPages)
-			break
+			return nil, fmt.Errorf("cache: GetValidResourceTypes pagination cap (%d pages) reached", maxCachesPages)
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			// If we can't list existing caches, fall back to known SKU families
 			break
@@ -556,11 +549,9 @@ func (c *Client) getCommonSKUs() []string {
 
 // RedisPricing contains pricing information for Redis Cache.
 type RedisPricing struct {
-	HourlyRate        float64
-	ReservationPrice  float64
-	OnDemandPrice     float64
-	Currency          string
-	SavingsPercentage float64
+	Currency         string
+	HourlyRate       float64
+	ReservationPrice float64
 }
 
 func (c *Client) getRedisPricing(ctx context.Context, sku, region string, termYears int) (*RedisPricing, error) {
@@ -568,8 +559,16 @@ func (c *Client) getRedisPricing(ctx context.Context, sku, region string, termYe
 	if err != nil {
 		return nil, err
 	}
-	filter := fmt.Sprintf("serviceName eq 'Redis Cache' and armRegionName eq '%s' and armSkuName eq '%s' and priceType eq 'Reservation'",
-		strings.ReplaceAll(region, "'", "''"), identity.ArmSKUName)
+	qRegion, err := pricing.ODataString(region)
+	if err != nil {
+		return nil, err
+	}
+	qSKU, err := pricing.ODataString(identity.ArmSKUName)
+	if err != nil {
+		return nil, err
+	}
+	filter := fmt.Sprintf("serviceName eq 'Redis Cache' and armRegionName eq %s and armSkuName eq %s and priceType eq 'Reservation'",
+		qRegion, qSKU)
 
 	params := url.Values{}
 	params.Add("$filter", filter)
@@ -590,7 +589,7 @@ func (c *Client) getRedisPricing(ctx context.Context, sku, region string, termYe
 		return nil, err
 	}
 	return &RedisPricing{
-		HourlyRate:       selected.RetailPrice / (8760 * float64(termYears)),
+		HourlyRate:       selected.RetailPrice / (common.HoursPerYear * float64(termYears)),
 		ReservationPrice: selected.RetailPrice,
 		Currency:         selected.CurrencyCode,
 	}, nil
@@ -683,7 +682,7 @@ func (c *Client) fetchSKUCatalogue(ctx context.Context) map[string]redisSKUEntry
 			logging.Warnf("azure cache: SKU catalog pagination cap (%d pages) reached for region %s; partial cache (%d entries) discarded, Details.Shards left at 0", maxCachesPages, c.region, len(out))
 			return nil
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			logging.Warnf("azure cache: SKU catalog page fetch failed for region %s: %v — partial cache (%d entries) discarded, Details.Shards left at 0", c.region, err, len(out))
 			return nil

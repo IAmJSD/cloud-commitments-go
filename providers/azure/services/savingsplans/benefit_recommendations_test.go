@@ -2,6 +2,7 @@ package savingsplans
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/recommendations"
 )
 
 type fakeCred struct{ err error }
@@ -50,9 +52,16 @@ func benefitRow(term string, mutate func(string) string) string {
 	return row
 }
 
+func TestHoursPerMonthIs730(t *testing.T) {
+	t.Parallel()
+	assert.InDelta(t, 730.0, float64(hoursPerMonth), 0)
+	assert.InDelta(t, 8760.0, float64(hoursPerMonth)*12, 0)
+}
+
 func newTestClient(h HTTPClient) *Client { return NewClientWithHTTP(fakeCred{}, "sub-1", "", h) }
 
 func TestGetRecommendations_MapsRow(t *testing.T) {
+	t.Parallel()
 	h := &routeHTTP{reply: func(*http.Request) (int, string) {
 		return 200, `{"value":[` + benefitRow("P1Y", nil) + `]}`
 	}}
@@ -80,6 +89,7 @@ func TestGetRecommendations_MapsRow(t *testing.T) {
 }
 
 func TestGetRecommendations_EmptyTermRequestsBoth(t *testing.T) {
+	t.Parallel()
 	h := &routeHTTP{reply: func(r *http.Request) (int, string) {
 		term := "P1Y"
 		if strings.Contains(r.URL.RawQuery, "P3Y") || strings.Contains(r.URL.Query().Get("$filter"), "P3Y") {
@@ -96,6 +106,7 @@ func TestGetRecommendations_EmptyTermRequestsBoth(t *testing.T) {
 }
 
 func TestGetRecommendations_EmptyValue(t *testing.T) {
+	t.Parallel()
 	h := &routeHTTP{reply: func(*http.Request) (int, string) { return 200, `{"value":[]}` }}
 	recs, err := newTestClient(h).GetRecommendations(context.Background(), &common.RecommendationParams{Term: "3yr"})
 	require.NoError(t, err)
@@ -103,6 +114,7 @@ func TestGetRecommendations_EmptyValue(t *testing.T) {
 }
 
 func TestGetRecommendations_Pagination(t *testing.T) {
+	t.Parallel()
 	next := "https://management.azure.com/next?page=2"
 	h := &routeHTTP{reply: func(r *http.Request) (int, string) {
 		if r.URL.Query().Get("page") == "2" {
@@ -116,6 +128,7 @@ func TestGetRecommendations_Pagination(t *testing.T) {
 }
 
 func TestGetRecommendations_RejectsForeignNextLink(t *testing.T) {
+	t.Parallel()
 	h := &routeHTTP{reply: func(*http.Request) (int, string) {
 		return 200, `{"value":[],"nextLink":"https://evil.example/steal"}`
 	}}
@@ -125,6 +138,7 @@ func TestGetRecommendations_RejectsForeignNextLink(t *testing.T) {
 }
 
 func TestGetRecommendations_RejectsHTTPNextLink(t *testing.T) {
+	t.Parallel()
 	h := &routeHTTP{reply: func(*http.Request) (int, string) {
 		return 200, `{"value":[],"nextLink":"http://management.azure.com/next"}`
 	}}
@@ -134,6 +148,7 @@ func TestGetRecommendations_RejectsHTTPNextLink(t *testing.T) {
 }
 
 func TestGetRecommendations_Errors(t *testing.T) {
+	t.Parallel()
 	ok := func(*http.Request) (int, string) { return 200, `{"value":[` + benefitRow("P1Y", nil) + `]}` }
 	cases := []struct {
 		name   string
@@ -176,21 +191,74 @@ func TestGetRecommendations_Errors(t *testing.T) {
 }
 
 func TestGetRecommendations_NoCredential(t *testing.T) {
+	t.Parallel()
 	_, err := NewClient(nil, "sub", "").GetRecommendations(context.Background(), &common.RecommendationParams{})
 	require.Error(t, err)
 }
 
 func TestBenefitRecsURL_PathAndQuery(t *testing.T) {
+	t.Parallel()
 	u, err := url.Parse(newTestClient(nil).benefitRecsURL("P3Y", ""))
 	require.NoError(t, err)
 	assert.Equal(t, "/subscriptions/sub-1/providers/Microsoft.CostManagement/benefitRecommendations", u.Path)
 }
 
 func TestGetRecommendations_PageCapIsAnError(t *testing.T) {
+	t.Parallel()
 	h := &routeHTTP{reply: func(*http.Request) (int, string) {
 		return 200, `{"value":[],"nextLink":"https://management.azure.com/loop"}`
 	}}
 	_, err := newTestClient(h).GetRecommendations(context.Background(), &common.RecommendationParams{Term: "3yr"})
 	require.Error(t, err)
 	assert.Len(t, h.reqs, benefitRecsMaxPages)
+}
+
+func TestGetRecommendations_NonUSDRowIsSkippedAndSurfaced(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		currency string
+		wantSkip bool
+	}{
+		{"USD kept", "USD", false},
+		{"EUR skipped", "EUR", true},
+		{"GBP skipped", "GBP", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := benefitRow("P1Y", func(s string) string {
+				s = strings.Replace(s, `"USD"`, `"`+tc.currency+`"`, 1)
+				return strings.Replace(s, "r-P1Y", "r-bad", 1)
+			})
+			good := benefitRow("P1Y", func(s string) string { return strings.Replace(s, "r-P1Y", "r-good", 1) })
+			h := &routeHTTP{reply: func(*http.Request) (int, string) {
+				return 200, `{"value":[` + bad + `,` + good + `]}`
+			}}
+			ctx, skips := recommendations.WithSkipLog(context.Background())
+			recs, err := newTestClient(h).GetRecommendations(ctx, &common.RecommendationParams{Term: "1yr"})
+			require.NoError(t, err)
+			if !tc.wantSkip {
+				assert.Len(t, recs, 2)
+				assert.Empty(t, skips.Entries())
+				return
+			}
+			require.Len(t, recs, 1)
+			assert.Contains(t, recs[0].SourceRecommendation, "r-good")
+			entries := skips.Entries()
+			require.Len(t, entries, 1)
+			assert.Contains(t, entries[0], "savingsplans")
+			assert.Contains(t, entries[0], "r-bad")
+			assert.Contains(t, entries[0], tc.currency)
+			assert.Contains(t, entries[0], recommendations.ErrNotUSD.Error())
+		})
+	}
+}
+
+func TestConvertBenefitRecommendation_NonUSDWrapsSentinel(t *testing.T) {
+	t.Parallel()
+	var row benefitRecommendation
+	require.NoError(t, json.Unmarshal([]byte(strings.Replace(benefitRow("P1Y", nil), `"USD"`, `"EUR"`, 1)), &row))
+	rec, err := convertBenefitRecommendation(&row, "sub-1")
+	assert.Nil(t, rec)
+	assert.ErrorIs(t, err, recommendations.ErrNotUSD)
 }

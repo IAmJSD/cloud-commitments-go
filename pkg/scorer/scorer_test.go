@@ -1,6 +1,7 @@
 package scorer
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -69,6 +70,20 @@ func TestScore_MinCount(t *testing.T) {
 	assert.Len(t, result.Passed, 1)
 	assert.Equal(t, "c5.large", result.Passed[0].ResourceType)
 	assert.Contains(t, result.Filtered[0].FilterReason, "count 2")
+}
+
+func TestScore_MinCount_SavingsPlanExempt(t *testing.T) {
+	t.Parallel()
+	sp := rec(common.ServiceSavingsPlansCompute, "us-east-1", "compute-sp", 10.0, 100.0, 1000.0, 1, 0)
+	sp.CommitmentType = common.CommitmentSavingsPlan
+	ri := rec(common.ServiceEC2, "us-east-1", "m5.large", 10.0, 100.0, 1000.0, 1, 0)
+	ri.CommitmentType = common.CommitmentReservedInstance
+	result := Score([]common.Recommendation{sp, ri}, Config{MinCount: 5})
+	assert.Len(t, result.Passed, 1)
+	assert.Equal(t, "compute-sp", result.Passed[0].ResourceType)
+	assert.Len(t, result.Filtered, 1)
+	assert.Equal(t, "m5.large", result.Filtered[0].Recommendation.ResourceType)
+	assert.Contains(t, result.Filtered[0].FilterReason, "count 1 below minimum 5")
 }
 
 func TestScore_EnabledServices(t *testing.T) {
@@ -209,5 +224,61 @@ func TestScore_MaxBreakEvenMonths_PriceUnknown(t *testing.T) {
 		if p.ResourceType != "r5.large" {
 			assert.Zero(t, p.BreakEvenMonths, "unknown or zero break-even is never surfaced")
 		}
+	}
+}
+
+func TestScore_MinSavingsPctSet(t *testing.T) {
+	t.Parallel()
+	recs := []common.Recommendation{
+		rec(common.ServiceEC2, "us-east-1", "neg", -12.0, -100.0, 3000.0, 1, 0),
+		rec(common.ServiceEC2, "us-east-1", "zero", 0.0, 0.0, 3000.0, 1, 0),
+		rec(common.ServiceEC2, "us-east-1", "low", 3.2, 100.0, 3000.0, 1, 0),
+		rec(common.ServiceRDS, "us-east-1", "high", 20.0, 500.0, 2500.0, 1, 0),
+	}
+	tests := []struct {
+		name string
+		cfg  Config
+		want []string
+	}{
+		{"unset zero is no filter", Config{}, []string{"high", "low", "zero", "neg"}},
+		{"set to 0 is a floor at 0", Config{MinSavingsPctSet: true}, []string{"high", "low", "zero"}},
+		{"set to 5 filters at 5", Config{MinSavingsPct: 5, MinSavingsPctSet: true}, []string{"high"}},
+		{"positive without set is unchanged", Config{MinSavingsPct: 5}, []string{"high"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got []string
+			for _, r := range Score(recs, tt.cfg).Passed {
+				got = append(got, r.ResourceType)
+			}
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestConfig_Validate(t *testing.T) {
+	t.Parallel()
+	for _, v := range []float64{0, 5, 100} {
+		assert.NoError(t, Config{MinSavingsPct: v, MinSavingsPctSet: true}.Validate(), "%v", v)
+	}
+	const negative, nonFinite = "min_savings_pct must be ≥ 0", "min_savings_pct must be a finite number"
+	for v, want := range map[float64]string{
+		-1: negative, math.NaN(): nonFinite, math.Inf(1): nonFinite, math.Inf(-1): nonFinite,
+	} {
+		assert.EqualError(t, Config{MinSavingsPct: v, MinSavingsPctSet: true}.Validate(), want, "%v", v)
+	}
+}
+
+func TestScore_MinSavingsPct_NonFiniteFailsClosed(t *testing.T) {
+	t.Parallel()
+	recs := []common.Recommendation{
+		rec(common.ServiceEC2, "us-east-1", "a", 30.0, 100.0, 3000.0, 1, 0),
+		rec(common.ServiceRDS, "us-east-1", "b", 99.0, 500.0, 2500.0, 1, 0),
+	}
+	for _, v := range []float64{math.NaN(), math.Inf(1)} {
+		result := Score(recs, Config{MinSavingsPct: v, MinSavingsPctSet: true})
+		assert.Empty(t, result.Passed, "%v", v)
+		assert.Len(t, result.Filtered, 2, "%v", v)
 	}
 }

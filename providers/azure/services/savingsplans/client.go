@@ -18,6 +18,7 @@ import (
 	"github.com/LeanerCloud/cloud-commitments-go/pkg/common"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/httpclient"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/pricing"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/slot"
 )
 
 // SavingsPlanOrderAliasAPI defines operations on SavingsPlanOrderAlias (enables mocking).
@@ -61,7 +62,7 @@ type HTTPClient interface {
 }
 
 // Client handles Azure Savings Plans.
-type Client struct {
+type Client struct { //nolint:govet // fieldalignment: file owned by open PR #491
 	cred           azcore.TokenCredential
 	subscriptionID string
 	region         string
@@ -164,7 +165,7 @@ func (c *Client) GetExistingCommitments(ctx context.Context) ([]common.Commitmen
 		if pageIndex > maxSavingsPlanPages {
 			return nil, fmt.Errorf("failed to list savings plans: pagination cap (%d pages) reached", maxSavingsPlanPages)
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			return nil, fmt.Errorf("failed to list savings plans: %w", err)
 		}
@@ -627,9 +628,13 @@ func (c *Client) GetOfferingDetails(ctx context.Context, rec common.Recommendati
 // Returns an error when no price record is found rather than (0, nil), which would
 // conflate "zero rate" with "not found" (feedback_nullable_not_zero).
 func (c *Client) fetchOnDemandRate(ctx context.Context, planType string) (float64, error) {
+	qPlan, err := pricing.ODataString(planType)
+	if err != nil {
+		return 0, err
+	}
 	filter := fmt.Sprintf(
-		"serviceFamily eq 'Compute' and priceType eq 'Consumption' and armSkuName eq '%s'",
-		planType,
+		"serviceFamily eq 'Compute' and priceType eq 'Consumption' and armSkuName eq %s",
+		qPlan,
 	)
 	params := url.Values{}
 	params.Add("$filter", filter)

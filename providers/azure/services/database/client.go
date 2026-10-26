@@ -3,7 +3,6 @@ package database
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -12,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/consumption/armconsumption"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/reservations/armreservations"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/sql/armsql"
@@ -22,6 +20,7 @@ import (
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/httpclient"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/pricing"
 	azrecs "github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/recommendations"
+	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/internal/slot"
 	"github.com/LeanerCloud/cloud-commitments-go/providers/azure/services/internal/reservations"
 )
 
@@ -86,9 +85,15 @@ type SQLManagedInstancesPager interface {
 
 // Client handles Azure SQL Database Reserved Capacity.
 type Client struct {
+	// Lazy server-info cache. Populated by fetchServerInfo, which walks the
+	// managed-instances and servers pagers. Both azConfig and deployment are
+	// derived in a single pass so the injected test pager is consumed once.
+	// Only a complete walk is cached (serverInfoLoaded); a failed or
+	// canceled walk is retried, but not before serverInfoRetryAfter so a
+	// persistently failing subscription is not re-walked per recommendation.
+	serverInfoRetryAfter time.Time
+
 	cred                  azcore.TokenCredential
-	subscriptionID        string
-	region                string
 	httpClient            HTTPClient
 	recommendationsPager  RecommendationsPager
 	reservationsPager     ReservationsDetailsPager
@@ -101,17 +106,41 @@ type Client struct {
 	// call — single ListByLocation per region instead of N+1 per rec.
 	// A failed fetch leaves skuCacheMap nil; converters then fall back
 	// to empty EngineVersion with a one-time WARN log.
-	skuCacheOnce sync.Once
-	skuCacheMap  map[string]sqlSKUEntry
+	skuCacheMap map[string]sqlSKUEntry
 
-	// Lazy server-info cache. Populated once by fetchServerInfo, which
-	// walks the managed-instances and servers pagers. Both azConfig and
-	// deployment are derived in a single pass so the injected test pager
-	// is consumed exactly once. Mirrors the cosmosdb cachedAPIType pattern.
-	serverInfoOnce sync.Once
-	azConfig       string
-	deployment     string
+	subscriptionID string
+	region         string
+
+	// Lazy server-info cache. Populated by fetchServerInfo, which walks the
+	// managed-instances and servers pagers. Both azConfig and deployment are
+	// derived in a single pass so the injected test pager is consumed once.
+	// Only a complete walk is cached (serverInfoLoaded); a failed or
+	// canceled walk is retried, but not before serverInfoRetryAfter so a
+	// persistently failing subscription is not re-walked per recommendation.
+	azConfig             string
+	deployment           string
+	serverInfoRetryDelay time.Duration
+
+	// Lazy SKU catalog cache. Populated once on the first
+	// recommendation conversion in this client's GetRecommendations
+	// call — single ListByLocation per region instead of N+1 per rec.
+	// A failed fetch leaves skuCacheMap nil; converters then fall back
+	// to empty EngineVersion with a one-time WARN log.
+	skuCacheOnce sync.Once
+
+	// Lazy server-info cache. Populated by fetchServerInfo, which walks the
+	// managed-instances and servers pagers. Both azConfig and deployment are
+	// derived in a single pass so the injected test pager is consumed once.
+	// Only a complete walk is cached (serverInfoLoaded); a failed or
+	// canceled walk is retried, but not before serverInfoRetryAfter so a
+	// persistently failing subscription is not re-walked per recommendation.
+	serverInfoMu     sync.Mutex
+	serverInfoLoaded bool
 }
+
+// serverInfoRetryDelayDefault is the minimum wait before re-walking the
+// server pagers after an incomplete walk.
+const serverInfoRetryDelayDefault = 30 * time.Second
 
 // NewClient creates a new Azure Database client.
 func NewClient(cred azcore.TokenCredential, subscriptionID, region string) *Client {
@@ -124,10 +153,14 @@ func NewClient(cred azcore.TokenCredential, subscriptionID, region string) *Clie
 }
 
 // NewClientWithHTTP creates a new Azure Database client with a custom HTTP client (for testing).
-// httpClient is used as-is and bypasses the SSRF dial guard of
-// httpclient.New(): metadata, NAT64/6to4 and unspecified addresses are
+// When httpClient is nil, the SSRF-hardened httpclient.New() is used so the nil
+// fallback also blocks IMDS connections. A non-nil httpClient is used as-is and
+// bypasses that guard: metadata, NAT64/6to4 and unspecified addresses are
 // dialable unless the caller's client blocks them itself.
 func NewClientWithHTTP(cred azcore.TokenCredential, subscriptionID, region string, httpClient HTTPClient) *Client {
+	if httpClient == nil {
+		httpClient = httpclient.New()
+	}
 	return &Client{
 		cred:           cred,
 		subscriptionID: subscriptionID,
@@ -209,7 +242,7 @@ func (c *Client) GetRecommendations(ctx context.Context, _ *common.Recommendatio
 		if pageIdx >= maxRecsPages {
 			return nil, fmt.Errorf("database: GetRecommendations pagination cap (%d pages) reached", maxRecsPages)
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get SQL recommendations: %w", err)
 		}
@@ -280,7 +313,7 @@ func (c *Client) collectSQLReservations(ctx context.Context, pager ReservationsD
 		if pageIdx >= maxReservationsPages {
 			return nil, fmt.Errorf("database: GetExistingCommitments pagination cap (%d pages) reached", maxReservationsPages)
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			return nil, fmt.Errorf("database: list reservations: %w", err)
 		}
@@ -347,6 +380,10 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		result.Error = fmt.Errorf("purchase source is required for Azure reservation purchases")
 		return result, result.Error
 	}
+	if strings.TrimSpace(rec.ResourceType) == "" {
+		result.Error = fmt.Errorf("resource type is required")
+		return result, result.Error
+	}
 	if rec.Count <= 0 {
 		result.Error = fmt.Errorf("quantity must be greater than zero, got %d", rec.Count)
 		return result, result.Error
@@ -357,8 +394,7 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		result.Error = termErr
 		return result, result.Error
 	}
-	term, termEnumErr := reservations.ReservationTermForYears(termYears)
-	if termEnumErr != nil {
+	if _, termEnumErr := reservations.ReservationTermForYears(termYears); termEnumErr != nil {
 		result.Error = termEnumErr
 		return result, result.Error
 	}
@@ -368,47 +404,26 @@ func (c *Client) PurchaseCommitment(ctx context.Context, rec common.Recommendati
 		return result, result.Error
 	}
 
-	requestBody := map[string]interface{}{
-		"sku": map[string]string{
-			"name": rec.ResourceType,
-		},
-		"location": c.region,
-		"properties": map[string]interface{}{
-			"reservedResourceType": string(armreservations.ReservedResourceTypeSQLDatabases),
-			"billingScopeId":       fmt.Sprintf("/subscriptions/%s", c.subscriptionID),
-			"billingPlan":          string(billingPlan),
-			"term":                 string(term),
-			"quantity":             rec.Count,
-			"displayName": reservations.BuildDisplayName(reservations.DisplayNameFields{
+	bodyBytes, err := reservations.BuildPurchaseBody(reservations.PurchaseParams{
+		ReservedResourceType: string(armreservations.ReservedResourceTypeSQLDatabases),
+		DisplayName: func(r common.Recommendation) string {
+			return reservations.BuildDisplayName(reservations.DisplayNameFields{
 				Service:      "sql",
 				Region:       c.region,
-				ResourceType: rec.ResourceType,
-				Count:        rec.Count,
-				Term:         rec.Term,
-				Payment:      rec.PaymentOption,
+				ResourceType: r.ResourceType,
+				Count:        r.Count,
+				Term:         r.Term,
+				Payment:      r.PaymentOption,
 				Now:          time.Now(),
-			}),
-			"appliedScopeType": string(armreservations.AppliedScopeTypeShared),
-			"renew":            false,
+			})
 		},
-	}
-	reservations.ApplyPurchaseTags(requestBody, opts.Source, opts.IdempotencyToken)
-
-	bodyBytes, err := json.Marshal(requestBody)
+	}, rec, opts, c.region, c.subscriptionID, billingPlan)
 	if err != nil {
 		result.Error = fmt.Errorf("failed to marshal request: %w", err)
 		return result, result.Error
 	}
 
-	token, err := c.cred.GetToken(ctx, policy.TokenRequestOptions{
-		Scopes: []string{"https://management.azure.com/.default"},
-	})
-	if err != nil {
-		result.Error = fmt.Errorf("failed to get access token: %w", err)
-		return result, result.Error
-	}
-
-	reservationOrderID, existing, err := reservations.DoIdempotentPurchaseTwoStep(ctx, c.httpClient, reservations.CalculatePriceURL(), bodyBytes, token.Token, opts.IdempotencyToken)
+	reservationOrderID, existing, err := reservations.Submit(ctx, c.cred, c.httpClient, bodyBytes, opts)
 	if err != nil {
 		result.Error = err
 		return result, result.Error
@@ -487,8 +502,10 @@ func (c *Client) GetValidResourceTypes(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 
-	capabilities, err := capClient.ListByLocation(ctx, c.region, &armsql.CapabilitiesClientListByLocationOptions{
-		Include: nil,
+	capabilities, err := slot.Do(ctx, func() (armsql.CapabilitiesClientListByLocationResponse, error) {
+		return capClient.ListByLocation(ctx, c.region, &armsql.CapabilitiesClientListByLocationOptions{
+			Include: nil,
+		})
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list SQL capabilities: %w", err)
@@ -574,17 +591,23 @@ func (c *Client) extractManagedInstanceSKUs(capabilities armsql.LocationCapabili
 
 // SQLPricing contains pricing information for SQL Database.
 type SQLPricing struct {
-	HourlyRate        float64
-	ReservationPrice  float64
-	OnDemandPrice     float64
-	Currency          string
-	SavingsPercentage float64
+	Currency         string
+	HourlyRate       float64
+	ReservationPrice float64
 }
 
 // getSQLPricing gets real pricing from Azure Retail Prices API.
 func (c *Client) getSQLPricing(ctx context.Context, sku, region string, termYears int) (*SQLPricing, error) {
-	filter := fmt.Sprintf("serviceName eq 'SQL Database' and armRegionName eq '%s' and armSkuName eq '%s' and priceType eq 'Reservation'",
-		strings.ReplaceAll(region, "'", "''"), strings.ReplaceAll(sku, "'", "''"))
+	qRegion, err := pricing.ODataString(region)
+	if err != nil {
+		return nil, err
+	}
+	qSKU, err := pricing.ODataString(sku)
+	if err != nil {
+		return nil, err
+	}
+	filter := fmt.Sprintf("serviceName eq 'SQL Database' and armRegionName eq %s and armSkuName eq %s and priceType eq 'Reservation'",
+		qRegion, qSKU)
 
 	priceData, err := c.fetchAzurePricing(ctx, filter)
 	if err != nil {
@@ -603,7 +626,7 @@ func (c *Client) getSQLPricing(ctx context.Context, sku, region string, termYear
 	}
 
 	return &SQLPricing{
-		HourlyRate:       reservation.RetailPrice / (8760.0 * float64(termYears)),
+		HourlyRate:       reservation.RetailPrice / (common.HoursPerYear * float64(termYears)),
 		ReservationPrice: reservation.RetailPrice,
 		Currency:         reservation.CurrencyCode,
 	}, nil
@@ -700,7 +723,9 @@ func (c *Client) fetchSKUCatalogue(ctx context.Context) map[string]sqlSKUEntry {
 		logging.Warnf("azure database: SKU catalog capabilities client create failed for region %s: %v — Details.EngineVersion left empty", c.region, err)
 		return nil
 	}
-	resp, err := capClient.ListByLocation(ctx, c.region, &armsql.CapabilitiesClientListByLocationOptions{Include: nil})
+	resp, err := slot.Do(ctx, func() (armsql.CapabilitiesClientListByLocationResponse, error) {
+		return capClient.ListByLocation(ctx, c.region, &armsql.CapabilitiesClientListByLocationOptions{Include: nil})
+	})
 	if err != nil {
 		logging.Warnf("azure database: SKU catalog ListByLocation failed for region %s: %v — Details.EngineVersion left empty", c.region, err)
 		return nil
@@ -748,13 +773,11 @@ func populateSQLSKUMapFromVersion(out map[string]sqlSKUEntry, engineVersion stri
 // exist, or the fetch fails.
 //
 // Both AZConfig and Deployment are populated by a single
-// fetchServerInfo call gated by serverInfoOnce; there is no double walk.
+// fetchServerInfo call cached by serverInfo; there is no double walk.
 // This ensures the injected test pager is consumed exactly once.
 func (c *Client) cachedDominantAZConfig(ctx context.Context) string {
-	c.serverInfoOnce.Do(func() {
-		c.azConfig, c.deployment = c.fetchServerInfo(ctx)
-	})
-	return c.azConfig
+	az, _ := c.serverInfo(ctx)
+	return az
 }
 
 // cachedDominantDeployment returns the dominant Deployment observed
@@ -762,10 +785,40 @@ func (c *Client) cachedDominantAZConfig(ctx context.Context) string {
 // unavailable. Values: "managed" / "single". Shares the single
 // fetchServerInfo walk with cachedDominantAZConfig.
 func (c *Client) cachedDominantDeployment(ctx context.Context) string {
-	c.serverInfoOnce.Do(func() {
-		c.azConfig, c.deployment = c.fetchServerInfo(ctx)
-	})
-	return c.deployment
+	_, dep := c.serverInfo(ctx)
+	return dep
+}
+
+// serverInfo returns the cached AZConfig/Deployment, walking the pagers when
+// no complete walk has been cached. A complete walk is cached even when its
+// answer is empty (no servers, or a mixed fleet): that is a real answer. An
+// incomplete walk (page error, cancellation, page cap) returns empty without
+// caching, and further walks are suppressed until serverInfoRetryAfter.
+func (c *Client) serverInfo(ctx context.Context) (azConfig, deployment string) {
+	c.serverInfoMu.Lock()
+	defer c.serverInfoMu.Unlock()
+	if c.serverInfoLoaded {
+		return c.azConfig, c.deployment
+	}
+	if time.Now().Before(c.serverInfoRetryAfter) {
+		return "", ""
+	}
+	az, dep, complete := c.fetchServerInfo(ctx)
+	if !complete {
+		if ctx.Err() != nil {
+			// The caller's own cancellation says nothing about the
+			// subscription; do not penalize other callers.
+			return "", ""
+		}
+		delay := c.serverInfoRetryDelay
+		if delay == 0 {
+			delay = serverInfoRetryDelayDefault
+		}
+		c.serverInfoRetryAfter = time.Now().Add(delay)
+		return "", ""
+	}
+	c.azConfig, c.deployment, c.serverInfoLoaded = az, dep, true
+	return az, dep
 }
 
 // fetchServerInfo performs a single walk of each pager (managed
@@ -776,14 +829,16 @@ func (c *Client) cachedDominantDeployment(ctx context.Context) string {
 //
 // AZConfig: "zoneRedundant" / "none" / "" (ambiguous or no signal).
 // Deployment: "managed" / "single" / "" (mixed or no signal).
-func (c *Client) fetchServerInfo(ctx context.Context) (azConfig, deployment string) {
+// complete is false when either walk ended early; the empty values then mean
+// "unknown" and must not be cached.
+func (c *Client) fetchServerInfo(ctx context.Context) (azConfig, deployment string, complete bool) {
 	zoneRedundantCount, nonZoneRedundantCount, managedCount, complete := c.walkManagedInstances(ctx)
 	if !complete {
-		return "", ""
+		return "", "", false
 	}
 	hasServers, serversComplete := c.hasRegularServers(ctx)
 	if !serversComplete {
-		return "", ""
+		return "", "", false
 	}
 
 	// Derive AZConfig from zone-redundancy counts.
@@ -810,7 +865,7 @@ func (c *Client) fetchServerInfo(ctx context.Context) (azConfig, deployment stri
 		deployment = ""
 	}
 
-	return azConfig, deployment
+	return azConfig, deployment, true
 }
 
 // walkManagedInstances walks the managed-instances pager once and
@@ -832,7 +887,7 @@ func (c *Client) walkManagedInstances(ctx context.Context) (zoneRedundant, nonZo
 			logging.Warnf("azure database: managed instances pagination cap (%d pages) reached; AZConfig/Deployment signal unavailable", maxSQLListPages)
 			return zoneRedundant, nonZoneRedundant, total, false
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			if ctx.Err() != nil {
 				return zoneRedundant, nonZoneRedundant, total, false
@@ -896,7 +951,7 @@ func (c *Client) hasRegularServers(ctx context.Context) (found, complete bool) {
 			logging.Warnf("azure database: servers pagination cap (%d pages) reached; Deployment signal unavailable", maxSQLListPages)
 			return false, false
 		}
-		page, err := pager.NextPage(ctx)
+		page, err := slot.NextPage(ctx, pager)
 		if err != nil {
 			if ctx.Err() != nil {
 				return false, false

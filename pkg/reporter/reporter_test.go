@@ -14,6 +14,7 @@ func makeResult(passed []common.Recommendation, filtered []scorer.FilteredRecomm
 }
 
 func TestRenderTable_ColumnCount(t *testing.T) {
+	t.Parallel()
 	result := makeResult([]common.Recommendation{
 		{Provider: "aws", AccountName: "prod", Region: "us-east-1", Service: "ec2",
 			ResourceType: "m5.large", Term: "1yr", Count: 3,
@@ -31,6 +32,7 @@ func TestRenderTable_ColumnCount(t *testing.T) {
 }
 
 func TestRenderTable_Empty(t *testing.T) {
+	t.Parallel()
 	result := makeResult(nil, nil)
 	output := RenderTable(result)
 	assert.NotEmpty(t, output)
@@ -38,6 +40,7 @@ func TestRenderTable_Empty(t *testing.T) {
 }
 
 func TestRenderTable_ContainsData(t *testing.T) {
+	t.Parallel()
 	result := makeResult([]common.Recommendation{
 		{Provider: "aws", Region: "eu-west-1", Service: "rds", ResourceType: "db.r5.large",
 			Count: 2, EstimatedSavings: 300.0, SavingsPercentage: 20.0},
@@ -48,12 +51,14 @@ func TestRenderTable_ContainsData(t *testing.T) {
 }
 
 func TestRenderExcluded_Empty(t *testing.T) {
+	t.Parallel()
 	result := makeResult(nil, nil)
 	output := RenderExcluded(result)
 	assert.Empty(t, output)
 }
 
 func TestRenderExcluded_ContainsReason(t *testing.T) {
+	t.Parallel()
 	result := makeResult(nil, []scorer.FilteredRecommendation{
 		{
 			Recommendation: common.Recommendation{Provider: "aws", Service: "ec2", ResourceType: "m5.large"},
@@ -66,6 +71,7 @@ func TestRenderExcluded_ContainsReason(t *testing.T) {
 }
 
 func TestRenderSummary_Totals(t *testing.T) {
+	t.Parallel()
 	result := makeResult([]common.Recommendation{
 		{EstimatedSavings: 300.0, CommitmentCost: 900.0},
 		{EstimatedSavings: 200.0, CommitmentCost: 600.0},
@@ -76,6 +82,7 @@ func TestRenderSummary_Totals(t *testing.T) {
 }
 
 func TestRenderSummary_WithFiltered(t *testing.T) {
+	t.Parallel()
 	result := makeResult(
 		[]common.Recommendation{{EstimatedSavings: 100.0, CommitmentCost: 500.0}},
 		[]scorer.FilteredRecommendation{
@@ -87,7 +94,27 @@ func TestRenderSummary_WithFiltered(t *testing.T) {
 	assert.Contains(t, output, "Filtered: 2")
 }
 
+func TestRenderSummary_FilteredReasonsSorted(t *testing.T) {
+	t.Parallel()
+	result := makeResult(
+		[]common.Recommendation{{EstimatedSavings: 100.0, CommitmentCost: 500.0}},
+		[]scorer.FilteredRecommendation{
+			{FilterReason: "term 3yr not allowed"},
+			{FilterReason: "savings 2.0% below minimum 5.0%"},
+			{FilterReason: "count 2 below minimum 5"},
+			{FilterReason: "savings 1.0% below minimum 5.0%"},
+			{FilterReason: "payback 18.0 months exceeds maximum"},
+		},
+	)
+	// Map iteration order is random per range, so render repeatedly.
+	for i := 0; i < 20; i++ {
+		output := RenderSummary(result)
+		assert.Contains(t, output, "Filtered: 5 recommendations (count: 1, payback: 1, savings: 2, term: 1)\n")
+	}
+}
+
 func TestRenderTable_RecurringMonthlyCost(t *testing.T) {
+	t.Parallel()
 	recurring := 1968.81
 	zero := 0.0
 	rows := []common.Recommendation{

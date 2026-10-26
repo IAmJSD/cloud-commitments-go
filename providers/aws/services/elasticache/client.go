@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -70,7 +72,13 @@ func (c *Client) GetExistingCommitments(ctx context.Context) ([]common.Commitmen
 	commitments := make([]common.Commitment, 0)
 	var marker *string
 
-	for {
+	for page := 0; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if page >= maxListPages {
+			return nil, fmt.Errorf("pagination cap reached after %d pages for ElastiCache reserved cache nodes (issue #561)", maxListPages)
+		}
 		input := &elasticache.DescribeReservedCacheNodesInput{
 			Marker:     marker,
 			MaxRecords: aws.Int32(100),
@@ -256,6 +264,12 @@ func (c *Client) recoverAlreadyExists(ctx context.Context, token, reservationID 
 // of timing out the Lambda budget (issue #688).
 const maxOfferingPages = 5
 
+// maxListPages bounds the full-list scans (existing commitments and the
+// valid-resource-types sweep). At 100 per page this is far above any real
+// account; hitting it means a token cycle or runaway API, so the scan fails
+// loud instead of looping or returning a partial list (issue #561).
+const maxListPages = 50
+
 // findOfferingID finds the appropriate Reserved Cache Node offering ID.
 // execID is the purchase execution UUID for log correlation; pass "" when
 // calling outside of a purchase flow (ValidateOffering, GetOfferingDetails).
@@ -268,21 +282,25 @@ func (c *Client) findOfferingID(ctx context.Context, rec common.Recommendation, 
 	if err != nil {
 		return "", err
 	}
-	return c.paginateElastiCacheOfferings(ctx, rec, details, offeringType, execID)
+	engine := strings.ToLower(strings.TrimSpace(details.Engine))
+	if engine == "" {
+		return "", fmt.Errorf("ElastiCache recommendation for %s has no engine (Cost Explorer omitted ProductDescription); refusing to guess between redis, valkey and memcached", rec.ResourceType)
+	}
+	return c.paginateElastiCacheOfferings(ctx, rec, engine, offeringType, execID)
 }
 
 // paginateElastiCacheOfferings walks DescribeReservedCacheNodesOfferings pages and returns
 // the first matching offering ID. It caps at maxOfferingPages to prevent Lambda
 // timeout exhaustion (issue #688).
-func (c *Client) paginateElastiCacheOfferings(ctx context.Context, rec common.Recommendation, details *common.CacheDetails, offeringType, execID string) (string, error) {
-	duration, err := c.getDurationString(rec.Term)
+func (c *Client) paginateElastiCacheOfferings(ctx context.Context, rec common.Recommendation, engine, offeringType, execID string) (string, error) {
+	duration, wantSeconds, err := c.getDurationSeconds(rec.Term)
 	if err != nil {
 		return "", err
 	}
 	tag := purchasecfg.ResolveTag(execID)
 	t0 := time.Now()
 	log.Printf("purchase[%s]: ElastiCache findOfferingID starting (nodeType=%s engine=%s duration=%s payment=%s)",
-		tag, rec.ResourceType, details.Engine, duration, offeringType)
+		tag, rec.ResourceType, engine, duration, offeringType)
 
 	var marker *string
 	page := 0
@@ -293,11 +311,11 @@ func (c *Client) paginateElastiCacheOfferings(ctx context.Context, rec common.Re
 		page++
 		if page > maxOfferingPages {
 			return "", fmt.Errorf("pagination cap reached after %d pages for ElastiCache %s %s %s (issue #688)",
-				maxOfferingPages, rec.ResourceType, details.Engine, rec.PaymentOption)
+				maxOfferingPages, rec.ResourceType, engine, rec.PaymentOption)
 		}
 		input := &elasticache.DescribeReservedCacheNodesOfferingsInput{
 			CacheNodeType:      aws.String(rec.ResourceType),
-			ProductDescription: aws.String(details.Engine),
+			ProductDescription: aws.String(engine),
 			Duration:           aws.String(duration),
 			OfferingType:       aws.String(offeringType),
 			MaxRecords:         aws.Int32(100),
@@ -312,7 +330,7 @@ func (c *Client) paginateElastiCacheOfferings(ctx context.Context, rec common.Re
 		}
 		log.Printf("purchase[%s]: ElastiCache findOfferingID page %d: %d offerings in %s",
 			tag, page, len(result.ReservedCacheNodesOfferings), time.Since(pageStart))
-		if id, scanErr := scanElastiCacheOfferingPage(result.ReservedCacheNodesOfferings, rec, offeringType); scanErr != nil {
+		if id, scanErr := scanElastiCacheOfferingPage(result.ReservedCacheNodesOfferings, rec, offeringType, engine, wantSeconds); scanErr != nil {
 			return "", scanErr
 		} else if id != "" {
 			log.Printf("purchase[%s]: ElastiCache findOfferingID found match on page %d after %s total",
@@ -327,26 +345,36 @@ func (c *Client) paginateElastiCacheOfferings(ctx context.Context, rec common.Re
 	log.Printf("purchase[%s]: ElastiCache findOfferingID exhausted %d page(s) in %s -- no match",
 		tag, page, time.Since(t0))
 	return "", fmt.Errorf("no offerings found for ElastiCache %s %s %s after %d page(s) (issue #688)",
-		rec.ResourceType, details.Engine, rec.PaymentOption, page)
+		rec.ResourceType, engine, rec.PaymentOption, page)
 }
 
 // scanElastiCacheOfferingPage finds a matching offering in a single page of results.
 // Returns ("", nil) when no match is found on the page so the caller can continue paginating.
-func scanElastiCacheOfferingPage(offerings []types.ReservedCacheNodesOffering, rec common.Recommendation, wantType string) (string, error) {
+func scanElastiCacheOfferingPage(offerings []types.ReservedCacheNodesOffering, rec common.Recommendation, wantType, wantEngine string, wantSeconds int32) (string, error) {
 	if len(offerings) == 0 {
 		return "", nil
 	}
 	// The DescribeReservedCacheNodesOfferings call already filters server-side
-	// by offering type, so only the first result is examined; a mismatch here
-	// indicates an AWS API-side anomaly worth a hard error, not a scan target.
+	// by node type, engine, duration and offering type, so only the first
+	// result is examined; a mismatch on any of them indicates an AWS API-side
+	// anomaly worth a hard error, not a scan target.
 	o := &offerings[0]
+	id := aws.ToString(o.ReservedCacheNodesOfferingId)
 	got := aws.ToString(o.OfferingType)
 	if got != wantType {
 		return "", fmt.Errorf("ElastiCache offering %s has payment option %q, want %q (rec: %s %s) -- API filter mismatch",
-			aws.ToString(o.ReservedCacheNodesOfferingId), got, wantType,
-			rec.ResourceType, rec.PaymentOption)
+			id, got, wantType, rec.ResourceType, rec.PaymentOption)
 	}
-	return aws.ToString(o.ReservedCacheNodesOfferingId), nil
+	if gotNode := aws.ToString(o.CacheNodeType); gotNode != rec.ResourceType {
+		return "", fmt.Errorf("ElastiCache offering %s has node type %q, want %q -- API filter mismatch", id, gotNode, rec.ResourceType)
+	}
+	if gotSeconds := aws.ToInt32(o.Duration); gotSeconds != wantSeconds {
+		return "", fmt.Errorf("ElastiCache offering %s has duration %ds, want %ds -- API filter mismatch", id, gotSeconds, wantSeconds)
+	}
+	if gotEngine := aws.ToString(o.ProductDescription); !strings.EqualFold(gotEngine, wantEngine) {
+		return "", fmt.Errorf("ElastiCache offering %s has engine %q, want %q -- API filter mismatch", id, gotEngine, wantEngine)
+	}
+	return id, nil
 }
 
 // ValidateOffering checks if an offering exists without purchasing.
@@ -417,7 +445,13 @@ func (c *Client) GetValidResourceTypes(ctx context.Context) ([]string, error) {
 	instanceTypesMap := make(map[string]bool)
 	var marker *string
 
-	for {
+	for page := 0; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if page >= maxListPages {
+			return nil, fmt.Errorf("pagination cap reached after %d pages for ElastiCache offerings (issue #561)", maxListPages)
+		}
 		input := &elasticache.DescribeReservedCacheNodesOfferingsInput{
 			Marker:     marker,
 			MaxRecords: aws.Int32(100),
@@ -462,6 +496,20 @@ const (
 // service name for the error message.
 func (c *Client) getDurationString(term string) (string, error) {
 	return purchasecfg.DurationSecondsString(term, "ElastiCache")
+}
+
+// getDurationSeconds returns the request's duration string and the same value
+// as the int32 an offering reports.
+func (c *Client) getDurationSeconds(term string) (duration string, seconds int32, err error) {
+	duration, err = c.getDurationString(term)
+	if err != nil {
+		return "", 0, err
+	}
+	parsed, err := strconv.ParseInt(duration, 10, 32)
+	if err != nil {
+		return "", 0, fmt.Errorf("ElastiCache duration %q is not a number of seconds: %w", duration, err)
+	}
+	return duration, int32(parsed), nil
 }
 
 // convertPaymentOption converts payment option to AWS string.
