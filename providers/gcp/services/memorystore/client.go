@@ -4,6 +4,7 @@ package memorystore
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"cloud.google.com/go/recommender/apiv1/recommenderpb"
@@ -143,10 +144,8 @@ func (c *Client) ValidateOffering(ctx context.Context, rec common.Recommendation
 		return fmt.Errorf("failed to get valid tiers: %w", err)
 	}
 
-	for _, tier := range validTiers {
-		if tier == rec.ResourceType {
-			return nil
-		}
+	if slices.Contains(validTiers, rec.ResourceType) {
+		return nil
 	}
 
 	return fmt.Errorf("invalid Memorystore tier: %s", rec.ResourceType)
@@ -164,31 +163,8 @@ func (c *Client) GetOfferingDetails(ctx context.Context, rec common.Recommendati
 		return nil, fmt.Errorf("failed to get pricing: %w", err)
 	}
 
-	var upfrontCost, recurringCost float64
-	totalCost := pricing.CommitmentPrice
-
-	switch rec.PaymentOption {
-	case "all-upfront", "upfront":
-		upfrontCost = totalCost
-		recurringCost = 0
-	case "monthly", "no-upfront":
-		upfrontCost = 0
-		recurringCost = totalCost / (float64(termYears) * 12)
-	default:
-		upfrontCost = totalCost
-	}
-
-	return &common.OfferingDetails{
-		OfferingID:          fmt.Sprintf("gcp-memorystore-%s-%s-%s", rec.ResourceType, c.region, rec.Term),
-		ResourceType:        rec.ResourceType,
-		Term:                rec.Term,
-		PaymentOption:       rec.PaymentOption,
-		UpfrontCost:         upfrontCost,
-		RecurringCost:       recurringCost,
-		TotalCost:           totalCost,
-		EffectiveHourlyRate: pricing.HourlyRate,
-		Currency:            pricing.Currency,
-	}, nil
+	offeringID := fmt.Sprintf("gcp-memorystore-%s-%s-%s", rec.ResourceType, c.region, rec.Term)
+	return skumatch.OfferingDetails(rec, offeringID, termYears, pricing.CommitmentPrice, pricing.HourlyRate, pricing.Currency), nil
 }
 
 // GetValidResourceTypes returns valid Memorystore tiers.
@@ -229,26 +205,17 @@ func (c *Client) getRedisPricing(ctx context.Context, tier, region string, termY
 	if err != nil {
 		return nil, err
 	}
-	if onDemandPrice <= 0 {
-		return nil, fmt.Errorf("no pricing found for Memorystore tier %s", tier)
+	prices, err := skumatch.ScaleToTerm("Memorystore tier "+tier, region, onDemandPrice, commitmentPrice, termYears)
+	if err != nil {
+		return nil, err
 	}
-	if commitmentPrice <= 0 {
-		return nil, fmt.Errorf("no commitment pricing found for Memorystore tier %s in region %s: catalog has no CUD SKU; cannot compute savings percentage", tier, region)
-	}
-
-	hoursInTerm := common.HoursPerYear * float64(termYears)
-	// Scale the per-hour commitment price to a term total so it is on the
-	// same basis as onDemandPrice * hoursInTerm. Without this, the savings
-	// percentage would be nearly 100% (per-hour price vs term total).
-	commitmentPriceTerm := commitmentPrice * hoursInTerm
-	savingsPercentage := skumatch.SavingsPercent(onDemandPrice, hoursInTerm, commitmentPriceTerm)
 
 	return &RedisPricing{
-		HourlyRate:        commitmentPrice,
-		CommitmentPrice:   commitmentPriceTerm,
-		OnDemandPrice:     onDemandPrice * hoursInTerm,
+		HourlyRate:        prices.HourlyRate,
+		CommitmentPrice:   prices.CommitmentPrice,
+		OnDemandPrice:     prices.OnDemandPrice,
 		Currency:          currency,
-		SavingsPercentage: savingsPercentage,
+		SavingsPercentage: prices.SavingsPercentage,
 	}, nil
 }
 
